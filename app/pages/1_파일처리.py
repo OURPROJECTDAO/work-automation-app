@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import streamlit as st
 import pandas as pd
 import core.workflows.openmarket_merge  # noqa: F401  ← @register 트리거
+import core.workflows.onnuri_order      # noqa: F401  ← @register 트리거
 from core.workflows.registry import list_workflows, get_workflow
 
 st.title("📂 파일 처리")
