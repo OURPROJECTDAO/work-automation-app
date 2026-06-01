@@ -6,13 +6,22 @@
   '주소' 자체가 키워드로 포함됨. '(상세주소 없음)' 등에 매칭 → 재현 필수.
 - FasterCopyRows: 도서산간아님 예외 로직 없음 (해당 시트는 미사용).
 - SortColumnBDescending: xlPinYin 정렬 → Python sort(ascending=False)로 근사.
+- HighlightColumnC: ColorIndex 36(연노랑 #FFFF99) ↔ 35(연초록 #CCFFCC) 교대.
 """
 from pathlib import Path
 import pandas as pd
+import openpyxl
+from openpyxl.styles import PatternFill
 from core.base import Workflow, Step, WorkflowContext, normalize_kr
 from core.workflows.registry import register
 
 REF_DIR = Path(__file__).parent.parent.parent / "reference"
+
+# VBA ColorIndex → HEX (엑셀 56색 팔레트)
+_COLOR_HEX = {
+    36: "FFFF99",  # 연노랑
+    35: "CCFFCC",  # 연초록
+}
 
 
 class StepLoadInput(Step):
@@ -50,24 +59,26 @@ class StepSortByAddress(Step):
 
 
 class StepColorGroups(Step):
-    """3. 합포확인 색상 구분 (VBA: HighlightColumnC, color 36↔35).
-    DataFrame 내용은 변경 없음 — ctx.meta에 색상 정보만 저장.
+    """3. 합포확인 색상 구분 (VBA: HighlightColumnC).
+
+    같은 주소 그룹마다 ColorIndex 36(연노랑) ↔ 35(연초록) 교대.
+    ctx.meta['hapo_colors'] = {row_idx: color_index} 로 저장.
+    실제 셀 색칠은 _save() 에서 수행.
     """
     name = "합포_색상"
-    COLORS = [36, 35]  # VBA colorIndex: 36=연노랑, 35=연주황
 
     def run(self, ctx: WorkflowContext) -> None:
         df = ctx.sheets['합포확인']
-        colors = {}
-        color_idx = 0
+        colors: dict[int, int] = {}
+        ci = 36          # VBA 초기값
         prev_addr = None
         for i, row in df.iterrows():
             addr = row['주소']
             if addr != prev_addr:
                 if prev_addr is not None:
-                    color_idx = 1 - color_idx
+                    ci = 35 if ci == 36 else 36
                 prev_addr = addr
-            colors[i] = self.COLORS[color_idx]
+            colors[i] = ci
         ctx.meta['hapo_colors'] = colors
 
 
@@ -88,21 +99,13 @@ class StepFilterProducts(Step):
 class StepDosanCheck(Step):
     """도서산간리스트 주소 매칭 → 지역확인 (VBA: FasterCopyRows).
 
-    VBA 재현 포인트:
-      ListData = ListSheet.Range("B1:B" & LastRowList)  ← 헤더(B1='주소')부터 읽음
-      → '주소' 키워드가 포함되어 '상세주소 없음', '주소아과' 등에 매칭됨.
-      도서산간아님 예외 처리 없음 (VBA에 미구현).
+    VBA 재현: B1(헤더='주소')부터 읽으므로 '주소' 키워드 포함.
     """
     name = "도서산간_확인"
     def run(self, ctx: WorkflowContext) -> None:
         from core.io_excel import load_csv_ref
-        import openpyxl
-
         df = ctx.sheets['송장출력']
-
-        # VBA 재현: B1(헤더='주소')부터 읽으므로 '주소'도 키워드에 포함
         ds = load_csv_ref(REF_DIR / 'dosan_list.csv')
-        # '주소' 헤더 포함 (VBA B1 read 재현)
         ds_kw = ['주소'] + [normalize_kr(k) for k in ds['주소'].tolist() if k.strip()]
 
         def is_dosan(addr):
@@ -128,6 +131,8 @@ class StepUndeliveredCheck(Step):
         ctx.sheets['미배송지역확인'] = df[df['주소'].apply(is_mb)].copy().reset_index(drop=True)
 
 
+# ── 워크플로우 ────────────────────────────────────────────────────────────────
+
 @register
 class OpenmarketMergeWorkflow(Workflow):
     name = "오픈마켓_합포도서산간확인"
@@ -146,3 +151,36 @@ class OpenmarketMergeWorkflow(Workflow):
         from core.io_excel import detect_and_load_input
         df = detect_and_load_input(path)
         return {'송장출력': df}
+
+    def _save(self, ctx: WorkflowContext) -> Path:
+        """기본 저장 후, 합포확인 시트에 그룹 색상 적용."""
+        from core.io_excel import save_sheets
+        out = ctx.output_dir / f"{self.name}_결과.xlsx"
+        save_sheets(out, {k: ctx.sheets[k] for k in self.output_sheets if k in ctx.sheets})
+
+        # 합포확인 색상 적용
+        colors: dict = ctx.meta.get('hapo_colors', {})
+        if colors:
+            _apply_hapo_colors(out, '합포확인', colors)
+
+        return out
+
+
+def _apply_hapo_colors(xlsx_path: Path, sheet_name: str, colors: dict) -> None:
+    """합포확인 시트 행별 배경색 적용.
+
+    colors: {row_idx(0-based): color_index(35 or 36)}
+    Excel 행번호 = row_idx + 2  (1행=헤더, 2행~=데이터)
+    """
+    wb = openpyxl.load_workbook(xlsx_path)
+    ws = wb[sheet_name]
+    n_cols = ws.max_column
+
+    for row_idx, ci in colors.items():
+        hex_color = _COLOR_HEX.get(ci, "FFFFFF")
+        fill = PatternFill(start_color=hex_color, end_color=hex_color, fill_type="solid")
+        excel_row = row_idx + 2   # 헤더(1행) + 0-based offset
+        for col in range(1, n_cols + 1):
+            ws.cell(row=excel_row, column=col).fill = fill
+
+    wb.save(xlsx_path)
