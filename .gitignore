@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.env
+*.xlsx
+*.xlsm
+!tests/golden/*.xlsx
+!tests/fixtures/*.xlsx
+.streamlit/secrets.toml
