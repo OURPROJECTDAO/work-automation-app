@@ -152,8 +152,9 @@ def enrich_spec(df: pd.DataFrame, spec_df: pd.DataFrame) -> pd.DataFrame:
 def run_phase1(sales_bytes: bytes, cls_df=None, spec_df=None):
     """
     Phase 1 전체 실행.
-    반환 : (result_df, unmatched, pre_cls_df)
-      - unmatched 비어있으면 result_df가 완성본, pre_cls_df=None
+    반환 : (result_df, unmatched, pre_cls_df, archive_df)
+      - archive_df : 정제+셀나누기까지만 된 8열 스냅샷 (중복제거 전, 발주자료 아카이브용)
+      - unmatched 비어있으면 result_df 완성, pre_cls_df=None
       - unmatched 있으면 result_df=None, pre_cls_df로 GATE A 처리 후 재실행
     """
     if cls_df is None:
@@ -167,17 +168,19 @@ def run_phase1(sales_bytes: bytes, cls_df=None, spec_df=None):
     # 유효 행만 (총수량, erp관리코드 모두 있는 것)
     df = df[df["총수량"].notna() & df["erp관리코드"].notna()].copy()
 
-    df, unmatched = enrich_classification(df, cls_df)
-    if unmatched:
-        return None, unmatched, df   # pre_cls_df 반환
+    # 발주자료 아카이브 스냅샷 (중복제거·구분·규격 전, 원본 8열)
+    archive_df = df[_COLS].copy()
 
-    df = deduplicate(df)
-    df = enrich_spec(df, spec_df)
-    # 최종 열 순서
+    df2, unmatched = enrich_classification(df, cls_df)
+    if unmatched:
+        return None, unmatched, df, archive_df   # pre_cls_df + archive
+
+    df2 = deduplicate(df2)
+    df2 = enrich_spec(df2, spec_df)
     out_cols = ["구분", "규격", "erp관리코드", "어드민옵션", "총수량",
                 "평균단가", "정산금액", "판매처그룹", "선결제택배비", "옵션추가항목1"]
-    df = df[[c for c in out_cols if c in df.columns]]
-    return df, [], None
+    df2 = df2[[c for c in out_cols if c in df2.columns]]
+    return df2, [], None, archive_df
 
 
 def resume_phase1_after_gate(pre_cls_df: pd.DataFrame,
@@ -231,7 +234,7 @@ def reconcile_stock(df: pd.DataFrame,
 
     df = df.copy()
     df["_재고박스"] = 0.0
-    df["_필요수량"] = pd.to_numeric(df["총수량"], errors="coerce").fillna(0)
+    df["_필요수량"] = pd.to_numeric(df["총수량"], errors="coerce").fillna(0).astype(float)
     df["_낱개"] = False
     df["_원코드미매칭"] = False
 
@@ -336,17 +339,18 @@ def _merge_consecutive(ws, col: int, start_row: int, end_row: int):
         i = j
 
 
-def generate_archive_xlsx(phase1_df: pd.DataFrame) -> bytes:
-    """발주자료 아카이브 xlsx (복사붙여넣기 시트)."""
+def generate_archive_xlsx(archive_df: pd.DataFrame) -> bytes:
+    """발주자료 아카이브 xlsx (복사붙여넣기 시트, 원본 8열·중복제거 전)."""
     wb = Workbook()
     ws = wb.active
     ws.title = "복사붙여넣기"
 
-    cols = ["구분", "규격", "erp관리코드", "어드민옵션", "총수량",
-            "평균단가", "정산금액", "판매처그룹", "선결제택배비", "옵션추가항목1"]
-    ws.append(cols)
-    for _, row in phase1_df.iterrows():
-        ws.append([row.get(c, "") for c in cols])
+    # 실제 워크플로우 헤더 (어드민 옵션 = 띄어쓰기 포함)
+    display_header = ["erp관리코드", "어드민 옵션", "총수량", "평균단가",
+                      "정산금액", "판매처그룹", "선결제택배비", "옵션추가항목1"]
+    ws.append(display_header)
+    for _, row in archive_df.iterrows():
+        ws.append([row.get(c, "") for c in _COLS])
 
     buf = io.BytesIO()
     wb.save(buf)
