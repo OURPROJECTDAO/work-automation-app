@@ -120,9 +120,10 @@ with tab_order:
     if st.button("▶ Phase 1 실행", type="primary", key="p1_run"):
         with st.spinner("정제 중..."):
             try:
-                result, unmatched, pre_cls = lo.run_phase1(
+                result, unmatched, pre_cls, archive_df = lo.run_phase1(
                     st.session_state["order_sales_bytes"]
                 )
+                st.session_state["order_archive_df"] = archive_df
                 if unmatched:
                     st.session_state["order_unmatched_cls"] = unmatched
                     st.session_state["order_pre_cls_df"]    = pre_cls
@@ -207,7 +208,7 @@ with tab_order:
                   len(p1_df[p1_df["구분"].isin(["식품", "선물세트"])]))
         st.success("✅ Phase 1 완료")
 
-        archive_bytes = lo.generate_archive_xlsx(p1_df)
+        archive_bytes = lo.generate_archive_xlsx(st.session_state["order_archive_df"])
         today = datetime.now().strftime("%m%d")
         st.download_button(
             "📥 발주자료 아카이브 다운로드",
