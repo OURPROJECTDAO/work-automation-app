@@ -13,6 +13,7 @@ st.set_page_config(
 
 _P = Path(__file__).parent / "pages"
 _M = _P / "2_기준데이터관리"
+_N = _P / "3_연동데이터관리"
 
 pg = st.navigation({
     "": [
@@ -24,7 +25,7 @@ pg = st.navigation({
         st.Page(_M / "3_발주서출력업무.py",           title="발주서출력업무",           icon="🚚"),
     ],
     "연동데이터관리": [
-        st.Page(_P / "4_연동데이터관리.py", title="연동데이터관리", icon="🔗"),
+        st.Page(_N / "1_상품관리.py", title="상품관리", icon="🔗"),
     ],
     " ": [
         st.Page(_P / "3_대시보드.py", title="대시보드", icon="📊"),
