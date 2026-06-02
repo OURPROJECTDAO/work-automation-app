@@ -9,6 +9,7 @@
 - HighlightColumnC: ColorIndex 36(연노랑 #FFFF99) ↔ 35(연초록 #CCFFCC) 교대.
 """
 from pathlib import Path
+import io
 import pandas as pd
 import openpyxl
 from openpyxl.styles import PatternFill
@@ -184,3 +185,20 @@ def _apply_hapo_colors(xlsx_path: Path, sheet_name: str, colors: dict) -> None:
             ws.cell(row=excel_row, column=col).fill = fill
 
     wb.save(xlsx_path)
+
+
+def generate_invoice_xlsx(invoice_df: pd.DataFrame) -> bytes:
+    """송장출력 시트 단독 xlsx (VBA SaveSheetToNewFile 복원).
+
+    정제 후 '송장출력' 시트를 통째로 복사 → 단일시트 워크북.
+    (원본 VBA: 송장출력 시트를 새 워크북에 복사 → ★★송장MMDD.xlsx 저장)
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "송장출력"
+    ws.append(list(invoice_df.columns))
+    for _, row in invoice_df.iterrows():
+        ws.append([row[c] for c in invoice_df.columns])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
