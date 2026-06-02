@@ -48,42 +48,55 @@ with tab_basic:
                         result_bytes = result.read_bytes()
                         result_name  = result.name
 
-                    st.success("✅ 처리 완료!")
                     import io as _io
                     sheets = pd.read_excel(_io.BytesIO(result_bytes), sheet_name=None, dtype=str)
                     labels = {"합포확인": "합포", "지역확인": "도서산간",
                               "필터링확인": "필터링", "미배송지역확인": "미배송", "송장출력": "전체 송장"}
-                    cols = st.columns(len(sheets))
-                    for col, (sname, df) in zip(cols, sheets.items()):
-                        col.metric(labels.get(sname, sname), f"{len(df)}건")
-
-                    st.download_button(
-                        label="📥 결과 파일 다운로드",
-                        data=result_bytes,
-                        file_name=result_name,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
-
                     # 송장출력 단독 파일 (VBA SaveSheetToNewFile 복원)
-                    if "송장출력" in sheets:
-                        invoice_bytes = core.workflows.openmarket_merge.generate_invoice_xlsx(
-                            sheets["송장출력"]
-                        )
-                        mmdd = datetime.now().strftime("%m%d")
-                        st.download_button(
-                            label="📥 송장 파일 다운로드 (★★송장)",
-                            data=invoice_bytes,
-                            file_name=f"★★송장{mmdd}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True,
-                            key="basic_invoice_dl",
-                        )
+                    invoice_bytes = (
+                        core.workflows.openmarket_merge.generate_invoice_xlsx(sheets["송장출력"])
+                        if "송장출력" in sheets else None
+                    )
+                    # 결과를 session_state에 보관 → download_button 클릭(rerun) 후에도 유지
+                    st.session_state["basic_result"] = {
+                        "result_bytes": result_bytes,
+                        "result_name":  result_name,
+                        "invoice_bytes": invoice_bytes,
+                        "mmdd": datetime.now().strftime("%m%d"),
+                        "stats": {labels.get(s, s): len(df) for s, df in sheets.items()},
+                    }
                 except Exception as e:
+                    st.session_state.pop("basic_result", None)
                     st.error(f"오류: {e}")
                     st.exception(e)
     else:
         st.info("파일을 업로드하고 워크플로우를 선택하세요.")
+
+    # ── 결과 렌더 (실행 블록 밖에서: download_button rerun에도 버튼 유지) ──
+    res = st.session_state.get("basic_result")
+    if res:
+        st.success("✅ 처리 완료!")
+        cols = st.columns(len(res["stats"]))
+        for col, (label, n) in zip(cols, res["stats"].items()):
+            col.metric(label, f"{n}건")
+
+        st.download_button(
+            label="📥 결과 파일 다운로드",
+            data=res["result_bytes"],
+            file_name=res["result_name"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="basic_result_dl",
+        )
+        if res["invoice_bytes"]:
+            st.download_button(
+                label="📥 송장 파일 다운로드 (★★송장)",
+                data=res["invoice_bytes"],
+                file_name=f"★★송장{res['mmdd']}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="basic_invoice_dl",
+            )
 
 
 # ═══════════════════════════════════════════════
