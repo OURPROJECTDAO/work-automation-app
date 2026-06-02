@@ -21,6 +21,10 @@ pg = st.navigation({
     "기준데이터관리": [
         st.Page(_M / "1_오픈마켓합포도서산간확인.py", title="오픈마켓합포도서산간확인", icon="📋"),
         st.Page(_M / "2_온누리양식_발주서.py",        title="온누리양식_발주서",        icon="💰"),
+        st.Page(_M / "3_발주서출력업무.py",           title="발주서출력업무",           icon="🚚"),
+    ],
+    "연동데이터관리": [
+        st.Page(_P / "4_연동데이터관리.py", title="연동데이터관리", icon="🔗"),
     ],
     " ": [
         st.Page(_P / "3_대시보드.py", title="대시보드", icon="📊"),
