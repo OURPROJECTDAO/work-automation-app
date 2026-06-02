@@ -307,10 +307,41 @@ def run_phase2(phase1_df: pd.DataFrame, pm_df=None, unit_df=None):
 # Excel 생성
 # ───────────────────────────────────────────────
 
-_THIN = Side(border_style="thin", color="000000")
+_THIN = Side(border_style="thin", color="999999")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
-_RED_FILL = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
 _CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+_LEFT   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+_RIGHT  = Alignment(horizontal="right",  vertical="center")
+
+# 타이틀 바
+_TITLE_FILL = PatternFill("solid", fgColor="2F5496")
+_TITLE_FONT = Font(color="FFFFFF", bold=True, size=12)
+# 섹션 헤더
+_SEC_FILL = PatternFill("solid", fgColor="D9E1F2")
+_SEC_FONT = Font(color="1F3864", bold=True, size=11)
+# 구분 카테고리 색
+_GUBUN_FILL = {
+    "선물세트": PatternFill("solid", fgColor="FFF3CD"),
+    "식품":     PatternFill("solid", fgColor="E2EFF7"),
+    "음료":     PatternFill("solid", fgColor="E3F1E5"),
+}
+_GUBUN_FONT = {
+    "선물세트": Font(bold=True, color="7A5C00"),
+    "식품":     Font(bold=True, color="1F4E64"),
+    "음료":     Font(bold=True, color="1F5128"),
+}
+# 품절 / 낱개 / 일반 재고
+_OUT_FILL = PatternFill("solid", fgColor="FDE7E7")
+_OUT_FONT = Font(bold=True, color="C00000")
+_OK_FONT  = Font(bold=True, color="222222")
+_NAT_FONT = Font(bold=True, color="0B5394")    # 낱개 총수량
+_QTY_FONT = Font(color="222222")
+
+_WEEKDAY = ["월", "화", "수", "목", "금", "토", "일"]
+
+
+def _korean_date(dt) -> str:
+    return f"{dt.year}년 {dt.month}월 {dt.day}일 {_WEEKDAY[dt.weekday()]}요일"
 
 
 def _write_border(ws, min_row, max_row, min_col, max_col):
@@ -366,10 +397,15 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
     ws = wb.active
     ws.title = "물류팀"
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = _korean_date(datetime.now())
 
     # Row 1 : 타이틀
     ws.append(["", "멸치+오픈마켓", "", today, "", "재고"])
+    for c in range(1, 7):
+        cell = ws.cell(row=1, column=c)
+        cell.fill = _TITLE_FILL
+        cell.font = _TITLE_FONT
+        cell.alignment = _CENTER
 
     current_row = 2
     for 구분 in ["선물세트", "식품", "음료"]:
@@ -379,23 +415,45 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
 
         # 섹션 헤더
         ws.append(["구분", "규격", "erp관리코드", "어드민 옵션", "총수량", "재고"])
+        for c in range(1, 7):
+            cell = ws.cell(row=current_row, column=c)
+            cell.fill = _SEC_FILL
+            cell.font = _SEC_FONT
+            cell.alignment = _CENTER
         current_row += 1
         section_data_start = current_row
 
         for _, r in section.iterrows():
             재고_val = int(r["재고"])
+            qty_disp = r.get("총수량표시", "")
+            is_nat = str(qty_disp).startswith("낱")
             ws.append([
                 r.get("구분", ""),
                 r.get("규격", ""),
                 r.get("erp관리코드", ""),
                 r.get("어드민옵션", ""),
-                r.get("총수량표시", ""),
+                qty_disp,
                 재고_val,
             ])
+            # 구분(A) 색
+            ws.cell(row=current_row, column=1).fill = _GUBUN_FILL.get(구분, PatternFill())
+            ws.cell(row=current_row, column=1).font = _GUBUN_FONT.get(구분, Font(bold=True))
+            # 규격(B) 가운데
+            ws.cell(row=current_row, column=2).alignment = _CENTER
+            # 어드민옵션(D) 좌측
+            ws.cell(row=current_row, column=4).alignment = _LEFT
+            # 총수량(E) 가운데, 낱개=파랑
+            ce = ws.cell(row=current_row, column=5)
+            ce.alignment = _CENTER
+            ce.font = _NAT_FONT if is_nat else _QTY_FONT
+            # 재고(F) 우측, 품절=빨강+분홍
+            cf = ws.cell(row=current_row, column=6)
+            cf.alignment = _RIGHT
             if 재고_val < 0:
-                ws.cell(row=current_row, column=6).fill = _RED_FILL
-            # F열 밑줄
-            ws.cell(row=current_row, column=6).font = Font(underline="single")
+                cf.fill = _OUT_FILL
+                cf.font = _OUT_FONT
+            else:
+                cf.font = _OK_FONT
             current_row += 1
 
         section_data_end = current_row - 1
@@ -407,10 +465,7 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
                     start_row=section_data_start, start_column=1,
                     end_row=section_data_end,     end_column=1
                 )
-                ws.cell(row=section_data_start, column=1).alignment = _CENTER
-            else:
-                ws.cell(row=section_data_start, column=1).alignment = _CENTER
-
+            ws.cell(row=section_data_start, column=1).alignment = _CENTER
             # B열 : 연속 동일 규격 병합
             _merge_consecutive(ws, col=2,
                                start_row=section_data_start,
@@ -422,20 +477,35 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
     ws.column_dimensions["C"].hidden = True
 
     # 컬럼 너비
-    ws.column_dimensions["A"].width = 8
-    ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["D"].width = 30
+    ws.column_dimensions["A"].width = 9
+    ws.column_dimensions["B"].width = 17
+    ws.column_dimensions["D"].width = 34
     ws.column_dimensions["E"].width = 8
     ws.column_dimensions["F"].width = 8
+    ws.row_dimensions[1].height = 22
 
     # ── 품절목록 시트 ─────────────────────────────
     ws2 = wb.create_sheet("품절목록")
     ws2.append(["관리코드", "상품명", "발주수량", "현재고"])
+    for c in range(1, 5):
+        cell = ws2.cell(row=1, column=c)
+        cell.fill = _SEC_FILL
+        cell.font = _SEC_FONT
+        cell.alignment = _CENTER
+
+    r_idx = 2
     for _, r in stockout_df.iterrows():
         ws2.append([r["관리코드"], r["상품명"], r["발주수량"], int(r["현재고"])])
+        cf = ws2.cell(row=r_idx, column=4)
+        cf.font = _OUT_FONT
+        cf.fill = _OUT_FILL
+        cf.alignment = _RIGHT
+        ws2.cell(row=r_idx, column=3).alignment = _CENTER
+        r_idx += 1
 
     _write_border(ws2, 1, ws2.max_row, 1, 4)
-    ws2.column_dimensions["B"].width = 35
+    ws2.column_dimensions["A"].width = 12
+    ws2.column_dimensions["B"].width = 38
     ws2.column_dimensions["C"].width = 10
     ws2.column_dimensions["D"].width = 10
 
