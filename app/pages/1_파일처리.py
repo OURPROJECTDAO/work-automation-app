@@ -64,6 +64,21 @@ with tab_basic:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True,
                     )
+
+                    # 송장출력 단독 파일 (VBA SaveSheetToNewFile 복원)
+                    if "송장출력" in sheets:
+                        invoice_bytes = core.workflows.openmarket_merge.generate_invoice_xlsx(
+                            sheets["송장출력"]
+                        )
+                        mmdd = datetime.now().strftime("%m%d")
+                        st.download_button(
+                            label="📥 송장 파일 다운로드 (★★송장)",
+                            data=invoice_bytes,
+                            file_name=f"★★송장{mmdd}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            key="basic_invoice_dl",
+                        )
                 except Exception as e:
                     st.error(f"오류: {e}")
                     st.exception(e)
