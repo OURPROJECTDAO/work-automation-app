@@ -18,6 +18,7 @@ _N = _P / "3_연동데이터관리"
 pg = st.navigation({
     "": [
         st.Page(_P / "1_파일처리.py", title="파일처리", icon="📂"),
+        st.Page(_P / "5_송장처리.py", title="송장처리", icon="🏷️"),
     ],
     "기준데이터관리": [
         st.Page(_M / "1_오픈마켓합포도서산간확인.py", title="오픈마켓합포도서산간확인", icon="📋"),
