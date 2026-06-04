@@ -10,10 +10,11 @@ import core.workflows.openmarket_merge  # noqa: F401  ← @register 트리거
 import core.workflows.onnuri_order      # noqa: F401  ← @register 트리거
 from core.workflows.registry import list_workflows, get_workflow
 import core.workflows.logistics_order as lo
+import core.workflows.cheonnyeon_upload as cy
 
 st.title("📂 파일 처리")
 
-tab_basic, tab_order = st.tabs(["📦 기존 워크플로우", "🚚 발주서 출력업무"])
+tab_basic, tab_order, tab_cy = st.tabs(["📦 기존 워크플로우", "🚚 발주서 출력업무", "🏪 천년경영 업로드"])
 
 # ═══════════════════════════════════════════════
 # 탭 1 : 기존 워크플로우
@@ -317,4 +318,51 @@ with tab_order:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key="dl_result",
+        )
+
+
+# ═══════════════════════════════════════════════
+# 탭 3 : 천년경영 업로드
+# ═══════════════════════════════════════════════
+with tab_cy:
+    st.caption("발주자료·배민주문·스스주문(암호 1323) 3개를 올리면 "
+               "마켓플레이스별 업로드 시트(전체/낱개)를 만들어드립니다.")
+    c1, c2, c3 = st.columns(3)
+    f_baeju  = c1.file_uploader("① ★★발주자료 (.xlsx)", type=["xlsx"], key="cy_baeju",
+                                help="발주서출력업무 Phase1에서 받은 발주자료 아카이브")
+    f_baemin = c2.file_uploader("② 배민주문 (.xlsx)", type=["xlsx"], key="cy_baemin")
+    f_sss    = c3.file_uploader("③ 스스주문 (.xlsx · 암호1323)", type=["xlsx"], key="cy_sss")
+
+    if f_baeju and f_baemin and f_sss:
+        if st.button("▶ 실행", type="primary", use_container_width=True, key="cy_run"):
+            with st.spinner("처리 중..."):
+                try:
+                    out, stats, _, _ = cy.run(
+                        f_baeju.getvalue(), f_baemin.getvalue(), f_sss.getvalue())
+                    st.session_state["cy_result"] = {
+                        "bytes": out, "stats": stats,
+                        "name": datetime.now().strftime("%y%m%d") + ".xlsx",
+                    }
+                except Exception as e:
+                    st.session_state.pop("cy_result", None)
+                    st.error(f"오류: {e}")
+                    st.exception(e)
+    else:
+        st.info("3개 파일을 모두 업로드하세요.")
+
+    res = st.session_state.get("cy_result")
+    if res:
+        st.success("✅ 처리 완료!")
+        items = list(res["stats"].items())
+        for i in range(0, len(items), 6):
+            cols = st.columns(6)
+            for col, (label, n) in zip(cols, items[i:i + 6]):
+                col.metric(label, f"{n}건")
+        st.download_button(
+            label="📥 결과 파일 다운로드",
+            data=res["bytes"],
+            file_name=res["name"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="cy_result_dl",
         )
