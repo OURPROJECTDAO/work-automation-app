@@ -11,6 +11,7 @@
 """
 import io
 import math
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,9 @@ from openpyxl.styles import (
 from openpyxl.utils import get_column_letter
 
 _REF = Path(__file__).parent.parent.parent / "reference"
+
+# erp관리코드 패턴: XX-XX-XX (각 부분 정확히 2자리)
+_ERP_CODE_RE = re.compile(r'\d{2}-\d{2}-\d{2}')
 
 # ───────────────────────────────────────────────
 # Reference 로딩
@@ -83,8 +87,63 @@ def parse_sales_report(file_bytes: bytes) -> pd.DataFrame:
     return data
 
 
+def split_multiproduct_cells(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Step 0a : 서로 다른 상품 합포 케이스 처리.
+
+    pd.read_html이 HTML xls의 합포 행을 파싱할 때,
+    두 상품의 어드민옵션·옵션추가항목1이 한 셀에 이어붙여지는 경우가 있음.
+    예) 옵션추가항목1='31-03-0531-22-02' (두 erp코드 연속)
+        어드민옵션='코카콜라355...[31-03-05]코카콜라제로355...[31-22-02]'
+
+    감지: 옵션추가항목1에서 XX-XX-XX 패턴 2개 이상
+    처리: 총수량·정산금액 ÷ 2, 어드민옵션을 첫 번째 [erp코드] 기준으로 분리,
+          선결제비·판매처그룹·평균단가는 복사 (기존 split_merged_cells와 동일)
+    """
+    new_rows = []
+    changed = False
+
+    for _, row in df.iterrows():
+        opt1 = str(row.get("옵션추가항목1") or "")
+        codes = _ERP_CODE_RE.findall(opt1)
+
+        if len(codes) < 2:
+            new_rows.append(row)
+            continue
+
+        changed = True
+        admin = str(row.get("어드민옵션") or "")
+
+        # 어드민옵션 분리: 첫 번째 [erp코드] 끝을 기준으로 두 부분으로 분리
+        split_match = re.search(r'\[' + re.escape(codes[0]) + r'\]', admin)
+        if split_match:
+            admin1 = admin[:split_match.end()].strip()
+            admin2 = admin[split_match.end():].strip()
+        else:
+            admin1 = admin
+            admin2 = admin
+
+        qty = float(row.get("총수량") or 0)
+        price = float(row.get("정산금액") or 0)
+
+        for code, a_opt in [(codes[0], admin1), (codes[1], admin2)]:
+            new_row = row.copy()
+            new_row["어드민옵션"] = a_opt
+            new_row["총수량"] = qty / 2
+            new_row["정산금액"] = price / 2
+            new_row["옵션추가항목1"] = code
+            new_row["erp관리코드"] = None  # fill_management_code에서 채울 것
+            new_rows.append(new_row)
+
+    if not changed:
+        return df
+
+    result = pd.DataFrame(new_rows)
+    return result[df.columns].reset_index(drop=True)
+
+
 def fill_management_code(df: pd.DataFrame) -> pd.DataFrame:
-    """Step 0 : erp관리코드 공백 → 옵션추가항목1에서 채움."""
+    """Step 0b : erp관리코드 공백 → 옵션추가항목1에서 채움."""
     df = df.copy()
     mask = df["erp관리코드"].isna() & df["옵션추가항목1"].notna()
     df.loc[mask, "erp관리코드"] = df.loc[mask, "옵션추가항목1"].astype(str)
@@ -163,8 +222,9 @@ def run_phase1(sales_bytes: bytes, cls_df=None, spec_df=None):
         spec_df = load_spec_master()
 
     df = parse_sales_report(sales_bytes)
-    df = fill_management_code(df)
-    df = split_merged_cells(df)
+    df = split_multiproduct_cells(df)  # Step 0a: 다른 상품 합포 분리 (fill 전)
+    df = fill_management_code(df)      # Step 0b: erp코드 채우기
+    df = split_merged_cells(df)        # Step 1: 같은 상품 합포(NaN 방식) 분리
     # 유효 행만 (총수량, erp관리코드 모두 있는 것)
     df = df[df["총수량"].notna() & df["erp관리코드"].notna()].copy()
 
