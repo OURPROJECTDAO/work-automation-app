@@ -40,12 +40,42 @@ def _col_num_to_letter(n: int) -> str:
     return result
 
 
+def _col_letter_to_num(letters: str) -> int:
+    """열 문자를 번호(1-based)로 변환. 예: A→1, G→7."""
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ord(ch) - 64)
+    return n
+
+
+def _insert_cell_into_row(content: str, row_num: int, col_letter: str,
+                          cell_ref: str, int_val: int) -> str:
+    """해당 <row>에 열 순서를 지켜 새 셀 삽입. 행을 못 찾으면 그대로 반환."""
+    target_col = _col_letter_to_num(col_letter)
+    new_cell = f'<c r="{cell_ref}"><v>{int_val}</v></c>'
+    row_pat = re.search(rf'(<row r="{row_num}"[^>]*>)(.*?)(</row>)',
+                        content, re.DOTALL)
+    if not row_pat:
+        return content
+    head, body, tail = row_pat.group(1), row_pat.group(2), row_pat.group(3)
+    insert_at = len(body)
+    for cm in re.finditer(r'<c r="([A-Z]+)\d+"', body):
+        if _col_letter_to_num(cm.group(1)) > target_col:
+            insert_at = cm.start()
+            break
+    new_body = body[:insert_at] + new_cell + body[insert_at:]
+    return content[:row_pat.start()] + head + new_body + tail + content[row_pat.end():]
+
+
 def _patch_column_values(sheet_xml: bytes, col_letter: str, values: list) -> bytes:
     """
     sheet1.xml에서 특정 열의 데이터 행(2행 이후) 값만 수정.
-    - 원본 sharedStrings 구조(t="s") 변경 없음
-    - 기존 셀의 스타일(s 속성) 보존
-    - 셀이 없는 행은 건너뜀
+    - 원본 sharedStrings 구조(t="s") 변경 없음, 기존 셀 스타일(s) 보존
+    - 값 있는 셀(<c ...>...</c>): 값만 교체
+    - 자체닫힘 빈 셀(<c .../>): 값 있는 셀로 교체  [버그픽스 2026-06-05]
+    - 셀 자체가 없는 행: 열 순서 맞춰 새 셀 삽입      [버그픽스 2026-06-05]
+    (기존 정규식은 </c> 가진 셀만 매칭 → 빈 합계 셀을 못 잡거나,
+     자체닫힘 셀에서 다음 행까지 과매칭하여 데이터 손상시킴.)
     """
     content = sheet_xml.decode("utf-8")
     for i, val in enumerate(values):
@@ -55,16 +85,19 @@ def _patch_column_values(sheet_xml: bytes, col_letter: str, values: list) -> byt
         cell_ref = f"{col_letter}{row_num}"
         int_val = int(val)
 
-        # 기존 셀 찾아서 값만 교체 (스타일 보존)
-        pattern = rf'<c r="{re.escape(cell_ref)}"[^>]*>.*?</c>'
-        existing = re.search(pattern, content, re.DOTALL)
-        if existing:
-            s_match = re.search(r's="(\d+)"', existing.group(0))
+        # 값셀(>...</c>) 또는 자체닫힘(/>) 둘 다 매칭.
+        # 템퍼드 패턴으로 첫 </c> 를 넘어 다음 셀까지 먹지 않게 함.
+        m = re.search(
+            rf'<c r="{re.escape(cell_ref)}"([^>]*?)(?:/>|>(?:(?!</c>).)*?</c>)',
+            content, re.DOTALL)
+        if m:
+            s_match = re.search(r's="(\d+)"', m.group(1))
             s_attr = f' s="{s_match.group(1)}"' if s_match else ""
             new_cell = f'<c r="{cell_ref}"{s_attr}><v>{int_val}</v></c>'
-            content = (
-                content[: existing.start()] + new_cell + content[existing.end() :]
-            )
+            content = content[: m.start()] + new_cell + content[m.end():]
+        else:
+            content = _insert_cell_into_row(
+                content, row_num, col_letter, cell_ref, int_val)
     return content.encode("utf-8")
 
 
