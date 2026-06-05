@@ -47,6 +47,24 @@ def to_invoice_number(v):
     return int(s) if s.isdigit() else (s if s else "")
 
 
+def decrypt_if_needed(file_bytes: bytes, cfg: dict) -> bytes:
+    """암호 걸린 xlsx면 cfg['password']로 복호화. 평문이면 그대로(미리 푼 파일도 허용).
+    배민상회 등 일부 채널은 다운로드 파일에 항상 열기 암호가 걸려 있다(msoffcrypto-tool)."""
+    if cfg.get("format") != "xlsx":
+        return file_bytes
+    import msoffcrypto
+    try:
+        off = msoffcrypto.OfficeFile(io.BytesIO(file_bytes))
+        if not off.is_encrypted():
+            return file_bytes
+    except Exception:
+        return file_bytes  # 평문 xlsx(ZIP)는 OfficeFile 생성 실패 가능 → 그대로 사용
+    buf = io.BytesIO()
+    off.load_key(password=cfg.get("password") or "")
+    off.decrypt(buf)
+    return buf.getvalue()
+
+
 # ── 채널 설정 ─────────────────────────────────────────────
 CHANNEL_CONFIG = {
     "식봄": {
@@ -71,8 +89,19 @@ CHANNEL_CONFIG = {
         "recv_col": "수령인",
         "has_guide_row": False,
     },
-    # "배민상회": {...},  # 샘플 받으면 추가
-    # "캐시노트": {...},
+    "배민상회": {
+        "format": "xlsx",
+        "password": "qwer",          # 배민 다운로드 파일은 항상 암호 걸림
+        "match_col": "주문번호",
+        "master_key": "주문번호",
+        "courier": "한진택배",
+        "courier_col": "*택배사",      # 헤더에 * 접두사
+        "invoice_col": "*송장번호",     # 헤더에 * 접두사 (트래킹번호 등 다른 * 필드는 미수정)
+        "addr_col": "도로명 주소",
+        "recv_col": "받는분",
+        "has_guide_row": False,
+    },
+    # "캐시노트": {...},  # 샘플 받으면 추가
 }
 
 # 송장 마스터(송장출력) 표준 컬럼
