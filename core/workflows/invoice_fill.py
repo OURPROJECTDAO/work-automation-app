@@ -47,6 +47,15 @@ def to_invoice_number(v):
     return int(s) if s.isdigit() else (s if s else "")
 
 
+def to_invoice_text(v):
+    """송장번호를 텍스트(문자열)로. '....0' float 꼬리표 제거.
+    배민 등 일부 채널은 송장 셀이 숫자면 업로드 거부 → 문자열+일반(General) 형식 필요."""
+    s = str(v).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
 def decrypt_if_needed(file_bytes: bytes, cfg: dict) -> bytes:
     """암호 걸린 xlsx면 cfg['password']로 복호화. 평문이면 그대로(미리 푼 파일도 허용).
     배민상회 등 일부 채널은 다운로드 파일에 항상 열기 암호가 걸려 있다(msoffcrypto-tool)."""
@@ -100,6 +109,7 @@ CHANNEL_CONFIG = {
         "addr_col": "도로명 주소",
         "recv_col": "받는분",
         "has_guide_row": False,
+        "invoice_as_text": True,     # 배민은 송장번호 셀이 숫자면 거부 → 문자열+일반 형식
     },
     # "캐시노트": {...},  # 샘플 받으면 추가
 }
@@ -193,7 +203,9 @@ def _write_template_xls(parsed: dict, rows: list, keep_idx: list, cfg: dict) -> 
         types = parsed["types"][i]
         for c in range(len(header)):
             if c == song_col:
-                sh.write(out_r, c, to_invoice_number(row["_송장"]))   # 송장번호 = 숫자 형식
+                _sj = row["_송장"]
+                sh.write(out_r, c, to_invoice_text(_sj) if cfg.get("invoice_as_text")
+                         else to_invoice_number(_sj))   # 송장번호: 텍스트 or 숫자
             elif header[c] == courier_col_name:
                 sh.write(out_r, c, courier or row.get("_택배사") or "")  # 택배사 일괄
             else:
@@ -222,10 +234,17 @@ def _write_template_xlsx(orig_bytes: bytes, parsed: dict, rows: list,
     base = 3 if cfg.get("has_guide_row") else 2           # 데이터 시작 엑셀 행(1-based)
 
     # 1) 모든 데이터 행에 송장번호·택배사 기입
+    as_text = cfg.get("invoice_as_text")
     for i, row in enumerate(rows):
         er = base + i
         song = row.get("_송장")
-        ws.cell(er, inv_c).value = to_invoice_number(song) if song else None
+        cell = ws.cell(er, inv_c)
+        if song:
+            cell.value = to_invoice_text(song) if as_text else to_invoice_number(song)
+            if as_text:
+                cell.number_format = "General"   # 텍스트값 + 일반 형식(배민 업로드 요건)
+        else:
+            cell.value = None
         ws.cell(er, cour_c).value = courier or row.get("_택배사") or ws.cell(er, cour_c).value
 
     # 2) 잔존 N/A 행 삭제(아래에서 위로 — 인덱스 밀림 방지)
