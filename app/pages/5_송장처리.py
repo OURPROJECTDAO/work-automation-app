@@ -119,7 +119,7 @@ if work and work["channel"] == channel:
         rows = vlookup_fill(work["parsed"]["rows"], lk, channel)   # 깨끗이 재계산(멱등)
         apply_decisions(rows, decisions)
         keep, na_count, na_rows = finalize(rows)
-        out_bytes = write_template_xls(work["parsed"], rows, keep)
+        out_bytes = write_template_xls(work["parsed"], rows, keep, courier=cfg.get("courier"))
         st.session_state["if_result"] = {
             "channel": channel, "bytes": out_bytes, "keep": len(keep),
             "na_count": na_count,
