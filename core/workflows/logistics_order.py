@@ -12,7 +12,9 @@
 import io
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_KST = timezone(timedelta(hours=9))  # 한국 표준시 UTC+9
 from pathlib import Path
 
 import pandas as pd
@@ -457,7 +459,7 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
     ws = wb.active
     ws.title = "물류팀"
 
-    today = _korean_date(datetime.now())
+    today = _korean_date(datetime.now(_KST))
 
     # Row 1 : 타이틀
     ws.append(["", "멸치+오픈마켓", "", today, "", "재고"])
