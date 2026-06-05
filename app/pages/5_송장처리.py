@@ -20,7 +20,7 @@ import streamlit as st
 from core.workflows.invoice_fill import (
     CHANNEL_CONFIG, parse_template, parse_master, build_master_lookup,
     vlookup_fill, find_consolidation_candidates, apply_decisions, finalize,
-    write_template,
+    write_template, decrypt_if_needed,
 )
 
 st.title("🏷️ 송장처리")
@@ -76,7 +76,7 @@ before_up = st.file_uploader(f"{channel} 처리전 템플릿 (.{_fmt})", type=[_
 
 if before_up is not None and st.button("🔍 분석", type="primary"):
     try:
-        orig_bytes = before_up.getvalue()
+        orig_bytes = decrypt_if_needed(before_up.getvalue(), cfg)  # 암호 채널 복호화
         parsed = parse_template(orig_bytes, cfg)
         lk = build_master_lookup(master, cfg["master_key"])
         rows = vlookup_fill(parsed["rows"], lk, channel)
