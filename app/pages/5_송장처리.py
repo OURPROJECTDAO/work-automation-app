@@ -8,7 +8,9 @@ PII 주의: 송장 마스터·채널 파일은 고객정보(수령자·주소·�
 """
 import sys
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_KST = timezone(timedelta(hours=9))  # 한국 표준시 UTC+9
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # repo root (root page)
@@ -47,7 +49,7 @@ else:
             dist = Counter(str(r.get("판매처")) for r in rows).most_common()
             st.session_state["invoice_master"] = {
                 "rows": rows, "count": len(rows),
-                "time": datetime.now().strftime("%H:%M"), "dist": dist,
+                "time": datetime.now(_KST).strftime("%H:%M"), "dist": dist,
             }
             st.rerun()
         except Exception as e:
@@ -134,6 +136,6 @@ if res and res["channel"] == channel:
         with st.expander(f"삭제된 N/A {res['na_count']}건 보기"):
             for recv, prod, addr in res["na_rows"]:
                 st.write(f"- {recv} · {prod} · `{addr}`")
-    fname = f"{channel}배송{datetime.now().strftime('%Y%m%d')}_처리후_.xls"
+    fname = f"{channel}배송{datetime.now(_KST).strftime('%Y%m%d')}_처리후_.xls"
     st.download_button("⬇️ 처리후 .xls 다운로드", data=res["bytes"], file_name=fname,
                        mime="application/vnd.ms-excel", key=f"dl_{channel}", type="primary")
