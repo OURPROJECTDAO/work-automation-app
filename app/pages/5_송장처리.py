@@ -1,7 +1,7 @@
 """송장처리 — 채널 송장번호 일괄입력 템플릿에 공통 송장 마스터의 송장번호 채우기.
 
 흐름: 공통 송장 마스터 업로드(세션) → 채널 처리전 업로드 → VLOOKUP →
-      N/A 합포장 사용자 확인 → 잔존 N/A 삭제 → 원본 .xls 양식으로 다운로드.
+      N/A 합포장 사용자 확인 → 잔존 N/A 삭제 → 원본 양식(.xls/.xlsx)으로 다운로드.
 
 PII 주의: 송장 마스터·채널 파일은 고객정보(수령자·주소·연락처)를 포함하므로
           서버/저장소에 저장하지 않고 이 세션에서만 사용한다.
@@ -18,9 +18,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # repo root (root 
 import streamlit as st
 
 from core.workflows.invoice_fill import (
-    CHANNEL_CONFIG, parse_template_xls, parse_master, build_master_lookup,
+    CHANNEL_CONFIG, parse_template, parse_master, build_master_lookup,
     vlookup_fill, find_consolidation_candidates, apply_decisions, finalize,
-    write_template_xls,
+    write_template,
 )
 
 st.title("🏷️ 송장처리")
@@ -70,17 +70,19 @@ channel = st.selectbox("채널", list(CHANNEL_CONFIG.keys()))
 cfg = CHANNEL_CONFIG[channel]
 st.caption(f"매칭 규칙 — 처리전.`{cfg['match_col']}` ⟷ 마스터.`{cfg['master_key']}`")
 
-before_up = st.file_uploader(f"{channel} 처리전 템플릿 (.xls)", type=["xls"],
+_fmt = cfg.get("format", "xls")
+before_up = st.file_uploader(f"{channel} 처리전 템플릿 (.{_fmt})", type=[_fmt],
                              key=f"before_{channel}")
 
 if before_up is not None and st.button("🔍 분석", type="primary"):
     try:
-        parsed = parse_template_xls(before_up.getvalue())
+        orig_bytes = before_up.getvalue()
+        parsed = parse_template(orig_bytes, cfg)
         lk = build_master_lookup(master, cfg["master_key"])
         rows = vlookup_fill(parsed["rows"], lk, channel)
-        cands, indep = find_consolidation_candidates(rows)
+        cands, indep = find_consolidation_candidates(rows, cfg)
         st.session_state["if_work"] = {
-            "channel": channel, "parsed": parsed,
+            "channel": channel, "parsed": parsed, "orig_bytes": orig_bytes,
             "cands": cands, "indep": indep, "matched": sum(
                 1 for r in rows if r["_status"] == "matched"),
             "total": len(rows),
@@ -103,9 +105,9 @@ if work and work["channel"] == channel:
                    "(자동 선택 불가 — 어느 박스에 담겼는지는 사람만 압니다)")
         for c in cands:
             na = c["na_row"]
-            recv = na.get("수취인명(받는사람)") or na.get("수취인") or ""
+            recv = na.get(cfg["recv_col"]) or na.get("수취인") or ""
             st.markdown(f"**N/A**: {recv} · {na.get('상품명')}  \n"
-                        f"`{na.get('배송지')}`")
+                        f"`{na.get(cfg['addr_col'])}`")
             opts = ["❌ 합포장 아님 (N/A 유지 → 삭제)"] + [
                 f"📦 {b['송장']} · {b['수취인']} · {b['상품명']}" for b in c["boxes"]]
             sel = st.radio("합칠 박스 선택", options=list(range(len(opts))),
@@ -119,12 +121,12 @@ if work and work["channel"] == channel:
         rows = vlookup_fill(work["parsed"]["rows"], lk, channel)   # 깨끗이 재계산(멱등)
         apply_decisions(rows, decisions)
         keep, na_count, na_rows = finalize(rows)
-        out_bytes = write_template_xls(work["parsed"], rows, keep, courier=cfg.get("courier"))
+        out_bytes = write_template(work["orig_bytes"], work["parsed"], rows, keep, cfg)
         st.session_state["if_result"] = {
             "channel": channel, "bytes": out_bytes, "keep": len(keep),
-            "na_count": na_count,
-            "na_rows": [((r.get("수취인명(받는사람)") or r.get("수취인") or ""),
-                         r.get("상품명"), r.get("배송지")) for r in na_rows],
+            "na_count": na_count, "fmt": cfg.get("format", "xls"),
+            "na_rows": [((r.get(cfg["recv_col"]) or r.get("수취인") or ""),
+                         r.get("상품명"), r.get(cfg["addr_col"])) for r in na_rows],
         }
 
 # ── 3) 결과 다운로드 (버튼 블록 밖 — rerun 시 위젯 소멸 방지) ────────────
@@ -136,6 +138,9 @@ if res and res["channel"] == channel:
         with st.expander(f"삭제된 N/A {res['na_count']}건 보기"):
             for recv, prod, addr in res["na_rows"]:
                 st.write(f"- {recv} · {prod} · `{addr}`")
-    fname = f"{channel}배송{datetime.now(_KST).strftime('%Y%m%d')}_처리후_.xls"
-    st.download_button("⬇️ 처리후 .xls 다운로드", data=res["bytes"], file_name=fname,
-                       mime="application/vnd.ms-excel", key=f"dl_{channel}", type="primary")
+    _ext = res.get("fmt", "xls")
+    _mime = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+             if _ext == "xlsx" else "application/vnd.ms-excel")
+    fname = f"{channel}배송{datetime.now(_KST).strftime('%Y%m%d')}_처리후_.{_ext}"
+    st.download_button(f"⬇️ 처리후 .{_ext} 다운로드", data=res["bytes"], file_name=fname,
+                       mime=_mime, key=f"dl_{channel}", type="primary")
