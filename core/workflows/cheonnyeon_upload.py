@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 import datetime
+
+_KST = datetime.timezone(datetime.timedelta(hours=9))  # 한국 표준시 UTC+9
 import io
 from collections import Counter
 from pathlib import Path
@@ -299,7 +301,7 @@ def run(baeju_bytes: bytes, baemin_bytes: bytes, sss_bytes: bytes,
         run_date: datetime.date | None = None, sss_password: str = _SSS_PASSWORD):
     """엔드투엔드: 3파일 bytes → (출력 xlsx bytes, 통계 dict)."""
     if run_date is None:
-        run_date = datetime.date.today()
+        run_date = datetime.datetime.now(_KST).date()
     sheets, units = process(
         parse_baeju(baeju_bytes), open_baemin(baemin_bytes),
         open_sss(sss_bytes, sss_password),
