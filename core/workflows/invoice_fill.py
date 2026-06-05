@@ -27,11 +27,20 @@ def nfc(s) -> str:
     return unicodedata.normalize("NFC", str(s)).strip()
 
 
+def to_invoice_number(v):
+    """송장번호를 숫자(int)로. 전부 숫자면 int, 아니면 원본 문자열 유지.
+    openpyxl 등이 float로 읽어 '....0' 꼬리표가 붙은 경우도 정수화."""
+    s = str(v).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return int(s) if s.isdigit() else (s if s else "")
+
+
 # ── 채널 설정 ─────────────────────────────────────────────
 # match_col  : 처리전(채널 템플릿)에서 VLOOKUP 키로 쓰는 컬럼명
 # master_key : 송장 마스터에서 매칭되는 컬럼명 (채널마다 사용자가 알려줌)
 CHANNEL_CONFIG = {
-    "식봄": {"match_col": "상품주문번호", "master_key": "주문번호"},
+    "식봄": {"match_col": "상품주문번호", "master_key": "주문번호", "courier": "한진택배"},
     # "올웨이즈": {"match_col": "...", "master_key": "주문번호"},  # 샘플 받으면 추가
     # "배민상회": {"match_col": "...", "master_key": "주문번호"},
     # "캐시노트": {"match_col": "...", "master_key": "주문번호"},
@@ -71,7 +80,7 @@ def parse_master(file_bytes: bytes) -> list:
     return out
 
 
-def write_template_xls(parsed: dict, rows: list, keep_idx: list, song_col_name="송장번호") -> bytes:
+def write_template_xls(parsed: dict, rows: list, keep_idx: list, song_col_name="송장번호", courier=None) -> bytes:
     """살아남은 행(keep_idx)만, 원본 .xls 양식(시트명·헤더·안내문·타입)으로 재작성."""
     import xlrd
     import xlwt
@@ -89,7 +98,10 @@ def write_template_xls(parsed: dict, rows: list, keep_idx: list, song_col_name="
         types = parsed["types"][i]
         for c in range(len(header)):
             if c == song_col:
-                sh.write(out_r, c, str(row["_송장"]))      # 송장은 항상 문자열
+                sh.write(out_r, c, to_invoice_number(row["_송장"]))   # 송장번호 = 숫자 형식
+            elif header[c] == "택배사":
+                # 택배사: 채널 지정 courier 일괄 기입(없으면 lookup 택배사)
+                sh.write(out_r, c, courier or row.get("_택배사") or "")
             else:
                 val = row.get(header[c])
                 if types[c] == xlrd.XL_CELL_NUMBER:
