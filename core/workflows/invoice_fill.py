@@ -24,6 +24,9 @@
   addr_col      : 합포장 동일주소 판정 컬럼명
   recv_col      : 수령인 표시 컬럼명
   has_guide_row : 헤더 다음 안내문 행 유무 (식봄 .xls = True, 데이터 r2~ / 없으면 데이터 r1~)
+  invoice_as_text : (선택) True면 송장번호를 문자열+일반(General)으로 (배민 등 숫자셀 거부 채널)
+  status_col    : (선택) 출력 시 값 변환할 상태 컬럼명 (예: 배송상태)
+  status_map    : (선택) {원값: 새값} 매핑 (예: {"배송준비중": "배송중"}) — 출력 행에 적용
 """
 import io
 import unicodedata
@@ -111,7 +114,19 @@ CHANNEL_CONFIG = {
         "has_guide_row": False,
         "invoice_as_text": True,     # 배민은 송장번호 셀이 숫자면 거부 → 문자열+일반 형식
     },
-    # "캐시노트": {...},  # 샘플 받으면 추가
+    "캐시노트": {
+        "format": "xlsx",
+        "match_col": "ORD코드",
+        "master_key": "주문번호",
+        "courier": "한진택배",
+        "courier_col": "택배사",
+        "invoice_col": "송장번호",
+        "addr_col": "주소",
+        "recv_col": "수령인명",
+        "has_guide_row": False,
+        "status_col": "배송상태",            # 특이: 배송상태 값을 변환
+        "status_map": {"배송준비중": "배송중"},
+    },
 }
 
 # 송장 마스터(송장출력) 표준 컬럼
@@ -147,8 +162,10 @@ def _parse_template_xls(file_bytes: bytes) -> dict:
 def _parse_template_xlsx(file_bytes: bytes) -> dict:
     """채널 송장 템플릿(.xlsx) 파싱. r0=헤더, r1+=데이터(안내문 행 없음).
     출력은 원본 .xlsx를 in-place 편집하므로 인덱스 정렬 유지를 위해 빈 행도 건너뛰지 않는다.
+    read_only=False: 일부 채널(캐시노트 등)은 dimension 레코드가 잘못돼 read_only가
+    A1:A1로 오인 → 헤더/행 누락. 비 read_only로 calculate_dimension 정확히.
     """
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     ws = wb.active
     rit = ws.iter_rows(values_only=True)
     header = list(next(rit))
@@ -191,6 +208,8 @@ def _write_template_xls(parsed: dict, rows: list, keep_idx: list, cfg: dict) -> 
     song_col = header.index(cfg["invoice_col"])
     courier_col_name = cfg.get("courier_col", "택배사")
     courier = cfg.get("courier")
+    status_col_name = cfg.get("status_col")
+    status_map = cfg.get("status_map") or {}
     wbk = xlwt.Workbook(encoding="utf-8")
     sh = wbk.add_sheet(parsed["sheet_name"])
     for c, v in enumerate(header):
@@ -208,6 +227,9 @@ def _write_template_xls(parsed: dict, rows: list, keep_idx: list, cfg: dict) -> 
                          else to_invoice_number(_sj))   # 송장번호: 텍스트 or 숫자
             elif header[c] == courier_col_name:
                 sh.write(out_r, c, courier or row.get("_택배사") or "")  # 택배사 일괄
+            elif status_col_name and header[c] == status_col_name:
+                val = row.get(header[c])
+                sh.write(out_r, c, status_map.get(val, "" if val is None else val))  # 상태 변환
             else:
                 val = row.get(header[c])
                 if types[c] == xlrd.XL_CELL_NUMBER:
@@ -235,6 +257,9 @@ def _write_template_xlsx(orig_bytes: bytes, parsed: dict, rows: list,
 
     # 1) 모든 데이터 행에 송장번호·택배사 기입
     as_text = cfg.get("invoice_as_text")
+    status_col_name = cfg.get("status_col")
+    status_map = cfg.get("status_map") or {}
+    status_c = (header.index(status_col_name) + 1) if status_col_name and status_col_name in header else None
     for i, row in enumerate(rows):
         er = base + i
         song = row.get("_송장")
@@ -246,6 +271,10 @@ def _write_template_xlsx(orig_bytes: bytes, parsed: dict, rows: list,
         else:
             cell.value = None
         ws.cell(er, cour_c).value = courier or row.get("_택배사") or ws.cell(er, cour_c).value
+        if status_c:                              # 배송상태 등 값 변환(예: 배송준비중→배송중)
+            scell = ws.cell(er, status_c)
+            if scell.value in status_map:
+                scell.value = status_map[scell.value]
 
     # 2) 잔존 N/A 행 삭제(아래에서 위로 — 인덱스 밀림 방지)
     keep = set(keep_idx)
