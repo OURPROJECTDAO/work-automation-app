@@ -1,6 +1,8 @@
 """파일 처리 페이지: 발주 파일 업로드 → 워크플로우 실행 → 결과 다운로드."""
 import sys, tempfile
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_KST = timezone(timedelta(hours=9))  # 한국 표준시 UTC+9
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -63,7 +65,7 @@ with tab_basic:
                         "result_bytes": result_bytes,
                         "result_name":  result_name,
                         "invoice_bytes": invoice_bytes,
-                        "mmdd": datetime.now().strftime("%m%d"),
+                        "mmdd": datetime.now(_KST).strftime("%m%d"),
                         "stats": {labels.get(s, s): len(df) for s, df in sheets.items()},
                     }
                 except Exception as e:
@@ -120,7 +122,7 @@ with tab_cy:
                         f_baeju.getvalue(), f_baemin.getvalue(), f_sss.getvalue())
                     st.session_state["cy_result"] = {
                         "bytes": out, "stats": stats,
-                        "name": datetime.now().strftime("%y%m%d") + ".xlsx",
+                        "name": datetime.now(_KST).strftime("%y%m%d") + ".xlsx",
                     }
                 except Exception as e:
                     st.session_state.pop("cy_result", None)
@@ -285,7 +287,7 @@ with tab_order:
         st.success("✅ Phase 1 완료")
 
         archive_bytes = lo.generate_archive_xlsx(st.session_state["order_archive_df"])
-        today = datetime.now().strftime("%m%d")
+        today = datetime.now(_KST).strftime("%m%d")
         st.download_button(
             "📥 발주자료 아카이브 다운로드",
             data=archive_bytes,
@@ -357,7 +359,7 @@ with tab_order:
         st.success("✅ Phase 2 완료")
 
         result_bytes = lo.generate_result_xlsx(p2_df, so_df)
-        today = datetime.now().strftime("%m%d")
+        today = datetime.now(_KST).strftime("%m%d")
         st.download_button(
             "📥 최종결과물 다운로드 (물류팀 + 품절목록)",
             data=result_bytes,
