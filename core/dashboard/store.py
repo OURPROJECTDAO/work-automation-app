@@ -136,3 +136,34 @@ def ingest(token: str, repo: str, file_or_buf) -> dict:
         "months": sorted(touched),
         "date_range": (str(new["거래일자"].min().date()), str(new["거래일자"].max().date())),
     }
+
+
+# ── 거래처 그룹 매핑 (상호명→그룹) — private repo groups/store_groups.csv ──
+_GROUPS_PATH = "groups/store_groups.csv"
+
+
+def read_groups(token: str, repo: str) -> pd.DataFrame:
+    """상호명→그룹 매핑 DataFrame(컬럼 상호명,그룹). 없으면 빈 DataFrame."""
+    try:
+        with urllib.request.urlopen(
+                _req(token, _contents_url(repo, _GROUPS_PATH),
+                     accept="application/vnd.github.raw")) as r:
+            return pd.read_csv(io.BytesIO(r.read()), dtype=str, encoding="utf-8-sig")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return pd.DataFrame(columns=["상호명", "그룹"])
+        raise
+
+
+def write_groups(token: str, repo: str, df: pd.DataFrame, msg: str | None = None):
+    """상호명,그룹 DataFrame → groups/store_groups.csv 커밋(기존 sha GET 후 덮어씀)."""
+    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+    body = {"message": msg or f"dashboard: 거래처 그룹 갱신 ({len(df)}행)",
+            "content": base64.b64encode(csv_bytes).decode(), "branch": "main"}
+    sha = _get_sha(token, repo, _GROUPS_PATH)
+    if sha:
+        body["sha"] = sha
+    req = _req(token, _contents_url(repo, _GROUPS_PATH),
+               data=json.dumps(body).encode(), method="PUT")
+    with urllib.request.urlopen(req) as r:
+        json.load(r)
