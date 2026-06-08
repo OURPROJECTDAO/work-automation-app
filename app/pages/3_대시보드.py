@@ -422,9 +422,10 @@ def _render_dashboard(pat: str, repo: str) -> None:
             else:
                 chart.index = chart[dim_label]
             st.line_chart(chart["매출"], height=260)
-            disp = agg.copy(); disp["매출"] = disp["매출"].map(lambda v: f"{v:,.0f}")
-            st.dataframe(disp, use_container_width=True, hide_index=True,
-                         height=min(420, 80 + 36 * min(len(disp), 20)))
+            agg["매출"] = agg["매출"].round().astype("int64")
+            st.dataframe(agg, use_container_width=True, hide_index=True,
+                         height=min(420, 80 + 36 * min(len(agg), 20)),
+                         column_config={"매출": st.column_config.NumberColumn(format="localized")})
             fname, dlkey = f"매출_{dim_label}.csv", "dl_time"
         else:
             dim = CAT_DIMS[dim_label]
@@ -434,9 +435,10 @@ def _render_dashboard(pat: str, repo: str) -> None:
             agg["비중(%)"] = (agg["매출"] / total * 100).round(1)
             agg.insert(0, "순위", range(1, len(agg) + 1))
             st.subheader(f"{dim_label}별 매출 — 총 {len(agg):,}개")
-            disp = agg.copy(); disp["매출"] = disp["매출"].map(lambda v: f"{v:,.0f}")
-            st.dataframe(disp, use_container_width=True, hide_index=True,
-                         height=min(560, 80 + 36 * min(len(disp), 30)))
+            agg["매출"] = agg["매출"].round().astype("int64")
+            st.dataframe(agg, use_container_width=True, hide_index=True,
+                         height=min(560, 80 + 36 * min(len(agg), 30)),
+                         column_config={"매출": st.column_config.NumberColumn(format="localized")})
             fname, dlkey = f"매출_{dim_label}별.csv", "dl_cat"
         st.download_button("표 CSV 내려받기", agg.to_csv(index=False).encode("utf-8-sig"),
                            file_name=fname, mime="text/csv", key=dlkey)
@@ -508,11 +510,14 @@ def _render_dashboard(pat: str, repo: str) -> None:
         st.line_chart(chart["이익"], height=260)
 
     show = g[[dim_label, "매출", "매입가", "택배비", "이익", "이익률(%)", "송장"]].copy()
-    disp = show.copy()
     for c in ["매출", "매입가", "택배비", "이익", "송장"]:
-        disp[c] = disp[c].map(lambda v: f"{v:,.0f}")
-    st.dataframe(disp, use_container_width=True, hide_index=True,
-                 height=min(520, 80 + 36 * min(len(disp), 24)))
+        show[c] = show[c].round().astype("int64")
+    _num = st.column_config.NumberColumn(format="localized")
+    st.dataframe(show, use_container_width=True, hide_index=True,
+                 height=min(520, 80 + 36 * min(len(show), 24)),
+                 column_config={"매출": _num, "매입가": _num, "택배비": _num,
+                                "이익": _num, "송장": _num,
+                                "이익률(%)": st.column_config.NumberColumn(format="%.2f")})
     st.download_button("표 CSV 내려받기", show.to_csv(index=False).encode("utf-8-sig"),
                        file_name=f"이익_{dim_label}{'_보정' if unit == 2500 else ''}.csv",
                        mime="text/csv", key="dl_profit")
