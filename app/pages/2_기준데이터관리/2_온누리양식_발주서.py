@@ -1,4 +1,4 @@
-"""단가 기준 데이터 — 온누리양식 SKU 단가표 관리."""
+"""{doc}"""
 import sys, base64, json, urllib.request, urllib.parse
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))  # repo root
@@ -44,6 +44,32 @@ def load_ref(filename: str) -> pd.DataFrame:
         return pd.read_csv(path, encoding="utf-8-sig", dtype=str).fillna("")
     return pd.DataFrame()
 
+def _edit_with_search(df, name, key_col=None, height_cap=560):
+    """검색 필터 + 인라인 편집 + 키 무관 merge-back.
+    필터가 걸려 있으면 필터된 행만 편집 대상이 되고, 필터 밖 행은 그대로 보존된다.
+    (부분집합으로 전체 CSV를 덮어써 나머지가 날아가는 사고 방지.)"""
+    import pandas as _pd
+    q = st.text_input("🔍 검색 (모든 열 대상)", key=f"search_{name}",
+                      placeholder="코드·이름 일부 입력 · 비우면 전체 편집")
+    sdf = df.fillna("").astype(str)
+    if q:
+        mask = sdf.apply(lambda c: c.str.contains(q, case=False, na=False, regex=False)).any(axis=1)
+        view = df[mask]
+        st.caption(f"🔎 {int(mask.sum())}건 일치 / 전체 {len(df)}건 · "
+                   f"**필터된 행만 편집**되고 나머지는 보존됩니다.")
+    else:
+        mask = _pd.Series(True, index=df.index)
+        view = df
+    h = min(38 * (len(view) + 1) + 3, height_cap)
+    edited = st.data_editor(view, use_container_width=True, num_rows="dynamic",
+                            key=f"editor_{name}", height=h)
+    result = _pd.concat([df[~mask], edited], ignore_index=True)
+    if key_col and key_col in result.columns:
+        result = result[result[key_col].astype(str).str.strip() != ""].reset_index(drop=True)
+    else:
+        result = result.dropna(how="all").reset_index(drop=True)
+    return result
+
 def render_tabs(config: dict, readonly: bool, pat: str) -> None:
     tabs = st.tabs(list(config.keys()))
     for tab, (name, cfg) in zip(tabs, config.items()):
@@ -52,8 +78,17 @@ def render_tabs(config: dict, readonly: bool, pat: str) -> None:
             st.caption(cfg["desc"])
             st.write(f"현재 **{len(df)}건**")
             if cfg["large"]:
-                st.dataframe(df.head(20), use_container_width=True, height=300)
-                st.caption("※ 처음 20행만 미리보기. 전체 교체는 아래에서 파일 업로드.")
+                ql = st.text_input("🔍 검색 (모든 열 대상)", key=f"searchL_{name}",
+                                   placeholder="비우면 처음 20행 미리보기")
+                if ql:
+                    sdf = df.fillna("").astype(str)
+                    m = sdf.apply(lambda c: c.str.contains(ql, case=False, na=False,
+                                                           regex=False)).any(axis=1)
+                    st.dataframe(df[m], use_container_width=True, height=300)
+                    st.caption(f"🔎 {int(m.sum())}건 / 전체 {len(df)}건 (대용량 — 읽기전용 검색)")
+                else:
+                    st.dataframe(df.head(20), use_container_width=True, height=300)
+                    st.caption("※ 처음 20행만 미리보기. 대용량이라 인라인 편집 대신 아래에서 파일 교체.")
                 if not readonly:
                     new_file = st.file_uploader("새 파일로 교체 (Excel .xlsx 또는 CSV .csv)",
                         type=["xlsx","csv"], key=f"upload_{name}")
@@ -73,13 +108,8 @@ def render_tabs(config: dict, readonly: bool, pat: str) -> None:
                 if readonly:
                     st.dataframe(df, use_container_width=True)
                 else:
-                    edited = st.data_editor(df, use_container_width=True,
-                        num_rows="dynamic", key=f"editor_{name}")
+                    save_df = _edit_with_search(df, name, cfg.get("key_col"))
                     if st.button(f"💾 {name} 저장", key=f"save_{name}"):
-                        key_col = cfg.get("key_col")
-                        save_df = (edited[edited[key_col].str.strip() != ""].reset_index(drop=True)
-                                   if key_col and key_col in edited.columns
-                                   else edited.dropna(how="all").reset_index(drop=True))
                         with st.spinner("GitHub에 저장 중..."):
                             ok = _gh_put_csv(f"reference/{cfg['file']}", save_df,
                                 f"data: {name} 업데이트 ({len(save_df)}건)", pat)
