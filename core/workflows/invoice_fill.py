@@ -100,6 +100,7 @@ CHANNEL_CONFIG = {
         "addr_col": "주소",
         "recv_col": "수령인",
         "has_guide_row": False,
+        "invoice_as_text": True,     # 올웨이즈 운송장번호는 문자열+일반(General)로 기입 (골든 0608 실측: data_type='s')
     },
     "배민상회": {
         "format": "xlsx",
