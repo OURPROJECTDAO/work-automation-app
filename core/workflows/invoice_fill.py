@@ -148,7 +148,10 @@ def _parse_template_xls(file_bytes: bytes) -> dict:
     셀 타입을 보존해 출력 시 원본 양식 재현.
     """
     import xlrd
-    book = xlrd.open_workbook(file_contents=file_bytes)
+    # 일부 식봄 export OLE2는 CompDoc 디렉터리가 비표준이라 xlrd 기본 파서가
+    # CompDocError(Workbook corruption)로 죽음 → 송장이 아예 안 채워짐.
+    # ignore_workbook_corruption=True 로 관대하게 읽음(정상 파일엔 무영향).
+    book = xlrd.open_workbook(file_contents=file_bytes, ignore_workbook_corruption=True)
     sh = book.sheet_by_index(0)
     header = [sh.cell_value(0, c) for c in range(sh.ncols)]
     guide = [sh.cell_value(1, c) for c in range(sh.ncols)] if sh.nrows > 1 else [""] * sh.ncols
