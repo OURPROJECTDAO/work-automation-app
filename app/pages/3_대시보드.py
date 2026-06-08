@@ -1,7 +1,7 @@
 """대시보드 (Phase 4) — 매출 집계 + 데이터 추가 + 거래처 그룹 + 구분 분류.
 
 탭:
- 📊 대시보드   : 매출 KPI + 구분/그룹/거래처/상품/관리코드별 집계.
+ 📊 대시보드   : 매출 KPI + 기간(날짜범위)·일/월/연 추이·구분/그룹/거래처/상품/관리코드 집계 + 그룹 내 거래처 체크박스.
  ➕ 데이터 추가 : 영업이익현황 .xlsx → 날짜구간 교체로 월 파티션 누적.
  👥 거래처 그룹 : 상호명→그룹 배정(검색·인라인·일괄). private data repo 저장.
  🏷 구분 분류  : 미분류 관리코드 → 멸치쇼핑 분류표(app repo) 추가.
@@ -292,60 +292,152 @@ with tab_cls:
                 st.success(f"{n}건 분류표에 반영. 재배포(1~2분) 후 대시보드에 적용됩니다.")
 
 # ── [대시보드] 탭 ──────────────────────────────────────────────
+def _render_dashboard(pat: str, repo: str) -> None:
+    df = load_sales(pat, repo)
+    if df.empty:
+        st.info("적재된 매출 데이터가 없습니다. [➕ 데이터 추가] 탭에서 파일을 올려주세요.")
+        return
+    gmap = load_group_map(pat, repo)
+
+    _pref = ["음료", "식품", "선물세트", "미분류"]
+    _present = list(df["구분"].dropna().unique())
+    gubuns = ([g for g in _pref if g in _present]
+              + sorted(g for g in _present if g not in _pref))
+    group_opts = sorted(set(gmap.values())) + ["(미지정)"]
+    dmin, dmax = df["거래일자"].min().date(), df["거래일자"].max().date()
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        dr = st.date_input("기간", value=(dmin, dmax),
+                           min_value=dmin, max_value=dmax, format="YYYY-MM-DD")
+    with c2:
+        sel_gubun = st.multiselect("구분", gubuns, default=gubuns)
+    with c3:
+        sel_group = st.multiselect("그룹", group_opts, default=group_opts)
+
+    # date_input 범위: 선택 도중엔 1-tuple이 올 수 있음 → 방어
+    if isinstance(dr, (list, tuple)):
+        d_start, d_end = (dr[0], dr[-1]) if dr else (dmin, dmax)
+    else:
+        d_start = d_end = dr
+    ts0, ts1 = pd.Timestamp(d_start), pd.Timestamp(d_end) + pd.Timedelta(days=1)
+
+    view = df[(df["거래일자"] >= ts0) & (df["거래일자"] < ts1)
+              & df["구분"].isin(sel_gubun)].copy()
+    view["그룹"] = view["상호명"].map(lambda s: gmap.get(_nfc(s), "(미지정)"))
+    view = view[view["그룹"].isin(sel_group)]
+    if view.empty:
+        st.info("선택한 조건에 해당하는 데이터가 없습니다.")
+        return
+
+    # ── 그룹 내 거래처 선택 (체크박스) ──────────────────────────
+    SMALL = 50  # 멤버 50곳 이하 그룹만 체크박스. 큰 그룹은 '제외할 거래처' 검색.
+    store_sales = view.groupby("상호명", observed=True)["판매금액"].sum()
+    members_by_grp: dict = {}
+    for store, sales in store_sales.items():
+        g = gmap.get(_nfc(store), "(미지정)")
+        members_by_grp.setdefault(g, []).append((store, int(sales)))
+    for g in members_by_grp:
+        members_by_grp[g].sort(key=lambda t: -t[1])
+
+    small_rows, big_groups = [], {}
+    for g, members in members_by_grp.items():
+        if len(members) <= SMALL:
+            small_rows += [{"포함": True, "그룹": g, "거래처": s, "매출": v}
+                           for s, v in members]
+        else:
+            big_groups[g] = members
+
+    excluded: set = set()
+    if small_rows or big_groups:
+        with st.expander("그룹 내 거래처 선택 (체크 해제 = 제외)", expanded=bool(small_rows)):
+            if small_rows:
+                ed = st.data_editor(
+                    pd.DataFrame(small_rows), key="dash_store_pick",
+                    use_container_width=True, hide_index=True, num_rows="fixed",
+                    column_config={
+                        "포함": st.column_config.CheckboxColumn(default=True),
+                        "그룹": st.column_config.TextColumn(disabled=True),
+                        "거래처": st.column_config.TextColumn(disabled=True),
+                        "매출": st.column_config.NumberColumn(format="%d", disabled=True),
+                    },
+                    height=min(560, 80 + 36 * min(len(small_rows), 30)))
+                excluded |= {r["거래처"] for _, r in ed.iterrows() if not r["포함"]}
+            for g, members in big_groups.items():
+                opts = [s for s, _ in members]
+                ex = st.multiselect(f"제외할 거래처 — {g} ({len(opts):,}곳)",
+                                    opts, key=f"dash_excl_{g}")
+                excluded |= set(ex)
+    if excluded:
+        view = view[~view["상호명"].isin(excluded)]
+        if view.empty:
+            st.info("거래처를 모두 제외하여 표시할 데이터가 없습니다.")
+            return
+
+    # ── KPI ────────────────────────────────────────────────────
+    total = view["판매금액"].sum()
+    k1, k2, k3 = st.columns(3)
+    k1.metric("총 매출", f"{total/1e8:,.1f}억")
+    k2.metric("거래 건수", f"{len(view):,}건")
+    k3.metric("기간",
+              f"{view['거래일자'].min():%Y-%m-%d} ~ {view['거래일자'].max():%Y-%m-%d}")
+    st.divider()
+
+    # ── 집계 기준 (시간축 / 카테고리) ──────────────────────────
+    TIME_DIMS = ["일별", "월별", "연별"]
+    CAT_DIMS = {"구분": "구분", "그룹": "그룹", "거래처": "상호명",
+                "상품": "상품명", "관리코드": "관리코드"}
+    dim_label = st.selectbox("집계 기준", TIME_DIMS + list(CAT_DIMS), index=1)  # 기본 월별
+
+    if dim_label in TIME_DIMS:
+        if dim_label == "일별":
+            key = view["거래일자"].dt.strftime("%Y-%m-%d")
+        elif dim_label == "월별":
+            key = view["거래일자"].dt.strftime("%Y-%m")
+        else:
+            key = view["거래일자"].dt.year.astype(str)
+        agg = (view.assign(_k=key).groupby("_k", observed=True)["판매금액"].sum()
+               .sort_index().reset_index())  # 제로패딩 문자열 → 시간순
+        agg.columns = [dim_label, "매출"]
+        agg["비중(%)"] = (agg["매출"] / total * 100).round(1)
+
+        st.subheader(f"{dim_label} 매출 추이 — {len(agg):,}개 구간")
+        chart = agg.copy()
+        if dim_label == "일별":
+            chart.index = pd.to_datetime(chart[dim_label])
+        elif dim_label == "월별":
+            chart.index = pd.to_datetime(chart[dim_label] + "-01")
+        else:
+            chart.index = chart[dim_label]
+        st.line_chart(chart["매출"], height=260)
+
+        disp = agg.copy()
+        disp["매출"] = disp["매출"].map(lambda v: f"{v:,.0f}")
+        st.dataframe(disp, use_container_width=True, hide_index=True,
+                     height=min(420, 80 + 36 * min(len(disp), 20)))
+        fname, dlkey = f"매출_{dim_label}.csv", "dl_time"
+    else:
+        dim = CAT_DIMS[dim_label]
+        agg = (view.groupby(dim, observed=True)["판매금액"].sum()
+               .sort_values(ascending=False).reset_index())
+        agg.columns = [dim_label, "매출"]
+        agg["비중(%)"] = (agg["매출"] / total * 100).round(1)
+        agg.insert(0, "순위", range(1, len(agg) + 1))
+
+        st.subheader(f"{dim_label}별 매출 — 총 {len(agg):,}개")
+        disp = agg.copy()
+        disp["매출"] = disp["매출"].map(lambda v: f"{v:,.0f}")
+        st.dataframe(disp, use_container_width=True, hide_index=True,
+                     height=min(560, 80 + 36 * min(len(disp), 30)))
+        fname, dlkey = f"매출_{dim_label}별.csv", "dl_cat"
+
+    st.download_button("표 CSV 내려받기",
+                       agg.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=fname, mime="text/csv", key=dlkey)
+
+
 with tab_dash:
     if not pat:
         st.warning("저장소 접근 정보(secrets `[data] pat`)가 설정되지 않았습니다.")
     else:
-        df = load_sales(pat, repo)
-        if df.empty:
-            st.info("적재된 매출 데이터가 없습니다. [➕ 데이터 추가] 탭에서 파일을 올려주세요.")
-        else:
-            gmap = load_group_map(pat, repo)
-            years = sorted(df["연도"].unique())
-            _pref = ["음료", "식품", "선물세트", "미분류"]
-            _present = list(df["구분"].dropna().unique())
-            gubuns = ([g for g in _pref if g in _present]
-                      + sorted(g for g in _present if g not in _pref))
-            group_opts = sorted(set(gmap.values())) + ["(미지정)"]
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                sel_years = st.multiselect("연도", years, default=years)
-            with c2:
-                sel_gubun = st.multiselect("구분", gubuns, default=gubuns)
-            with c3:
-                sel_group = st.multiselect("그룹", group_opts, default=group_opts)
-
-            view = df[df["연도"].isin(sel_years) & df["구분"].isin(sel_gubun)].copy()
-            view["그룹"] = view["상호명"].map(lambda s: gmap.get(_nfc(s), "(미지정)"))
-            view = view[view["그룹"].isin(sel_group)]
-            if view.empty:
-                st.info("선택한 조건에 해당하는 데이터가 없습니다.")
-            else:
-                total = view["판매금액"].sum()
-                k1, k2, k3 = st.columns(3)
-                k1.metric("총 매출", f"{total/1e8:,.1f}억")
-                k2.metric("거래 건수", f"{len(view):,}건")
-                k3.metric("기간", f"{view['거래일자'].min():%Y-%m} ~ {view['거래일자'].max():%Y-%m}")
-                st.divider()
-
-                DIMS = {"구분": "구분", "그룹": "그룹", "거래처": "상호명",
-                        "상품": "상품명", "관리코드": "관리코드"}
-                dim_label = st.selectbox("집계 기준", list(DIMS), index=0)
-                dim = DIMS[dim_label]
-                agg = (view.groupby(dim, observed=True)["판매금액"].sum()
-                       .sort_values(ascending=False).reset_index())
-                agg.columns = [dim_label, "매출"]
-                agg["비중(%)"] = (agg["매출"] / total * 100).round(1)
-                agg.insert(0, "순위", range(1, len(agg) + 1))
-
-                st.subheader(f"{dim_label}별 매출 — 총 {len(agg):,}개")
-                disp = agg.copy()
-                disp["매출"] = disp["매출"].map(lambda v: f"{v:,.0f}")
-                st.dataframe(disp, use_container_width=True, hide_index=True,
-                             height=min(560, 80 + 36 * min(len(disp), 30)))
-                st.download_button(
-                    "표 CSV 내려받기",
-                    agg.to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"매출_{dim_label}별.csv",
-                    mime="text/csv",
-                )
+        _render_dashboard(pat, repo)
