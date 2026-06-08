@@ -94,6 +94,32 @@ def _save_csv(token: str, filename: str, df: pd.DataFrame, commit_msg: str):
     _github_put(token, f"{_REF_PATH}/{filename}", b64, sha, commit_msg)
 
 
+def _edit_with_search(df, name, key_col=None, height_cap=560):
+    """검색 필터 + 인라인 편집 + 키 무관 merge-back.
+    필터가 걸려 있으면 필터된 행만 편집 대상이 되고, 필터 밖 행은 그대로 보존된다.
+    (부분집합으로 전체 CSV를 덮어써 나머지가 날아가는 사고 방지.)"""
+    import pandas as _pd
+    q = st.text_input("🔍 검색 (모든 열 대상)", key=f"search_{name}",
+                      placeholder="코드·이름 일부 입력 · 비우면 전체 편집")
+    sdf = df.fillna("").astype(str)
+    if q:
+        mask = sdf.apply(lambda c: c.str.contains(q, case=False, na=False, regex=False)).any(axis=1)
+        view = df[mask]
+        st.caption(f"🔎 {int(mask.sum())}건 일치 / 전체 {len(df)}건 · "
+                   f"**필터된 행만 편집**되고 나머지는 보존됩니다.")
+    else:
+        mask = _pd.Series(True, index=df.index)
+        view = df
+    h = min(38 * (len(view) + 1) + 3, height_cap)
+    edited = st.data_editor(view, use_container_width=True, num_rows="dynamic",
+                            key=f"editor_{name}", height=h)
+    result = _pd.concat([df[~mask], edited], ignore_index=True)
+    if key_col and key_col in result.columns:
+        result = result[result[key_col].astype(str).str.strip() != ""].reset_index(drop=True)
+    else:
+        result = result.dropna(how="all").reset_index(drop=True)
+    return result
+
 # ─────────────────────────────────────────────────────────
 st.title("📋 기준데이터관리 — 발주서출력업무")
 
@@ -117,11 +143,11 @@ for tab, (tab_name, cfg) in zip(tabs, _REF_CONFIG.items()):
             # 규격파일 : 검색 전용
             query = st.text_input("🔍 관리코드·상품명 검색", key=f"search_{tab_name}")
             if query:
-                mask = df.astype(str).apply(
-                    lambda col: col.str.contains(query, na=False)
+                mask = df.fillna("").astype(str).apply(
+                    lambda col: col.str.contains(query, case=False, na=False, regex=False)
                 ).any(axis=1)
                 st.dataframe(df[mask], use_container_width=True, height=350)
-                st.caption(f"{mask.sum()}건 검색됨 / 전체 {len(df)}건")
+                st.caption(f"{int(mask.sum())}건 검색됨 / 전체 {len(df)}건")
             else:
                 st.dataframe(df.head(30), use_container_width=True, height=350)
                 st.caption(f"전체 {len(df)}건 (상위 30건 미리보기)")
@@ -140,18 +166,11 @@ for tab, (tab_name, cfg) in zip(tabs, _REF_CONFIG.items()):
                     st.rerun()
 
         else:
-            # 일반 : 인라인 편집
-            edited = st.data_editor(
-                df,
-                use_container_width=True,
-                num_rows="dynamic",
-                key=f"editor_{tab_name}",
-                height=400,
-            )
+            # 일반 : 검색 + 인라인 편집 (필터된 행만 편집, 나머지 보존)
+            save_df = _edit_with_search(df, tab_name, cfg["key_col"])
             if st.button(f"💾 {tab_name} 저장", key=f"save_{tab_name}",
                          type="primary", use_container_width=True):
-                clean = edited.dropna(subset=[cfg["key_col"]])
-                _save_csv(token, cfg["filename"], clean,
+                _save_csv(token, cfg["filename"], save_df,
                           f"ref: {tab_name} 갱신")
-                st.success(f"✅ {len(clean)}건 저장 완료")
+                st.success(f"✅ {len(save_df)}건 저장 완료")
                 st.rerun()
