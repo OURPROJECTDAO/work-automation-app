@@ -301,6 +301,61 @@ def _won(v) -> str:
     return f"{v:,.0f}"
 
 
+
+def _dim_key(view, label):
+    """집계 기준 라벨 → (key Series, is_time)."""
+    if label == "일별":
+        return view["거래일자"].dt.strftime("%Y-%m-%d"), True
+    if label == "월별":
+        return view["거래일자"].dt.strftime("%Y-%m"), True
+    if label == "연별":
+        return view["거래일자"].dt.year.astype(str), True
+    col = {"구분": "구분", "그룹": "그룹", "거래처": "상호명",
+           "상품": "상품명", "관리코드": "관리코드"}[label]
+    return view[col].astype(str), False
+
+
+def _pivot_table(view, box, d1, d2, mode, unit):
+    """행=d1, 열=d2 교차표. 셀=매출(매출 모드) / 이익(이익 모드). 반환 (표시DF, 부제, 전체행수)."""
+    k1, _ = _dim_key(view, d1)
+    k2, t2 = _dim_key(view, d2)
+    v = view.assign(_r=k1, _c=k2)
+    if mode == "매출":
+        v = v[~box]
+        p = (v.groupby(["_r", "_c"], observed=True)["판매금액"].sum()
+             .unstack("_c", fill_value=0.0))
+    else:
+        v["_pi"] = v["판매이익"].where(~box, 0.0)
+        v["_cnt"] = v["수량"].where(box, 0.0)
+        gg = v.groupby(["_r", "_c"], observed=True).agg(pi=("_pi", "sum"), cnt=("_cnt", "sum"))
+        gg["val"] = gg["pi"] - gg["cnt"] * unit
+        p = gg["val"].unstack("_c", fill_value=0.0)
+    note = ""
+    if t2:
+        cols = sorted(p.columns)
+        if len(cols) > 60:
+            note += f" · 열 {len(cols)}개(가로 스크롤)"
+    else:
+        cols = list(p.sum(axis=0).sort_values(ascending=False).index)
+        if len(cols) > 30:
+            note += f" · 열 상위 30개(전체 {len(cols)})"
+            cols = cols[:30]
+    p = p[cols]
+    p["합계"] = p.sum(axis=1)
+    grand = p.sum(axis=0)
+    p = p.sort_values("합계", ascending=False)
+    n = len(p)
+    if n > 100:
+        p = p.head(100); note += f" · 행 상위 100개(전체 {n})"
+    p = p.round().astype("int64")
+    out = p.reset_index().rename(columns={"_r": d1})
+    gt = {d1: "합계"}
+    for c in list(cols) + ["합계"]:
+        gt[c] = int(round(grand[c]))
+    out = pd.concat([out, pd.DataFrame([gt])], ignore_index=True)
+    return out, note, n
+
+
 def _render_dashboard(pat: str, repo: str) -> None:
     df = load_sales(pat, repo)
     if df.empty:
@@ -405,7 +460,24 @@ def _render_dashboard(pat: str, repo: str) -> None:
         TIME_DIMS = ["일별", "월별", "연별"]
         CAT_DIMS = {"구분": "구분", "그룹": "그룹", "거래처": "상호명",
                     "상품": "상품명", "관리코드": "관리코드"}
-        dim_label = st.selectbox("집계 기준", TIME_DIMS + list(CAT_DIMS), index=1)
+        ALL_DIMS = TIME_DIMS + list(CAT_DIMS)
+        cc = st.columns(2)
+        with cc[0]:
+            d1 = st.selectbox("집계 기준 (행)", ALL_DIMS, index=1, key="sales_d1")
+        with cc[1]:
+            d2 = st.selectbox("× 기준 2 (열, 선택)", ["(없음)"] + [d for d in ALL_DIMS if d != d1],
+                              key="sales_d2")
+        if d2 != "(없음)":
+            out, note, n = _pivot_table(view, box, d1, d2, "매출", None)
+            st.subheader(f"{d1} × {d2} 매출 — {min(n, 100):,}행{note}")
+            cfg = {c: st.column_config.NumberColumn(format="localized")
+                   for c in out.columns if c != d1}
+            st.dataframe(out, use_container_width=True, hide_index=True, column_config=cfg,
+                         height=min(620, 80 + 36 * min(len(out), 28)))
+            st.download_button("표 CSV 내려받기", out.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"매출_{d1}_x_{d2}.csv", mime="text/csv", key="dl_pivot_sales")
+            return
+        dim_label = d1
         if dim_label in TIME_DIMS:
             fmt = {"일별": "%Y-%m-%d", "월별": "%Y-%m"}.get(dim_label)
             key = vs["거래일자"].dt.strftime(fmt) if fmt else vs["거래일자"].dt.year.astype(str)
@@ -473,7 +545,24 @@ def _render_dashboard(pat: str, repo: str) -> None:
 
     DIMS = {"일별": "거래일자", "월별": "거래일자", "연별": "거래일자",
             "거래처": "상호명", "그룹": "그룹"}
-    dim_label = st.selectbox("집계 기준", list(DIMS), index=1)
+    cc = st.columns(2)
+    with cc[0]:
+        d1 = st.selectbox("집계 기준 (행)", list(DIMS), index=1, key="profit_d1")
+    with cc[1]:
+        d2 = st.selectbox("× 기준 2 (열, 선택)", ["(없음)"] + [d for d in DIMS if d != d1],
+                          key="profit_d2")
+    if d2 != "(없음)":
+        out, note, n = _pivot_table(view, box, d1, d2, "이익", unit)
+        st.subheader(f"{d1} × {d2} 이익{suf} — {min(n, 100):,}행{note}")
+        cfg = {c: st.column_config.NumberColumn(format="localized")
+               for c in out.columns if c != d1}
+        st.dataframe(out, use_container_width=True, hide_index=True, column_config=cfg,
+                     height=min(620, 80 + 36 * min(len(out), 28)))
+        st.download_button("표 CSV 내려받기", out.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"이익_{d1}_x_{d2}{'_보정' if unit == 2500 else ''}.csv",
+                           mime="text/csv", key="dl_pivot_profit")
+        return
+    dim_label = d1
     if dim_label == "일별":
         key = view["거래일자"].dt.strftime("%Y-%m-%d")
     elif dim_label == "월별":
