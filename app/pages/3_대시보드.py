@@ -292,6 +292,15 @@ with tab_cls:
                 st.success(f"{n}건 분류표에 반영. 재배포(1~2분) 후 대시보드에 적용됩니다.")
 
 # ── [대시보드] 탭 ──────────────────────────────────────────────
+def _won(v) -> str:
+    v = float(v)
+    if abs(v) >= 1e8:
+        return f"{v/1e8:,.2f}억"
+    if abs(v) >= 1e4:
+        return f"{v/1e4:,.0f}만"
+    return f"{v:,.0f}"
+
+
 def _render_dashboard(pat: str, repo: str) -> None:
     df = load_sales(pat, repo)
     if df.empty:
@@ -306,48 +315,53 @@ def _render_dashboard(pat: str, repo: str) -> None:
     group_opts = sorted(set(gmap.values())) + ["(미지정)"]
     dmin, dmax = df["거래일자"].min().date(), df["거래일자"].max().date()
 
+    metric = st.radio("지표", ["매출", "이익"], horizontal=True, key="dash_metric")
+    is_profit = metric == "이익"
+
     c1, c2, c3 = st.columns(3)
     with c1:
         dr = st.date_input("기간", value=(dmin, dmax),
                            min_value=dmin, max_value=dmax, format="YYYY-MM-DD")
     with c2:
-        sel_gubun = st.multiselect("구분", gubuns, default=gubuns)
+        if is_profit:
+            st.caption("이익은 **전체 구분** 기준 — 택배비는 상품 구분에 배분되지 않습니다.")
+            sel_gubun = gubuns
+        else:
+            sel_gubun = st.multiselect("구분", gubuns, default=gubuns)
     with c3:
         sel_group = st.multiselect("그룹", group_opts, default=group_opts)
 
-    # date_input 범위: 선택 도중엔 1-tuple이 올 수 있음 → 방어
     if isinstance(dr, (list, tuple)):
         d_start, d_end = (dr[0], dr[-1]) if dr else (dmin, dmax)
     else:
         d_start = d_end = dr
     ts0, ts1 = pd.Timestamp(d_start), pd.Timestamp(d_end) + pd.Timedelta(days=1)
 
-    view = df[(df["거래일자"] >= ts0) & (df["거래일자"] < ts1)
-              & df["구분"].isin(sel_gubun)].copy()
+    view = df[(df["거래일자"] >= ts0) & (df["거래일자"] < ts1)].copy()
+    if not is_profit:
+        view = view[view["구분"].isin(sel_gubun)]
     view["그룹"] = view["상호명"].map(lambda s: gmap.get(_nfc(s), "(미지정)"))
     view = view[view["그룹"].isin(sel_group)]
     if view.empty:
         st.info("선택한 조건에 해당하는 데이터가 없습니다.")
         return
 
-    # ── 그룹 내 거래처 선택 (체크박스) ──────────────────────────
-    SMALL = 50  # 멤버 50곳 이하 그룹만 체크박스. 큰 그룹은 '제외할 거래처' 검색.
-    store_sales = view.groupby("상호명", observed=True)["판매금액"].sum()
+    # ── 그룹 내 거래처 선택 (체크박스, 매출 기준 멤버) ──────────
+    _box0 = view["관리코드"].astype(str) == "00-12"
+    SMALL = 50
+    store_sales = view.loc[~_box0].groupby("상호명", observed=True)["판매금액"].sum()
     members_by_grp: dict = {}
     for store, sales in store_sales.items():
         g = gmap.get(_nfc(store), "(미지정)")
         members_by_grp.setdefault(g, []).append((store, int(sales)))
     for g in members_by_grp:
         members_by_grp[g].sort(key=lambda t: -t[1])
-
     small_rows, big_groups = [], {}
     for g, members in members_by_grp.items():
         if len(members) <= SMALL:
-            small_rows += [{"포함": True, "그룹": g, "거래처": s, "매출": v}
-                           for s, v in members]
+            small_rows += [{"포함": True, "그룹": g, "거래처": s, "매출": v} for s, v in members]
         else:
             big_groups[g] = members
-
     excluded: set = set()
     if small_rows or big_groups:
         with st.expander("그룹 내 거래처 선택 (체크 해제 = 제외)", expanded=bool(small_rows)):
@@ -365,8 +379,7 @@ def _render_dashboard(pat: str, repo: str) -> None:
                 excluded |= {r["거래처"] for _, r in ed.iterrows() if not r["포함"]}
             for g, members in big_groups.items():
                 opts = [s for s, _ in members]
-                ex = st.multiselect(f"제외할 거래처 — {g} ({len(opts):,}곳)",
-                                    opts, key=f"dash_excl_{g}")
+                ex = st.multiselect(f"제외할 거래처 — {g} ({len(opts):,}곳)", opts, key=f"dash_excl_{g}")
                 excluded |= set(ex)
     if excluded:
         view = view[~view["상호명"].isin(excluded)]
@@ -374,66 +387,135 @@ def _render_dashboard(pat: str, repo: str) -> None:
             st.info("거래처를 모두 제외하여 표시할 데이터가 없습니다.")
             return
 
-    # ── KPI ────────────────────────────────────────────────────
-    total = view["판매금액"].sum()
-    k1, k2, k3 = st.columns(3)
-    k1.metric("총 매출", f"{total/1e8:,.1f}억")
-    k2.metric("거래 건수", f"{len(view):,}건")
-    k3.metric("기간",
-              f"{view['거래일자'].min():%Y-%m-%d} ~ {view['거래일자'].max():%Y-%m-%d}")
+    box = view["관리코드"].astype(str) == "00-12"  # 택배비 라인(C타입 택배비)
+
+    # ── 매출 모드 (택배비 라인 00-12 제외) ─────────────────────
+    if not is_profit:
+        vs = view[~box]
+        if vs.empty:
+            st.info("선택한 조건에 해당하는 매출 데이터가 없습니다.")
+            return
+        total = vs["판매금액"].sum()
+        k1, k2, k3 = st.columns(3)
+        k1.metric("총 매출", _won(total))
+        k2.metric("거래 건수", f"{len(vs):,}건")
+        k3.metric("기간", f"{vs['거래일자'].min():%Y-%m-%d} ~ {vs['거래일자'].max():%Y-%m-%d}")
+        st.divider()
+
+        TIME_DIMS = ["일별", "월별", "연별"]
+        CAT_DIMS = {"구분": "구분", "그룹": "그룹", "거래처": "상호명",
+                    "상품": "상품명", "관리코드": "관리코드"}
+        dim_label = st.selectbox("집계 기준", TIME_DIMS + list(CAT_DIMS), index=1)
+        if dim_label in TIME_DIMS:
+            fmt = {"일별": "%Y-%m-%d", "월별": "%Y-%m"}.get(dim_label)
+            key = vs["거래일자"].dt.strftime(fmt) if fmt else vs["거래일자"].dt.year.astype(str)
+            agg = (vs.assign(_k=key).groupby("_k", observed=True)["판매금액"].sum()
+                   .sort_index().reset_index())
+            agg.columns = [dim_label, "매출"]
+            agg["비중(%)"] = (agg["매출"] / total * 100).round(1)
+            st.subheader(f"{dim_label} 매출 추이 — {len(agg):,}개 구간")
+            chart = agg.copy()
+            if dim_label == "일별":
+                chart.index = pd.to_datetime(chart[dim_label])
+            elif dim_label == "월별":
+                chart.index = pd.to_datetime(chart[dim_label] + "-01")
+            else:
+                chart.index = chart[dim_label]
+            st.line_chart(chart["매출"], height=260)
+            disp = agg.copy(); disp["매출"] = disp["매출"].map(lambda v: f"{v:,.0f}")
+            st.dataframe(disp, use_container_width=True, hide_index=True,
+                         height=min(420, 80 + 36 * min(len(disp), 20)))
+            fname, dlkey = f"매출_{dim_label}.csv", "dl_time"
+        else:
+            dim = CAT_DIMS[dim_label]
+            agg = (vs.groupby(dim, observed=True)["판매금액"].sum()
+                   .sort_values(ascending=False).reset_index())
+            agg.columns = [dim_label, "매출"]
+            agg["비중(%)"] = (agg["매출"] / total * 100).round(1)
+            agg.insert(0, "순위", range(1, len(agg) + 1))
+            st.subheader(f"{dim_label}별 매출 — 총 {len(agg):,}개")
+            disp = agg.copy(); disp["매출"] = disp["매출"].map(lambda v: f"{v:,.0f}")
+            st.dataframe(disp, use_container_width=True, hide_index=True,
+                         height=min(560, 80 + 36 * min(len(disp), 30)))
+            fname, dlkey = f"매출_{dim_label}별.csv", "dl_cat"
+        st.download_button("표 CSV 내려받기", agg.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=fname, mime="text/csv", key=dlkey)
+        return
+
+    # ── 이익 모드 (00-12 = 택배비, 전체 구분) ──────────────────
+    fee_label = st.radio("택배비 단가 (송장 1건당)",
+                         ["3,000원 (ERP 입력값)", "2,500원 (보정값)"],
+                         horizontal=True, key="dash_fee")
+    unit = 2500 if "2,500" in fee_label else 3000
+    suf = " (보정)" if unit == 2500 else ""
+
+    매출 = view.loc[~box, "판매금액"].sum()
+    상품이익 = view.loc[~box, "판매이익"].sum()
+    송장 = view.loc[box, "수량"].sum()
+    택배비 = 송장 * unit
+    매입가 = 매출 - 상품이익
+    이익 = 상품이익 - 택배비
+    률 = (이익 / 매입가 * 100) if 매입가 else 0.0
+
+    r1 = st.columns(3)
+    r1[0].metric("매출 (수수료 차감 후)", _won(매출))
+    r1[1].metric("매입가", _won(매입가))
+    r1[2].metric("송장 건수", f"{송장:,.0f}건")
+    r2 = st.columns(3)
+    r2[0].metric("택배비" + suf, _won(택배비))
+    r2[1].metric("이익" + suf, _won(이익))
+    r2[2].metric("이익률 (이익÷매입가)" + suf, f"{률:.2f}%")
+    if unit == 2500:
+        st.caption("⚠ **보정값** — ERP 입력 택배비는 3,000원이나 2,500원으로 재계산한 값입니다.")
     st.divider()
 
-    # ── 집계 기준 (시간축 / 카테고리) ──────────────────────────
-    TIME_DIMS = ["일별", "월별", "연별"]
-    CAT_DIMS = {"구분": "구분", "그룹": "그룹", "거래처": "상호명",
-                "상품": "상품명", "관리코드": "관리코드"}
-    dim_label = st.selectbox("집계 기준", TIME_DIMS + list(CAT_DIMS), index=1)  # 기본 월별
+    DIMS = {"일별": "거래일자", "월별": "거래일자", "연별": "거래일자",
+            "거래처": "상호명", "그룹": "그룹"}
+    dim_label = st.selectbox("집계 기준", list(DIMS), index=1)
+    if dim_label == "일별":
+        key = view["거래일자"].dt.strftime("%Y-%m-%d")
+    elif dim_label == "월별":
+        key = view["거래일자"].dt.strftime("%Y-%m")
+    elif dim_label == "연별":
+        key = view["거래일자"].dt.year.astype(str)
+    else:
+        key = view[DIMS[dim_label]]
 
-    if dim_label in TIME_DIMS:
-        if dim_label == "일별":
-            key = view["거래일자"].dt.strftime("%Y-%m-%d")
-        elif dim_label == "월별":
-            key = view["거래일자"].dt.strftime("%Y-%m")
-        else:
-            key = view["거래일자"].dt.year.astype(str)
-        agg = (view.assign(_k=key).groupby("_k", observed=True)["판매금액"].sum()
-               .sort_index().reset_index())  # 제로패딩 문자열 → 시간순
-        agg.columns = [dim_label, "매출"]
-        agg["비중(%)"] = (agg["매출"] / total * 100).round(1)
+    v2 = view.assign(_k=key)
+    v2["_매출"] = v2["판매금액"].where(~box, 0.0)
+    v2["_상품이익"] = v2["판매이익"].where(~box, 0.0)
+    v2["_건수"] = v2["수량"].where(box, 0.0)
+    g = (v2.groupby("_k", observed=True)
+         .agg(매출=("_매출", "sum"), 상품이익=("_상품이익", "sum"), 송장=("_건수", "sum"))
+         .reset_index())
+    g["택배비"] = g["송장"] * unit
+    g["매입가"] = g["매출"] - g["상품이익"]
+    g["이익"] = g["상품이익"] - g["택배비"]
+    g["이익률(%)"] = (g["이익"] / g["매입가"].replace(0, pd.NA) * 100).round(2)
+    is_time = dim_label in ("일별", "월별", "연별")
+    g = (g.sort_values("_k") if is_time else g.sort_values("이익", ascending=False))
+    g = g.rename(columns={"_k": dim_label})
 
-        st.subheader(f"{dim_label} 매출 추이 — {len(agg):,}개 구간")
-        chart = agg.copy()
+    st.subheader(f"{dim_label} 이익{suf} — {len(g):,}개 " + ("구간" if is_time else "항목"))
+    if is_time:
+        chart = g.copy()
         if dim_label == "일별":
             chart.index = pd.to_datetime(chart[dim_label])
         elif dim_label == "월별":
             chart.index = pd.to_datetime(chart[dim_label] + "-01")
         else:
             chart.index = chart[dim_label]
-        st.line_chart(chart["매출"], height=260)
+        st.line_chart(chart["이익"], height=260)
 
-        disp = agg.copy()
-        disp["매출"] = disp["매출"].map(lambda v: f"{v:,.0f}")
-        st.dataframe(disp, use_container_width=True, hide_index=True,
-                     height=min(420, 80 + 36 * min(len(disp), 20)))
-        fname, dlkey = f"매출_{dim_label}.csv", "dl_time"
-    else:
-        dim = CAT_DIMS[dim_label]
-        agg = (view.groupby(dim, observed=True)["판매금액"].sum()
-               .sort_values(ascending=False).reset_index())
-        agg.columns = [dim_label, "매출"]
-        agg["비중(%)"] = (agg["매출"] / total * 100).round(1)
-        agg.insert(0, "순위", range(1, len(agg) + 1))
-
-        st.subheader(f"{dim_label}별 매출 — 총 {len(agg):,}개")
-        disp = agg.copy()
-        disp["매출"] = disp["매출"].map(lambda v: f"{v:,.0f}")
-        st.dataframe(disp, use_container_width=True, hide_index=True,
-                     height=min(560, 80 + 36 * min(len(disp), 30)))
-        fname, dlkey = f"매출_{dim_label}별.csv", "dl_cat"
-
-    st.download_button("표 CSV 내려받기",
-                       agg.to_csv(index=False).encode("utf-8-sig"),
-                       file_name=fname, mime="text/csv", key=dlkey)
+    show = g[[dim_label, "매출", "매입가", "택배비", "이익", "이익률(%)", "송장"]].copy()
+    disp = show.copy()
+    for c in ["매출", "매입가", "택배비", "이익", "송장"]:
+        disp[c] = disp[c].map(lambda v: f"{v:,.0f}")
+    st.dataframe(disp, use_container_width=True, hide_index=True,
+                 height=min(520, 80 + 36 * min(len(disp), 24)))
+    st.download_button("표 CSV 내려받기", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"이익_{dim_label}{'_보정' if unit == 2500 else ''}.csv",
+                       mime="text/csv", key="dl_profit")
 
 
 with tab_dash:
