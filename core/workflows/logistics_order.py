@@ -26,8 +26,10 @@ from openpyxl.utils import get_column_letter
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 
-# erp관리코드 패턴: XX-XX-XX (각 부분 정확히 2자리)
+# erp관리코드 패턴: XX-XX-XX (각 부분 정확히 2자리) — 구버전 합포 fallback용
 _ERP_CODE_RE = re.compile(r'\d{2}-\d{2}-\d{2}')
+# 어드민옵션 안의 [erp코드] (영숫자·하이픈·점, 포맷 무관) — 합포 감지·분리 1순위 기준
+_BRACKET_CODE_RE = re.compile(r'\[([A-Z0-9][A-Z0-9.\-]*)\]')
 
 # ───────────────────────────────────────────────
 # Reference 로딩
@@ -91,50 +93,60 @@ def parse_sales_report(file_bytes: bytes) -> pd.DataFrame:
 
 def split_multiproduct_cells(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Step 0a : 서로 다른 상품 합포 케이스 처리.
+    Step 0a : 서로 다른 상품 합포 케이스 분리.
 
-    pd.read_html이 HTML xls의 합포 행을 파싱할 때,
-    두 상품의 어드민옵션·옵션추가항목1이 한 셀에 이어붙여지는 경우가 있음.
-    예) 옵션추가항목1='31-03-0531-22-02' (두 erp코드 연속)
-        어드민옵션='코카콜라355...[31-03-05]코카콜라제로355...[31-22-02]'
+    pd.read_html이 HTML xls의 합포 행을 파싱할 때 두 상품 이상의
+    어드민옵션·옵션추가항목1이 한 셀에 이어붙여지는 경우가 있음.
+    예) 어드민옵션='코카콜라355...[31-03-05]코카콜라제로355...[31-22-02]'
+        어드민옵션='명가 꽈배기 참깨[MGG1EA-67-74]명가 꽈배기 흑당[MGG1EA-67-74-01]'
 
-    감지: 옵션추가항목1에서 XX-XX-XX 패턴 2개 이상
-    처리: 총수량·정산금액 ÷ 2, 어드민옵션을 첫 번째 [erp코드] 기준으로 분리,
-          선결제비·판매처그룹·평균단가는 복사 (기존 split_merged_cells와 동일)
+    감지·분리 1순위 = 어드민옵션의 [erp코드] 대괄호.
+      - 포맷 무관(숫자 31-03-05, 영문접두 MGG1EA-67-74-01, PC005708 등 모두).
+      - 구분자(대괄호)가 명확해 옵션추가항목1의 붙은 문자열보다 안전.
+      - N개 상품 합포 지원(2개 한정 아님).
+    처리 : 총수량·정산금액 ÷ N(상품 수), 어드민옵션을 각 [코드] 경계로 분할,
+           각 행에 해당 erp코드 직접 기입. 선결제비·판매처·평균단가는 복사.
+    fallback : 대괄호 코드가 2개 미만이면 옵션추가항목1의 숫자코드(XX-XX-XX) 2개로 처리(구버전 호환).
     """
     new_rows = []
     changed = False
 
     for _, row in df.iterrows():
+        admin = str(row.get("어드민옵션") or "")
         opt1 = str(row.get("옵션추가항목1") or "")
-        codes = _ERP_CODE_RE.findall(opt1)
 
-        if len(codes) < 2:
-            new_rows.append(row)
-            continue
+        # 1순위: 어드민옵션 [erp코드] (숫자를 포함하는 코드만)
+        bm = [m for m in _BRACKET_CODE_RE.finditer(admin)
+              if any(c.isdigit() for c in m.group(1))]
+        if len(bm) >= 2:
+            codes = [m.group(1) for m in bm]
+            bounds = [0] + [m.end() for m in bm]
+            segs = [admin[bounds[k]:bounds[k + 1]].strip() for k in range(len(bm))]
+        else:
+            # 2순위(구버전 호환): 옵션추가항목1 숫자코드 2개
+            ncodes = _ERP_CODE_RE.findall(opt1)
+            if len(ncodes) < 2:
+                new_rows.append(row)
+                continue
+            codes = ncodes[:2]
+            sm = re.search(r'\[' + re.escape(codes[0]) + r'\]', admin)
+            if sm:
+                segs = [admin[:sm.end()].strip(), admin[sm.end():].strip()]
+            else:
+                segs = [admin, admin]
 
         changed = True
-        admin = str(row.get("어드민옵션") or "")
-
-        # 어드민옵션 분리: 첫 번째 [erp코드] 끝을 기준으로 두 부분으로 분리
-        split_match = re.search(r'\[' + re.escape(codes[0]) + r'\]', admin)
-        if split_match:
-            admin1 = admin[:split_match.end()].strip()
-            admin2 = admin[split_match.end():].strip()
-        else:
-            admin1 = admin
-            admin2 = admin
-
+        n = len(codes)
         qty = float(row.get("총수량") or 0)
         price = float(row.get("정산금액") or 0)
 
-        for code, a_opt in [(codes[0], admin1), (codes[1], admin2)]:
+        for code, seg in zip(codes, segs):
             new_row = row.copy()
-            new_row["어드민옵션"] = a_opt
-            new_row["총수량"] = qty / 2
-            new_row["정산금액"] = price / 2
+            new_row["어드민옵션"] = seg
+            new_row["총수량"] = qty / n
+            new_row["정산금액"] = price / n
             new_row["옵션추가항목1"] = code
-            new_row["erp관리코드"] = None  # fill_management_code에서 채울 것
+            new_row["erp관리코드"] = code
             new_rows.append(new_row)
 
     if not changed:
