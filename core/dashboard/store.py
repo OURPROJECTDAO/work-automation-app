@@ -12,6 +12,7 @@ import base64
 import io
 import json
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -89,6 +90,18 @@ def write_partition(token: str, repo: str, ym: str, df: pd.DataFrame, msg: str |
     req = _req(token, _contents_url(repo, path), data=json.dumps(body).encode(), method="PUT")
     with urllib.request.urlopen(req) as r:
         json.load(r)
+
+
+def delete_partition(token: str, repo: str, ym: str) -> bool:
+    """월 파티션 삭제. 없으면 False. (잘못 적재된 달 제거용.)"""
+    path = f"{_PART_DIR}/sales_{ym}.parquet"
+    sha = _get_sha(token, repo, path)
+    if not sha:
+        return False
+    body = {"message": f"dashboard: {ym} 파티션 삭제", "sha": sha, "branch": "main"}
+    req = _req(token, _contents_url(repo, path), data=json.dumps(body).encode(), method="DELETE")
+    with urllib.request.urlopen(req):
+        return True
 
 
 def load_master(token: str, repo: str) -> pd.DataFrame:
