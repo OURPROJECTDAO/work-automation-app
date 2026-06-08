@@ -302,7 +302,10 @@ with tab_dash:
         else:
             gmap = load_group_map(pat, repo)
             years = sorted(df["연도"].unique())
-            gubuns = ["음료", "식품", "선물세트", "미분류"]
+            _pref = ["음료", "식품", "선물세트", "미분류"]
+            _present = list(df["구분"].dropna().unique())
+            gubuns = ([g for g in _pref if g in _present]
+                      + sorted(g for g in _present if g not in _pref))
             group_opts = sorted(set(gmap.values())) + ["(미지정)"]
             c1, c2, c3 = st.columns(3)
             with c1:
