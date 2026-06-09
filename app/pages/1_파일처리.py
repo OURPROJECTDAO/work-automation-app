@@ -224,7 +224,8 @@ with tab_order:
             for row in unmatched:
                 code  = row["erp관리코드"]
                 _admin = row.get("어드민옵션", "")
-                label = ("" if pd.isna(_admin) else str(_admin))[:30]
+                _empty = pd.isna(_admin) or str(_admin).strip() == ""
+                label = "⚠️ 어드민옵션 비어있음 (코드로 분류)" if _empty else str(_admin)[:30]
                 choices[code] = st.selectbox(
                     f"`{code}`  {label}",
                     ["음료", "식품", "선물세트"],
