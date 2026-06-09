@@ -100,7 +100,6 @@ CHANNEL_CONFIG = {
         "addr_col": "주소",
         "recv_col": "수령인",
         "has_guide_row": False,
-        "invoice_as_text": True,     # 올웨이즈 운송장번호는 문자열+일반(General)로 기입 (골든 0608 실측: data_type='s')
     },
     "배민상회": {
         "format": "xlsx",
@@ -269,9 +268,12 @@ def _write_template_xlsx(orig_bytes: bytes, parsed: dict, rows: list,
         song = row.get("_송장")
         cell = ws.cell(er, inv_c)
         if song:
-            cell.value = to_invoice_text(song) if as_text else to_invoice_number(song)
             if as_text:
+                cell.value = to_invoice_text(song)
                 cell.number_format = "General"   # 텍스트값 + 일반 형식(배민 업로드 요건)
+            else:
+                cell.value = to_invoice_number(song)
+                cell.number_format = "General"   # 숫자값 + 일반 형식(기존 '@' 서식 잔류 방어)
         else:
             cell.value = None
         ws.cell(er, cour_c).value = courier or row.get("_택배사") or ws.cell(er, cour_c).value
