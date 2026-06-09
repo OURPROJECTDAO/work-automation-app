@@ -140,30 +140,49 @@ for tab, (tab_name, cfg) in zip(tabs, _REF_CONFIG.items()):
             continue
 
         if cfg["large"]:
-            # 규격파일 : 검색 전용
-            query = st.text_input("🔍 관리코드·상품명 검색", key=f"search_{tab_name}")
+            # 규격파일(4000+행) : 검색하면 해당 행만 인라인 편집 (merge-back), 검색 전엔 읽기전용 미리보기
+            query = st.text_input("🔍 관리코드·상품명 검색 (편집하려면 먼저 검색)",
+                                  key=f"search_{tab_name}",
+                                  placeholder="코드·상품명 일부 입력")
             if query:
                 mask = df.fillna("").astype(str).apply(
                     lambda col: col.str.contains(query, case=False, na=False, regex=False)
                 ).any(axis=1)
-                st.dataframe(df[mask], use_container_width=True, height=350)
-                st.caption(f"{int(mask.sum())}건 검색됨 / 전체 {len(df)}건")
+                view = df[mask]
+                st.caption(f"🔎 {int(mask.sum())}건 / 전체 {len(df)}건 · "
+                           f"**필터된 행만 편집**되고 나머지는 보존됩니다.")
+                h = min(38 * (len(view) + 1) + 3, 560)
+                edited = st.data_editor(view, use_container_width=True,
+                                        num_rows="dynamic",
+                                        key=f"editor_{tab_name}", height=h)
+                if st.button(f"💾 {tab_name} 저장", key=f"save_{tab_name}",
+                             type="primary", use_container_width=True):
+                    result = pd.concat([df[~mask], edited], ignore_index=True)
+                    result = result[
+                        result[cfg["key_col"]].astype(str).str.strip() != ""
+                    ].reset_index(drop=True)
+                    _save_csv(token, cfg["filename"], result,
+                              f"ref: {tab_name} 갱신")
+                    st.success(f"✅ {len(result)}건 저장 완료")
+                    st.rerun()
             else:
                 st.dataframe(df.head(30), use_container_width=True, height=350)
-                st.caption(f"전체 {len(df)}건 (상위 30건 미리보기)")
+                st.caption(f"전체 {len(df)}건 · 🔍 검색하면 해당 행을 인라인 편집할 수 있어요 "
+                           f"(4000+행이라 전체 편집표는 비활성).")
 
-            up = st.file_uploader("전체 파일 교체 (CSV)", type=["csv"],
-                                   key=f"upload_{tab_name}")
-            if up:
-                new_df = pd.read_csv(up, encoding="utf-8-sig",
-                                     dtype=cfg["dtypes"])
-                st.info(f"{len(new_df)}건 인식. 저장하면 전체 교체됩니다.")
-                if st.button("💾 저장", key=f"save_upload_{tab_name}",
-                             type="primary"):
-                    _save_csv(token, cfg["filename"], new_df,
-                              f"ref: {tab_name} 전체 교체")
-                    st.success("✅ 저장 완료")
-                    st.rerun()
+            with st.expander("📁 전체 파일 교체 (CSV)"):
+                up = st.file_uploader("전체 파일 교체 (CSV)", type=["csv"],
+                                       key=f"upload_{tab_name}")
+                if up:
+                    new_df = pd.read_csv(up, encoding="utf-8-sig",
+                                         dtype=cfg["dtypes"])
+                    st.info(f"{len(new_df)}건 인식. 저장하면 전체 교체됩니다.")
+                    if st.button("💾 전체 교체 저장", key=f"save_upload_{tab_name}",
+                                 type="primary"):
+                        _save_csv(token, cfg["filename"], new_df,
+                                  f"ref: {tab_name} 전체 교체")
+                        st.success("✅ 저장 완료")
+                        st.rerun()
 
         else:
             # 일반 : 검색 + 인라인 편집 (필터된 행만 편집, 나머지 보존)
