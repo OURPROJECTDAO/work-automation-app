@@ -223,7 +223,8 @@ with tab_order:
         with st.form("gate_a_form"):
             for row in unmatched:
                 code  = row["erp관리코드"]
-                label = row.get("어드민옵션", "")[:30]
+                _admin = row.get("어드민옵션", "")
+                label = ("" if pd.isna(_admin) else str(_admin))[:30]
                 choices[code] = st.selectbox(
                     f"`{code}`  {label}",
                     ["음료", "식품", "선물세트"],
@@ -332,7 +333,8 @@ with tab_order:
         st.info("👉 **기준데이터관리 → 낱개처리목록**에서 원코드를 추가한 뒤 Phase 2를 재실행해주세요.")
 
         for row in unmatched_u:
-            st.code(f"코드: {row['erp관리코드']}  |  {row.get('어드민옵션','')}")
+            _a = row.get('어드민옵션', '')
+            st.code(f"코드: {row['erp관리코드']}  |  {'' if pd.isna(_a) else _a}")
 
         if st.button("🔄 Phase 2 재실행", key="p2_retry"):
             with st.spinner("재실행 중..."):
