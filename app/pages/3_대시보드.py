@@ -22,7 +22,7 @@ import pandas as pd
 import streamlit as st
 
 from core.dashboard import store
-from core.dashboard.sales_data import make_classifier, parse_sales
+from core.dashboard.sales_data import make_attr_lookup, make_classifier, parse_sales
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_REPO = "OURPROJECTDAO/work-automation-app"
@@ -63,8 +63,13 @@ def load_sales(pat: str, repo: str) -> pd.DataFrame:
         return df
     cls = pd.read_csv(_REF / "logistics_classification.csv", dtype=str, encoding="utf-8-sig")
     pm = pd.read_csv(_REF / "product_master.csv", dtype=str, encoding="utf-8-sig")
-    classify = make_classifier(cls, pm)
+    attr = pd.read_csv(_REF / "product_attributes.csv", dtype=str, encoding="utf-8-sig")
+    amaps = make_attr_lookup(attr)
+    classify = make_classifier(cls, pm, amaps["식품음료"])  # 식품음료 = 구분 3차 fallback
     df["구분"] = df["관리코드"].map(classify)
+    for c in ("브랜드", "최종분류", "b2b_b2c"):
+        m = amaps[c]
+        df[c] = df["관리코드"].map(lambda x, mm=m: mm.get(_nfc(x), "미지정")).astype("category")
     df["연도"] = df["거래일자"].dt.year
     return df
 
@@ -311,7 +316,8 @@ def _dim_key(view, label):
     if label == "연별":
         return view["거래일자"].dt.year.astype(str), True
     col = {"구분": "구분", "그룹": "그룹", "거래처": "상호명",
-           "상품": "상품명", "관리코드": "관리코드"}[label]
+           "상품": "상품명", "관리코드": "관리코드",
+           "브랜드": "브랜드", "세분류": "최종분류", "소매/도매": "b2b_b2c"}[label]
     return view[col].astype(str), False
 
 
@@ -470,7 +476,8 @@ def _render_dashboard(pat: str, repo: str) -> None:
 
         TIME_DIMS = ["일별", "월별", "연별"]
         CAT_DIMS = {"구분": "구분", "그룹": "그룹", "거래처": "상호명",
-                    "상품": "상품명", "관리코드": "관리코드"}
+                    "상품": "상품명", "관리코드": "관리코드",
+                    "브랜드": "브랜드", "세분류": "최종분류", "소매/도매": "b2b_b2c"}
         ALL_DIMS = TIME_DIMS + list(CAT_DIMS)
         cc = st.columns(2)
         with cc[0]:
