@@ -373,6 +373,12 @@ def _pivot_table(view, box, d1, d2, mode, unit):
     return out, note, n
 
 
+def _default_range_start(dmin, dmax):
+    """기간 디폴트 시작 = 2026-01-01(데이터 범위 내). 그 이전은 잘 안 봐서 로딩 단축."""
+    ds = pd.Timestamp("2026-01-01").date()
+    return ds if (dmin <= ds <= dmax) else dmin
+
+
 def _render_dashboard(pat: str, repo: str) -> None:
     df = load_sales(pat, repo)
     if df.empty:
@@ -392,7 +398,7 @@ def _render_dashboard(pat: str, repo: str) -> None:
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        dr = st.date_input("기간", value=(dmin, dmax),
+        dr = st.date_input("기간", value=(_default_range_start(dmin, dmax), dmax),
                            min_value=dmin, max_value=dmax, format="YYYY-MM-DD")
     with c2:
         if is_profit:
@@ -661,16 +667,23 @@ def _render_online_margin(pat: str, repo: str) -> None:
     dmin, dmax = df["거래일자"].min().date(), df["거래일자"].max().date()
     c1, c2, c3 = st.columns(3)
     with c1:
-        dr = st.date_input("기간", value=(dmin, dmax), min_value=dmin, max_value=dmax,
+        dr = st.date_input("기간", value=(_default_range_start(dmin, dmax), dmax),
+                           min_value=dmin, max_value=dmax,
                            format="YYYY-MM-DD", key="om_date")
     with c2:
         fee_label = st.radio("택배비 단가", ["3,000원", "2,500원"], horizontal=True, key="om_fee")
     with c3:
         dim_label = st.selectbox("집계 기준", ["거래처", "관리코드", "상품명", "세분류"], key="om_dim")
     unit = 2500 if "2,500" in fee_label else 3000
-    corr = st.toggle("채널 보정계수 적용 (권장)", value=True, key="om_corr")
-    dim_col = {"거래처": "상호명", "관리코드": "관리코드",
-               "상품명": "상품명", "세분류": "최종분류"}[dim_label]
+    cca, ccb = st.columns(2)
+    with cca:
+        corr = st.toggle("채널 보정계수 적용 (권장)", value=True, key="om_corr")
+    with ccb:
+        d2_label = st.selectbox("× 비교 (열, 선택)",
+                                ["(없음)"] + [x for x in ["거래처", "관리코드", "상품명", "세분류"]
+                                            if x != dim_label], key="om_dim2")
+    DCOL = {"거래처": "상호명", "관리코드": "관리코드", "상품명": "상품명", "세분류": "최종분류"}
+    dim_col = DCOL[dim_label]
 
     # 온라인 거래처 선택 (체크박스 + 전체선택/해제 토글)
     if "om_store_bulk" not in st.session_state:
@@ -730,19 +743,14 @@ def _render_online_margin(pat: str, repo: str) -> None:
     else:
         prod["_k"] = 1.0
     prod["_택배"] = prod["_송장"] * unit * prod["_k"]
+    prod["_매입"] = prod["판매금액"] - prod["판매이익"]
+    prod["_순"] = prod["판매이익"] - prod["_택배"]
 
-    g = (prod.assign(_d=prod[dim_col].astype(str))
-         .groupby("_d", observed=True)
-         .agg(매출=("판매금액", "sum"), 판매이익=("판매이익", "sum"),
-              추정택배=("_택배", "sum"), 수량=("수량", "sum"))
-         .reset_index())
-    g["매입가"] = g["매출"] - g["판매이익"]
-    g["순이익"] = g["판매이익"] - g["추정택배"]
-    _maeip = g["매입가"].astype("float64")
-    g["마진율(%)"] = (g["순이익"] / _maeip.where(_maeip != 0) * 100).round(2)
-    g = g.sort_values("매출", ascending=False)
-
-    t매출, t매입, t순 = g["매출"].sum(), g["매입가"].sum(), g["순이익"].sum()
+    t매출 = prod["판매금액"].sum()
+    t판이 = prod["판매이익"].sum()
+    t택배 = prod["_택배"].sum()
+    t매입 = t매출 - t판이
+    t순 = t판이 - t택배
     t률 = (t순 / t매입 * 100) if t매입 else 0.0
     r = st.columns(4)
     r[0].metric("매출 (수수료 차감 후)", _won(t매출))
@@ -753,6 +761,55 @@ def _render_online_margin(pat: str, repo: str) -> None:
     st.caption(("**채널별 보정계수 적용** · " if corr else "**보정 미적용(낙관 추정)** · ")
                + f"실제송장 {실제송장:,.0f} ÷ 추정송장 {추정송장:,.0f} = 전체 k {overall:.3f}")
 
+    # ── 교차탭 (행=집계기준 × 열=비교): 셀=마진율%, 합계=가중 재계산 ──
+    if d2_label != "(없음)":
+        rcol, ccol = dim_col, DCOL[d2_label]
+        rc = prod.assign(_r=prod[rcol].astype(str), _c=prod[ccol].astype(str))
+        grp = rc.groupby(["_r", "_c"], observed=True).agg(
+            _pi=("_순", "sum"), _co=("_매입", "sum"), _sal=("판매금액", "sum"))
+        pi = grp["_pi"].unstack("_c", fill_value=0.0)
+        co = grp["_co"].unstack("_c", fill_value=0.0)
+        sal = grp["_sal"].unstack("_c", fill_value=0.0)
+        cols = list(sal.sum(axis=0).sort_values(ascending=False).index)
+        pi, co, sal = pi[cols], co[cols], sal[cols]
+        margin = (pi / co.where(co != 0) * 100).round(2)
+        rsum = co.sum(axis=1)
+        margin["합계"] = (pi.sum(axis=1) / rsum.where(rsum != 0) * 100).round(2)
+        order = sal.sum(axis=1).sort_values(ascending=False).index
+        margin = margin.reindex(order)
+        note = ""
+        if len(margin) > 100:
+            margin = margin.head(100)
+            note = f" · 행 상위 100(전체 {len(order)})"
+        totrow = {rcol: "합계(가중)"}
+        for c in cols:
+            cc = co[c].sum()
+            totrow[c] = round(pi[c].sum() / cc * 100, 2) if cc else None
+        gco = co.values.sum()
+        totrow["합계"] = round(pi.values.sum() / gco * 100, 2) if gco else None
+        xt = margin.reset_index().rename(columns={"_r": rcol})
+        xt = pd.concat([xt, pd.DataFrame([totrow])], ignore_index=True)
+        st.subheader(f"{dim_label} × {d2_label} 마진율(%) — {min(len(margin), 100):,}행{note}")
+        cfg = {c: st.column_config.NumberColumn(format="%.2f") for c in xt.columns if c != rcol}
+        st.dataframe(xt, use_container_width=True, hide_index=True, column_config=cfg,
+                     height=min(620, 80 + 36 * min(len(xt), 18)))
+        st.download_button("표 CSV 내려받기", xt.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"온라인마진_{dim_label}_x_{d2_label}.csv",
+                           mime="text/csv", key="om_dl_xt")
+        st.caption("셀 = (행×열) 조합 마진율(%). 합계 행/열은 합이 아니라 **가중 재계산**(Σ순이익÷Σ매입가).")
+        return
+
+    # ── 단일 차원 표 ──
+    g = (prod.assign(_d=prod[dim_col].astype(str))
+         .groupby("_d", observed=True)
+         .agg(매출=("판매금액", "sum"), 판매이익=("판매이익", "sum"),
+              추정택배=("_택배", "sum"), 수량=("수량", "sum"))
+         .reset_index())
+    g["매입가"] = g["매출"] - g["판매이익"]
+    g["순이익"] = g["판매이익"] - g["추정택배"]
+    _maeip = g["매입가"].astype("float64")
+    g["마진율(%)"] = (g["순이익"] / _maeip.where(_maeip != 0) * 100).round(2)
+    g = g.sort_values("매출", ascending=False)
     n = len(g)
     if n > 200:
         g = g.head(200)
