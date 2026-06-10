@@ -1,10 +1,14 @@
 """채널 가격·마진 모니터 (channel-margin-monitor).
 
-채널 상품관리 다운로드(라이브 리스팅) 업로드 → 코드 4-tier 해석 + 마진 계산 →
-마진율·기준마진 대비 탐지·권장가(또는 제한 텍스트)·재고 표 + 필터 + CSV.
+저장된 상품관리(listing) 스냅샷을 자동 로드해 상품별 마진율·기준마진 대비 탐지·권장가(또는
+제한 텍스트)·재고를 계산. 다운로드는 매번 올릴 필요 없이 '상품관리 갱신'에서 전체 교체/신규 추가.
 공식·근거 = KB workflows/channel-margin-monitor.md.
 """
+import base64
+import json
 import sys
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 
@@ -16,36 +20,119 @@ import streamlit as st
 from core.workflows import channel_margin_monitor as cmm
 
 _REF = Path(__file__).parent.parent.parent / "reference"
+_APP_REPO = "OURPROJECTDAO/work-automation-app"
+_KST = timezone(timedelta(hours=9))
 
 st.title("💹 채널 가격·마진 모니터")
 st.caption(
-    "채널 상품관리 다운로드를 올리면 상품별 마진율 · 기준마진 대비 이탈 · 기준마진 달성 권장가를 계산합니다. "
-    "매입가/재고는 상품관리(product_master) 기준, 기준마진율은 baseline_margin 기준."
+    "저장된 상품관리 기준으로 마진율·기준마진 대비 이탈·권장가를 계산합니다. "
+    "매입가/재고는 상품관리(product_master), 기준마진율은 baseline_margin 기준. "
+    "다운로드는 '상품관리 갱신'에서 새로 올릴 때만 갱신."
 )
 
 
-@st.cache_data(ttl=3600, show_spinner="계산 중...")
-def _run(file_bytes: bytes, channel: str, ref_str: str):
-    return cmm.run(file_bytes, channel, ref_str)
+def _pat() -> str:
+    return st.secrets.get("GITHUB_PAT", "")
+
+
+def _gh(path, method="GET", data=None, raw=False):
+    url = f"https://api.github.com/repos/{_APP_REPO}/contents/{path}"
+    req = urllib.request.Request(url, method=method)
+    if _pat():
+        req.add_header("Authorization", f"Bearer {_pat()}")
+    req.add_header("Accept", "application/vnd.github.raw" if raw else "application/vnd.github+json")
+    if data is not None:
+        req.data = json.dumps(data).encode()
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, (r.read().decode() if raw else json.load(r))
+    except urllib.error.HTTPError as e:
+        return e.code, (e.read().decode() if raw else json.loads(e.read().decode() or "{}"))
+
+
+def _listing_path(key: str) -> str:
+    return f"reference/listing_{key}.csv"
+
+
+def _meta_path(key: str) -> str:
+    return f"reference/listing_{key}.meta.json"
+
+
+@st.cache_data(ttl=600, show_spinner="저장된 상품관리 불러오는 중...")
+def _load_listing(key: str):
+    code, text = _gh(_listing_path(key), raw=True)
+    if code != 200:
+        return None, {}
+    recs = cmm.csv_text_to_recs(text)
+    mcode, mtext = _gh(_meta_path(key), raw=True)
+    meta = json.loads(mtext) if mcode == 200 else {}
+    return recs, meta
+
+
+def _commit_listing(key: str, recs: list) -> dict:
+    meta = {"updated_at": datetime.now(_KST).isoformat(timespec="seconds"), "rows": len(recs)}
+    for path, body in [(_listing_path(key), cmm.recs_to_csv(recs)),
+                       (_meta_path(key), json.dumps(meta, ensure_ascii=False))]:
+        code, m = _gh(path)
+        payload = {"message": f"data(listing): {key} 갱신 ({len(recs)}건)",
+                   "content": base64.b64encode(body.encode("utf-8")).decode()}
+        if code == 200:
+            payload["sha"] = m["sha"]
+        _gh(path, "PUT", payload)
+    return meta
 
 
 channel = st.selectbox("채널", list(cmm.CHANNEL_CONFIG.keys()), index=0)
 cfg = cmm.CHANNEL_CONFIG[channel]
+key = cfg["key"]
 st.caption(
     f"수수료 {cfg['commission']*100:.0f}% · 배송비 정산 ×{cfg['ship_settle']} · "
-    f"실택배비 {cfg['real_ship']:,}원 · 기준마진 컬럼 '{cfg['baseline_col']}'"
+    f"실택배비 {cfg['real_ship']:,}원 · 기준마진 '{cfg['baseline_col']}'"
     + (" · 마진제한 적용" if cfg.get("apply_floor") else "")
 )
 
-up = st.file_uploader(
-    f"{channel} 상품관리 다운로드 (.xlsx, 일괄수정 전체 업로드)", type=["xlsx"]
-)
+# ── 상품관리 갱신 ─────────────────────────────────────────────────────────────
+committed = None
+flash = None
+with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
+    up = st.file_uploader(f"{channel} 상품관리 다운로드 (.xlsx 전체 업로드)", type=["xlsx"], key=f"up_{key}")
+    if up is not None:
+        new_recs = cmm.parse_download(up.getvalue(), cfg)
+        st.write(f"업로드 파싱: **{len(new_recs):,}건**")
+        if not _pat():
+            st.error("저장용 PAT(st.secrets GITHUB_PAT)가 없어 커밋할 수 없습니다.")
+        else:
+            b1, b2 = st.columns(2)
+            if b1.button("전체 교체 저장", type="primary", use_container_width=True,
+                         help="최신 전체 다운로드로 덮어쓰기 (신규+가격변동 반영)"):
+                meta = _commit_listing(key, new_recs)
+                _load_listing.clear()
+                committed = new_recs
+                flash = f"전체 교체 완료 — {meta['rows']:,}건 ({meta['updated_at']})"
+            if b2.button("신규만 추가", use_container_width=True,
+                         help="기존 유지 + 새 상품번호만 병합"):
+                cur, _ = _load_listing(key)
+                merged, added = cmm.merge_listing(cur or [], new_recs)
+                meta = _commit_listing(key, merged)
+                _load_listing.clear()
+                committed = merged
+                flash = f"신규 {added:,}건 추가 — 총 {meta['rows']:,}건"
 
-if up is None:
-    st.info("다운로드 .xlsx 파일을 올려 주세요.")
+if committed is not None:
+    recs = committed
+    meta = {"updated_at": datetime.now(_KST).isoformat(timespec="seconds"), "rows": len(committed)}
+    st.success(flash)
+else:
+    recs, meta = _load_listing(key)
+
+if not recs:
+    st.info("저장된 상품관리가 없습니다. 위 '📥 상품관리 갱신'에서 다운로드를 올려 저장해 주세요.")
     st.stop()
 
-rows, stats = _run(up.getvalue(), channel, str(_REF))
+st.caption(f"📦 저장된 상품관리 기준 · 최종 갱신 **{meta.get('updated_at', '?')}** · {len(recs):,}건")
+
+rows, stats = cmm.compute_listing(recs, channel, str(_REF))
 
 # ── KPI ──────────────────────────────────────────────────────────────────────
 c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -80,7 +167,6 @@ if only_miss:
     view = view[view["매입가"].isna()]
 
 
-# ── "권장가/제한" 합성 열 (제한 텍스트가 권장가 자리에 표시) ────────────────────
 def _rec_disp(r):
     if r["제한"]:
         return str(r["제한"])
@@ -110,12 +196,11 @@ st.dataframe(
         "마진율": st.column_config.NumberColumn("마진율", format="percent"),
         "기준마진율": st.column_config.NumberColumn("기준마진율", format="percent"),
         "탐지": st.column_config.NumberColumn("탐지(현-기준)", format="percent"),
-        "권장가/제한": st.column_config.TextColumn("권장가 / 제한", help="기준마진 달성 판매가. 제한상품은 제한 텍스트 표시."),
+        "권장가/제한": st.column_config.TextColumn("권장가 / 제한", help="기준마진 달성 판매가. 제한상품은 제한 텍스트."),
     },
 )
 st.caption(f"표시 {len(view):,} / 전체 {len(df):,}건")
 
-# ── CSV 다운로드 ──────────────────────────────────────────────────────────────
 buf = StringIO()
 view[DISPLAY].to_csv(buf, index=False)
 st.download_button(
