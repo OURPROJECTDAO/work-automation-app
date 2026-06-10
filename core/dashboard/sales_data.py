@@ -86,11 +86,12 @@ def date_range_replace(master: pd.DataFrame | None, new: pd.DataFrame) -> pd.Dat
     return out.sort_values("거래일자").reset_index(drop=True)
 
 
-def make_classifier(cls_df: pd.DataFrame, pm_df: pd.DataFrame):
+def make_classifier(cls_df: pd.DataFrame, pm_df: pd.DataFrame, food_map: dict | None = None):
     """관리코드 → 구분(음료/식품/선물세트/미분류) 분류 함수 생성.
 
-    cls_df: logistics_classification.csv (컬럼: 관리코드, 구분)
-    pm_df : product_master.csv (관리코드, 중분류명 사용)
+    cls_df: logistics_classification.csv (컬럼: 관리코드, 구분)  ← 구분 source(별도유지)
+    pm_df : product_master.csv (관리코드, 중분류명 사용)         ← 2차 fallback
+    food_map: (선택) product_attributes 식품음료(I) 맵 → 3차 fallback(연동만).
     """
     cls_map = {_nfc(k): v for k, v in zip(cls_df["관리코드"], cls_df["구분"])}
     mid_map = {_nfc(k): v for k, v in zip(pm_df["관리코드"], pm_df["중분류명"])}
@@ -100,7 +101,14 @@ def make_classifier(cls_df: pd.DataFrame, pm_df: pd.DataFrame):
         g = cls_map.get(c)
         if g:
             return g
-        return _ZONE_TO_GUBUN.get(mid_map.get(c), _UNCLASSIFIED)
+        z = _ZONE_TO_GUBUN.get(mid_map.get(c))
+        if z:
+            return z
+        if food_map:
+            f = food_map.get(c)
+            if f in ("음료", "식품", "선물세트"):
+                return f
+        return _UNCLASSIFIED
 
     return classify
 
@@ -122,17 +130,39 @@ def make_box_lookup(pm_df: pd.DataFrame):
     return boxq
 
 
+_ATTR_COLS = ["브랜드", "최종분류", "b2b_b2c", "식품음료"]
+
+
+def make_attr_lookup(attr_df: pd.DataFrame) -> dict:
+    """product_attributes.csv → {컬럼: {관리코드(NFC): 값}}. 빈값/결측 제외."""
+    def col_map(name):
+        m = {}
+        for k, v in zip(attr_df["관리코드"], attr_df[name]):
+            s = "" if v is None else str(v).strip()
+            if s and s.lower() != "nan":
+                m[_nfc(k)] = s
+        return m
+    return {n: col_map(n) for n in _ATTR_COLS}
+
+
 def apply_categories(df: pd.DataFrame, cls_df: pd.DataFrame,
-                     pm_df: pd.DataFrame) -> pd.DataFrame:
-    """표시용 파생: 구분 + 박스내품 + 물류량(=수량÷박스내품).
+                     pm_df: pd.DataFrame, attr_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """표시용 파생: 구분 + 박스내품 + 물류량(=수량÷박스내품) + (attr 있으면) 브랜드·최종분류·b2b_b2c.
 
     parquet에는 저장 안 함(기준데이터가 매일 갱신되므로 표시 시점에 조인).
+    attr_df: product_attributes.csv — 브랜드/최종분류/b2b_b2c 차원 + 식품음료 구분 3차 fallback.
     """
     df = df.copy()
-    classify = make_classifier(cls_df, pm_df)
+    attr = make_attr_lookup(attr_df) if attr_df is not None else None
+    food_map = attr["식품음료"] if attr else None
+    classify = make_classifier(cls_df, pm_df, food_map)
     boxq = make_box_lookup(pm_df)
     codes = df["관리코드"]
     df["구분"] = codes.map(classify)
     df["박스내품"] = codes.map(boxq)
     df["물류량"] = df["수량"] / df["박스내품"]
+    if attr:
+        for c in ("브랜드", "최종분류", "b2b_b2c"):
+            mm = attr[c]
+            df[c] = codes.map(lambda x, m=mm: m.get(_nfc(x), "미지정")).astype("category")
     return df
