@@ -421,6 +421,9 @@ def _render_dashboard(pat: str, repo: str) -> None:
     if small_rows or big_groups:
         with st.expander("그룹 내 거래처 선택 (체크 해제 = 제외)", expanded=bool(small_rows)):
             if small_rows:
+                if st.button("전체 선택", key="dash_store_all"):
+                    st.session_state.pop("dash_store_pick", None)
+                    st.rerun()
                 ed = st.data_editor(
                     pd.DataFrame(small_rows), key="dash_store_pick",
                     use_container_width=True, hide_index=True, num_rows="fixed",
@@ -428,7 +431,7 @@ def _render_dashboard(pat: str, repo: str) -> None:
                         "포함": st.column_config.CheckboxColumn(default=True),
                         "그룹": st.column_config.TextColumn(disabled=True),
                         "거래처": st.column_config.TextColumn(disabled=True),
-                        "매출": st.column_config.NumberColumn(format="%d", disabled=True),
+                        "매출": st.column_config.NumberColumn(format="accounting", disabled=True),
                     },
                     height=min(560, 80 + 36 * min(len(small_rows), 30)))
                 excluded |= {r["거래처"] for _, r in ed.iterrows() if not r["포함"]}
