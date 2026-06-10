@@ -664,16 +664,44 @@ def _render_online_margin(pat: str, repo: str) -> None:
         dr = st.date_input("기간", value=(dmin, dmax), min_value=dmin, max_value=dmax,
                            format="YYYY-MM-DD", key="om_date")
     with c2:
-        sel_store = st.multiselect("온라인 거래처", online, default=online, key="om_store")
-    with c3:
         fee_label = st.radio("택배비 단가", ["3,000원", "2,500원"], horizontal=True, key="om_fee")
+    with c3:
+        dim_label = st.selectbox("집계 기준", ["거래처", "관리코드", "상품명", "세분류"], key="om_dim")
     unit = 2500 if "2,500" in fee_label else 3000
-    cc = st.columns(2)
-    with cc[0]:
-        corr = st.toggle("채널 보정계수 적용 (권장)", value=True, key="om_corr")
-    with cc[1]:
-        dim_label = st.selectbox("상품 기준", ["관리코드", "상품명", "세분류"], key="om_dim")
-    dim_col = {"관리코드": "관리코드", "상품명": "상품명", "세분류": "최종분류"}[dim_label]
+    corr = st.toggle("채널 보정계수 적용 (권장)", value=True, key="om_corr")
+    dim_col = {"거래처": "상호명", "관리코드": "관리코드",
+               "상품명": "상품명", "세분류": "최종분류"}[dim_label]
+
+    # 온라인 거래처 선택 (체크박스 + 전체선택/해제 토글)
+    if "om_store_bulk" not in st.session_state:
+        st.session_state["om_store_bulk"] = True
+    if "om_store_ver" not in st.session_state:
+        st.session_state["om_store_ver"] = 0
+    _ssales = (df[df["상호명"].astype(str).isin(online) & (df["관리코드"].astype(str) != "00-12")]
+               .groupby("상호명", observed=True)["판매금액"].sum())
+    _rows = sorted(({"포함": True, "거래처": s, "매출": int(_ssales.get(s, 0))} for s in online),
+                   key=lambda r: -r["매출"])
+    with st.expander("온라인 거래처 선택 (체크 해제 = 제외)", expanded=True):
+        _bulk = st.session_state["om_store_bulk"]
+        if st.button("전체 해제" if _bulk else "전체 선택", key="om_store_all"):
+            st.session_state["om_store_bulk"] = not _bulk
+            st.session_state["om_store_ver"] += 1
+            st.rerun()
+        _picks = pd.DataFrame(_rows)
+        _picks["포함"] = st.session_state["om_store_bulk"]
+        ed = st.data_editor(
+            _picks, key=f"om_store_pick_{st.session_state['om_store_ver']}",
+            use_container_width=True, hide_index=True, num_rows="fixed",
+            column_config={
+                "포함": st.column_config.CheckboxColumn(default=True),
+                "거래처": st.column_config.TextColumn(disabled=True),
+                "매출": st.column_config.NumberColumn(format="accounting", disabled=True),
+            },
+            height=min(560, 80 + 36 * min(len(_rows), 20)))
+        sel_store = [r["거래처"] for _, r in ed.iterrows() if r["포함"]]
+    if not sel_store:
+        st.info("거래처를 모두 제외했습니다. 하나 이상 선택해 주세요.")
+        return
 
     if isinstance(dr, (list, tuple)):
         d_start, d_end = (dr[0], dr[-1]) if dr else (dmin, dmax)
@@ -694,8 +722,14 @@ def _render_online_margin(pat: str, repo: str) -> None:
     prod["_송장"] = prod["수량"] / (hap * boxn)
     추정송장 = prod["_송장"].sum()
     실제송장 = view.loc[box, "수량"].sum()
-    k = (실제송장 / 추정송장) if (corr and 추정송장) else 1.0
-    prod["_택배"] = prod["_송장"] * unit * k
+    if corr:
+        실제_s = view.loc[box].groupby("상호명", observed=True)["수량"].sum()
+        추정_s = prod.groupby("상호명", observed=True)["_송장"].sum()
+        k_s = (실제_s.reindex(추정_s.index).fillna(0.0) / 추정_s.where(추정_s != 0)).fillna(1.0)
+        prod["_k"] = prod["상호명"].map(k_s).fillna(1.0)
+    else:
+        prod["_k"] = 1.0
+    prod["_택배"] = prod["_송장"] * unit * prod["_k"]
 
     g = (prod.assign(_d=prod[dim_col].astype(str))
          .groupby("_d", observed=True)
@@ -715,9 +749,9 @@ def _render_online_margin(pat: str, repo: str) -> None:
     r[1].metric("매입가", _won(t매입))
     r[2].metric("순이익 (추정)", _won(t순))
     r[3].metric("마진율 (추정)", f"{t률:.2f}%")
-    kv = (실제송장 / 추정송장) if 추정송장 else 0.0
-    st.caption(f"보정계수 k = 실제송장 {실제송장:,.0f} ÷ 추정송장 {추정송장:,.0f} = **{kv:.3f}** "
-               + ("→ 적용됨" if corr else "→ 미적용(낙관 추정)"))
+    overall = (실제송장 / 추정송장) if 추정송장 else 0.0
+    st.caption(("**채널별 보정계수 적용** · " if corr else "**보정 미적용(낙관 추정)** · ")
+               + f"실제송장 {실제송장:,.0f} ÷ 추정송장 {추정송장:,.0f} = 전체 k {overall:.3f}")
 
     n = len(g)
     if n > 200:
