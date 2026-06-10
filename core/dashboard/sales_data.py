@@ -130,7 +130,7 @@ def make_box_lookup(pm_df: pd.DataFrame):
     return boxq
 
 
-_ATTR_COLS = ["브랜드", "최종분류", "b2b_b2c", "식품음료"]
+_ATTR_COLS = ["최종분류", "식품음료"]
 
 
 def make_attr_lookup(attr_df: pd.DataFrame) -> dict:
@@ -162,7 +162,6 @@ def apply_categories(df: pd.DataFrame, cls_df: pd.DataFrame,
     df["박스내품"] = codes.map(boxq)
     df["물류량"] = df["수량"] / df["박스내품"]
     if attr:
-        for c in ("브랜드", "최종분류", "b2b_b2c"):
-            mm = attr[c]
-            df[c] = codes.map(lambda x, m=mm: m.get(_nfc(x), "미지정")).astype("category")
+        mm = attr["최종분류"]
+        df["최종분류"] = codes.map(lambda x, m=mm: m.get(_nfc(x), "미지정")).astype("category")
     return df
