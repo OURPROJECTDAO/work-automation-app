@@ -421,11 +421,19 @@ def _render_dashboard(pat: str, repo: str) -> None:
     if small_rows or big_groups:
         with st.expander("그룹 내 거래처 선택 (체크 해제 = 제외)", expanded=bool(small_rows)):
             if small_rows:
-                if st.button("전체 선택", key="dash_store_all"):
-                    st.session_state.pop("dash_store_pick", None)
+                if "dash_store_bulk" not in st.session_state:
+                    st.session_state["dash_store_bulk"] = True
+                if "dash_store_ver" not in st.session_state:
+                    st.session_state["dash_store_ver"] = 0
+                _bulk = st.session_state["dash_store_bulk"]
+                if st.button("전체 해제" if _bulk else "전체 선택", key="dash_store_all"):
+                    st.session_state["dash_store_bulk"] = not _bulk
+                    st.session_state["dash_store_ver"] += 1
                     st.rerun()
+                _picks = pd.DataFrame(small_rows)
+                _picks["포함"] = st.session_state["dash_store_bulk"]
                 ed = st.data_editor(
-                    pd.DataFrame(small_rows), key="dash_store_pick",
+                    _picks, key=f"dash_store_pick_{st.session_state['dash_store_ver']}",
                     use_container_width=True, hide_index=True, num_rows="fixed",
                     column_config={
                         "포함": st.column_config.CheckboxColumn(default=True),
