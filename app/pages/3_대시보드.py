@@ -610,7 +610,7 @@ def _render_dashboard(pat: str, repo: str) -> None:
     g["택배비"] = g["송장"] * unit
     g["매입가"] = g["매출"] - g["상품이익"]
     g["이익"] = g["상품이익"] - g["택배비"]
-    g["이익률(%)"] = (g["이익"] / g["매입가"].replace(0, pd.NA) * 100).round(2)
+    g["이익률(%)"] = (g["이익"] / g["매입가"].astype("float64").where(g["매입가"] != 0) * 100).round(2)
     is_time = dim_label in ("일별", "월별", "연별")
     g = (g.sort_values("_k") if is_time else g.sort_values("이익", ascending=False))
     g = g.rename(columns={"_k": dim_label})
@@ -645,13 +645,17 @@ def _render_online_margin(pat: str, repo: str) -> None:
     if df.empty:
         st.info("적재된 매출 데이터가 없습니다. [➕ 데이터 추가] 탭에서 파일을 올려주세요.")
         return
-    st.caption("**온라인(택배비 발생) 거래처 한정 · 상품별 추정 마진율.** "
+    st.caption("**'온라인' 그룹 거래처 한정 · 상품별 추정 마진율.** "
                "택배비를 `실택배비 × 수량 ÷ (합포수량×내품수)`로 상품에 배분 추정하고, "
-               "채널 보정계수(실제송장÷추정송장)로 실제 택배비 총액에 맞춥니다. 절대값보단 상품 간 비교용.")
+               "채널 보정계수(실제송장÷추정송장)로 실제 택배비 총액에 맞춥니다. 절대값보단 상품 간 비교용. "
+               "(온라인 채널은 [👥 거래처 그룹] 탭에서 '온라인' 그룹으로 지정)")
 
-    online = sorted(set(df.loc[df["관리코드"].astype(str) == "00-12", "상호명"].astype(str)))
+    gmap = load_group_map(pat, repo)
+    online = sorted({s for s in df["상호명"].astype(str).unique()
+                     if gmap.get(_nfc(s)) == "온라인"})
     if not online:
-        st.info("택배비(00-12) 행이 있는 온라인 거래처가 없습니다.")
+        st.info("거래처 그룹에 '온라인'으로 지정된 거래처가 없습니다. "
+                "[👥 거래처 그룹] 탭에서 온라인 채널을 '온라인' 그룹으로 지정해 주세요.")
         return
 
     dmin, dmax = df["거래일자"].min().date(), df["거래일자"].max().date()
@@ -700,7 +704,8 @@ def _render_online_margin(pat: str, repo: str) -> None:
          .reset_index())
     g["매입가"] = g["매출"] - g["판매이익"]
     g["순이익"] = g["판매이익"] - g["추정택배"]
-    g["마진율(%)"] = (g["순이익"] / g["매입가"].replace(0, pd.NA) * 100).round(2)
+    _maeip = g["매입가"].astype("float64")
+    g["마진율(%)"] = (g["순이익"] / _maeip.where(_maeip != 0) * 100).round(2)
     g = g.sort_values("매출", ascending=False)
 
     t매출, t매입, t순 = g["매출"].sum(), g["매입가"].sum(), g["순이익"].sum()
