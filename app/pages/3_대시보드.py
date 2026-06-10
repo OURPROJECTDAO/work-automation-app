@@ -22,7 +22,7 @@ import pandas as pd
 import streamlit as st
 
 from core.dashboard import store
-from core.dashboard.sales_data import make_attr_lookup, make_classifier, parse_sales
+from core.dashboard.sales_data import make_attr_lookup, make_box_lookup, make_classifier, parse_sales
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_REPO = "OURPROJECTDAO/work-automation-app"
@@ -69,6 +69,19 @@ def load_sales(pat: str, repo: str) -> pd.DataFrame:
     df["구분"] = df["관리코드"].map(classify)
     m = amaps["최종분류"]
     df["최종분류"] = df["관리코드"].map(lambda x, mm=m: mm.get(_nfc(x), "미지정")).astype("category")
+    # 온라인 상품마진용: 합포수량(결측 NaN) + 박스내품(결측/0→1.0)
+    hap = {_nfc(k): v for k, v in zip(attr["관리코드"], attr["합포수량"])}
+
+    def _hapq(c):
+        try:
+            f = float(str(hap.get(_nfc(c), "")).strip())
+            return f if f > 0 else float("nan")
+        except (TypeError, ValueError):
+            return float("nan")
+
+    boxq = make_box_lookup(pm)
+    df["합포수량"] = df["관리코드"].map(_hapq)
+    df["박스내품"] = df["관리코드"].map(boxq)
     df["연도"] = df["거래일자"].dt.year
     return df
 
@@ -142,8 +155,8 @@ def _save_groups(pat: str, repo: str, updates: dict, deletions=()) -> int:
 
 
 pat, repo = _data_secret()
-tab_dash, tab_add, tab_group, tab_cls = st.tabs(
-    ["📊 대시보드", "➕ 데이터 추가", "👥 거래처 그룹", "🏷 구분 분류"])
+tab_dash, tab_add, tab_group, tab_cls, tab_margin = st.tabs(
+    ["📊 대시보드", "➕ 데이터 추가", "👥 거래처 그룹", "🏷 구분 분류", "💰 상품마진(온라인)"])
 
 # ── [데이터 추가] 탭 ───────────────────────────────────────────
 with tab_add:
@@ -627,8 +640,104 @@ def _render_dashboard(pat: str, repo: str) -> None:
                        mime="text/csv", key="dl_profit")
 
 
+def _render_online_margin(pat: str, repo: str) -> None:
+    df = load_sales(pat, repo)
+    if df.empty:
+        st.info("적재된 매출 데이터가 없습니다. [➕ 데이터 추가] 탭에서 파일을 올려주세요.")
+        return
+    st.caption("**온라인(택배비 발생) 거래처 한정 · 상품별 추정 마진율.** "
+               "택배비를 `실택배비 × 수량 ÷ (합포수량×내품수)`로 상품에 배분 추정하고, "
+               "채널 보정계수(실제송장÷추정송장)로 실제 택배비 총액에 맞춥니다. 절대값보단 상품 간 비교용.")
+
+    online = sorted(set(df.loc[df["관리코드"].astype(str) == "00-12", "상호명"].astype(str)))
+    if not online:
+        st.info("택배비(00-12) 행이 있는 온라인 거래처가 없습니다.")
+        return
+
+    dmin, dmax = df["거래일자"].min().date(), df["거래일자"].max().date()
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        dr = st.date_input("기간", value=(dmin, dmax), min_value=dmin, max_value=dmax,
+                           format="YYYY-MM-DD", key="om_date")
+    with c2:
+        sel_store = st.multiselect("온라인 거래처", online, default=online, key="om_store")
+    with c3:
+        fee_label = st.radio("택배비 단가", ["3,000원", "2,500원"], horizontal=True, key="om_fee")
+    unit = 2500 if "2,500" in fee_label else 3000
+    cc = st.columns(2)
+    with cc[0]:
+        corr = st.toggle("채널 보정계수 적용 (권장)", value=True, key="om_corr")
+    with cc[1]:
+        dim_label = st.selectbox("상품 기준", ["관리코드", "상품명", "세분류"], key="om_dim")
+    dim_col = {"관리코드": "관리코드", "상품명": "상품명", "세분류": "최종분류"}[dim_label]
+
+    if isinstance(dr, (list, tuple)):
+        d_start, d_end = (dr[0], dr[-1]) if dr else (dmin, dmax)
+    else:
+        d_start = d_end = dr
+    ts0, ts1 = pd.Timestamp(d_start), pd.Timestamp(d_end) + pd.Timedelta(days=1)
+    view = df[(df["거래일자"] >= ts0) & (df["거래일자"] < ts1)
+              & (df["상호명"].astype(str).isin(sel_store))].copy()
+    if view.empty:
+        st.info("선택한 조건에 해당하는 데이터가 없습니다.")
+        return
+
+    box = view["관리코드"].astype(str) == "00-12"
+    prod = view[~box].copy()
+    hap = prod["합포수량"].fillna(1.0)
+    hap = hap.where(hap > 0, 1.0)
+    boxn = prod["박스내품"].where(prod["박스내품"] > 0, 1.0)
+    prod["_송장"] = prod["수량"] / (hap * boxn)
+    추정송장 = prod["_송장"].sum()
+    실제송장 = view.loc[box, "수량"].sum()
+    k = (실제송장 / 추정송장) if (corr and 추정송장) else 1.0
+    prod["_택배"] = prod["_송장"] * unit * k
+
+    g = (prod.assign(_d=prod[dim_col].astype(str))
+         .groupby("_d", observed=True)
+         .agg(매출=("판매금액", "sum"), 판매이익=("판매이익", "sum"),
+              추정택배=("_택배", "sum"), 수량=("수량", "sum"))
+         .reset_index())
+    g["매입가"] = g["매출"] - g["판매이익"]
+    g["순이익"] = g["판매이익"] - g["추정택배"]
+    g["마진율(%)"] = (g["순이익"] / g["매입가"].replace(0, pd.NA) * 100).round(2)
+    g = g.sort_values("매출", ascending=False)
+
+    t매출, t매입, t순 = g["매출"].sum(), g["매입가"].sum(), g["순이익"].sum()
+    t률 = (t순 / t매입 * 100) if t매입 else 0.0
+    r = st.columns(4)
+    r[0].metric("매출 (수수료 차감 후)", _won(t매출))
+    r[1].metric("매입가", _won(t매입))
+    r[2].metric("순이익 (추정)", _won(t순))
+    r[3].metric("마진율 (추정)", f"{t률:.2f}%")
+    kv = (실제송장 / 추정송장) if 추정송장 else 0.0
+    st.caption(f"보정계수 k = 실제송장 {실제송장:,.0f} ÷ 추정송장 {추정송장:,.0f} = **{kv:.3f}** "
+               + ("→ 적용됨" if corr else "→ 미적용(낙관 추정)"))
+
+    n = len(g)
+    if n > 200:
+        g = g.head(200)
+        st.caption(f"매출 상위 200개 표시 (전체 {n}개)")
+    out = g.rename(columns={"_d": dim_label})[
+        [dim_label, "매출", "매입가", "추정택배", "순이익", "마진율(%)", "수량"]].copy()
+    for c in ["매출", "매입가", "추정택배", "순이익"]:
+        out[c] = out[c].round().astype("int64")
+    cfg = {c: st.column_config.NumberColumn(format="localized")
+           for c in ["매출", "매입가", "추정택배", "순이익", "수량"]}
+    st.dataframe(out, use_container_width=True, hide_index=True, column_config=cfg,
+                 height=min(620, 80 + 36 * min(len(out), 16)))
+    st.download_button("표 CSV 내려받기", out.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"온라인_상품마진_{dim_label}.csv", mime="text/csv", key="om_dl")
+
+
 with tab_dash:
     if not pat:
         st.warning("저장소 접근 정보(secrets `[data] pat`)가 설정되지 않았습니다.")
     else:
         _render_dashboard(pat, repo)
+
+with tab_margin:
+    if not pat:
+        st.warning("저장소 접근 정보(secrets `[data] pat`)가 설정되지 않았습니다.")
+    else:
+        _render_online_margin(pat, repo)
