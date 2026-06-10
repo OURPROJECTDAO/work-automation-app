@@ -18,7 +18,7 @@ from __future__ import annotations
 import csv
 import math
 import unicodedata
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -26,6 +26,7 @@ from openpyxl import load_workbook
 # ── 채널 config (채널 추가 = 여기에 한 세트) ────────────────────────────────
 CHANNEL_CONFIG: dict[str, dict] = {
     "스마트스토어": {
+        "key": "smartstore",       # 저장 파일명 reference/listing_<key>.csv
         "commission": 0.06,        # 판매수수료 → (1-수수료)=0.94 가 판매가에 곱
         "ship_settle": 0.967,      # 배송비 정산계수
         "real_ship": 2700,         # 실택배비 (단일)
@@ -204,16 +205,9 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
     return out
 
 
-def run(file, channel: str, ref_dir) -> tuple[list[dict], dict]:
-    """다운로드 + 채널 → (결과 레코드, 통계)."""
-    if channel not in CHANNEL_CONFIG:
-        raise ValueError(f"지원하지 않는 채널: {channel}")
-    cfg = CHANNEL_CONFIG[channel]
-    refs = load_references(ref_dir)
-    recs = parse_download(file, cfg)
-    rows = compute(recs, refs, cfg)
+def _stats(rows: list[dict]) -> dict:
     margins = [r["마진율"] for r in rows if r["마진율"] is not None]
-    stats = {
+    return {
         "총건수": len(rows),
         "미매칭": sum(1 for r in rows if r["매입가"] is None),
         "미설정": sum(1 for r in rows if r["기준마진율"] is None and r["매입가"] is not None),
@@ -221,4 +215,60 @@ def run(file, channel: str, ref_dir) -> tuple[list[dict], dict]:
         "제한상품": sum(1 for r in rows if r["제한"]),
         "평균마진율": round(sum(margins) / len(margins), 4) if margins else None,
     }
-    return rows, stats
+
+
+def compute_listing(recs: list[dict], channel: str, ref_dir) -> tuple[list[dict], dict]:
+    """저장된 listing 레코드 + 채널 → (결과 레코드, 통계)."""
+    if channel not in CHANNEL_CONFIG:
+        raise ValueError(f"지원하지 않는 채널: {channel}")
+    refs = load_references(ref_dir)
+    rows = compute(recs, refs, CHANNEL_CONFIG[channel])
+    return rows, _stats(rows)
+
+
+def run(file, channel: str, ref_dir) -> tuple[list[dict], dict]:
+    """다운로드(.xlsx) + 채널 → (결과 레코드, 통계)."""
+    if channel not in CHANNEL_CONFIG:
+        raise ValueError(f"지원하지 않는 채널: {channel}")
+    recs = parse_download(file, CHANNEL_CONFIG[channel])
+    return compute_listing(recs, channel, ref_dir)
+
+
+# ── 저장 listing (연동데이터) 직렬화 / 병합 ──────────────────────────────────
+LISTING_COLS = ["상품번호", "코드", "상품명", "판매가", "배송비", "즉시할인", "포인트", "바코드"]
+
+
+def recs_to_csv(recs: list[dict]) -> str:
+    """parse_download 레코드 → CSV 텍스트 (저장용)."""
+    buf = StringIO()
+    w = csv.DictWriter(buf, fieldnames=LISTING_COLS)
+    w.writeheader()
+    for r in recs:
+        bar = r.get("바코드")
+        w.writerow({
+            "상품번호": r["상품번호"], "코드": r["코드"], "상품명": r["상품명"],
+            "판매가": r["판매가"], "배송비": r["배송비"],
+            "즉시할인": r["즉시할인"], "포인트": r["포인트"],
+            "바코드": "" if bar in (None, "") else bar,
+        })
+    return buf.getvalue()
+
+
+def csv_text_to_recs(text: str) -> list[dict]:
+    """저장 CSV 텍스트 → parse_download 호환 레코드."""
+    recs = []
+    for row in csv.DictReader(StringIO(text)):
+        recs.append({
+            "상품번호": _nfc(row.get("상품번호")), "코드": _nfc(row.get("코드")),
+            "상품명": _nfc(row.get("상품명")), "판매가": _num(row.get("판매가")),
+            "배송비": _num(row.get("배송비")), "즉시할인": _num(row.get("즉시할인")),
+            "포인트": _num(row.get("포인트")), "바코드": row.get("바코드") or "",
+        })
+    return recs
+
+
+def merge_listing(existing: list[dict], new: list[dict]) -> tuple[list[dict], int]:
+    """기존 + 신규: 기존 상품번호는 유지, 새 상품번호만 추가. → (병합, 추가건수)."""
+    seen = {r["상품번호"] for r in existing}
+    added = [r for r in new if r["상품번호"] and r["상품번호"] not in seen]
+    return existing + added, len(added)
