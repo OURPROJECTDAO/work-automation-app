@@ -140,6 +140,28 @@ CHANNEL_CONFIG: dict[str, dict] = {
             "jeong_field": "변경소비자가",              # 무늬용 가짜 정가(표준 FAKE_JEONG)
         },
     },
+    "쿠팡": {
+        "key": "coupang",
+        "commission": 0.12,               # 단일 12% (골든 ×0.88). 다운로드 수수료컬럼 없음
+        "ship_settle": 0.967,
+        "real_ship": 2700,                # 골든 3000/3700 미채택
+        "ship_fee_const": 0,              # 배송비 항상 0(정산에 미반영)
+        "baseline_col": "쿠팡",
+        "apply_floor": True,
+        "n_source": "ref",                # 합포 N = hapo_multiplier(옵션ID) — 키=상품번호=옵션ID
+        "sheet": "data",
+        "header_row": 3,
+        "data_start": 4,
+        # 키=옵션ID(C=3, 골든 조인키). 코드=업체상품코드(F=6). 상품명=쿠팡 노출 상품명(G=7).
+        # 판매가=판매가격(J=10). 정가=할인율기준가(K=11). 즉시할인·포인트·바코드 없음.
+        "cols": {"상품번호": 3, "코드": 6, "상품명": 7, "판매가": 10, "정가": 11},
+        # 가격변경 = 다운로드의 '변경요청' 컬럼(P/Q)에 기입하는 filter형(스마트스토어식 원본편집).
+        #   P(16)=변경 판매가(권장가), Q(17)=변경 할인율기준가(무늬용 가짜=표준 FAKE_JEONG). R/S(판매상태/재고)는 미기입.
+        "price_form": {
+            "mode": "filter",
+            "write": {"판매가": 16, "정가": 17},
+        },
+    },
 }
 
 
@@ -273,6 +295,18 @@ def resolve_code(code: str, refs: dict) -> tuple[str, float | None, float | None
 
 def _ceil100(x: float) -> int:
     return int(math.ceil(x / 100) * 100)
+
+
+def fake_jeong(price: int, fake_cfg: dict | None = None) -> int:
+    """무늬용 가짜 정가(소비자가/할인전단가/할인율기준가) — 전 채널 표준.
+
+    권장가 × (1 + 랜덤 min~max%), round 단위 반올림, >권장가. fake_cfg로 %·단위 오버라이드.
+    """
+    fk = {**FAKE_JEONG, **(fake_cfg or {})}
+    pct = random.uniform(fk["min_pct"], fk["max_pct"])
+    unit = int(fk["round"])
+    val = int(round(price * (1 + pct) / unit) * unit)
+    return val if val > price else price + unit
 
 
 def _ranges_desc(nums: list) -> list:
@@ -553,13 +587,7 @@ def build_append_items(pf: dict, rows: list[dict], recs: list[dict],
         it = {field: merged.get(key, "") for field, key in src.items()}
         it[price_f] = price
         if jeong_f:
-            # 무늬용 가짜 정가(소비자가/할인전단가/정가) — 전 채널 표준(FAKE_JEONG):
-            # 권장가 +20~30% 랜덤·100원 반올림·>권장가. 채널이 pf['jeong_fake']로 % 오버라이드 가능.
-            fk = {**FAKE_JEONG, **pf.get("jeong_fake", {})}
-            pct = random.uniform(fk["min_pct"], fk["max_pct"])
-            unit = int(fk["round"])
-            val = int(round(price * (1 + pct) / unit) * unit)
-            it[jeong_f] = val if val > price else price + unit
+            it[jeong_f] = fake_jeong(price, pf.get("jeong_fake"))   # 무늬용 가짜 정가(표준 FAKE_JEONG)
         items.append(it)
         cur = int(_num(ro.get("판매가")))
         preview.append({
@@ -671,3 +699,61 @@ def append_rows_to_raw(raw_xlsx: bytes, src_xlsx: bytes,
     out = BytesIO()
     tgt.save(out)
     return out.getvalue()
+
+
+def build_filter_price_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
+                            cfg: dict) -> tuple[bytes, list[dict], list[str], list[str]]:
+    """원본 다운로드(조회 + '변경요청' 컬럼형, 쿠팡)에서 선택 옵션만 남기고 변경요청 컬럼 기입.
+
+    pf['write'] = {판매가: col, 정가: col}. P(판매가)=권장가, Q(정가/할인율기준가)=가짜정가(FAKE_JEONG).
+    R/S(판매상태/재고)는 미기입(가격만 변경). 미선택 행 삭제. 키 = cfg['cols']['상품번호'](쿠팡 옵션ID).
+    가짜정가는 랜덤이라 기입한 값 그대로 preview에 반환(미리보기-파일 일치).
+    returns (xlsx bytes, preview[dict], skip(권장가없음), missing(원본에 없음)).
+    """
+    pf = cfg["price_form"]
+    wp = pf["write"]["판매가"]
+    wj = pf["write"].get("정가")
+    c_key = cfg["cols"]["상품번호"]
+    start = cfg["data_start"]
+    row_by = {r["상품번호"]: r for r in rows}
+    targets, skipped = {}, []
+    for pid in pids:
+        ro = row_by.get(pid)
+        if not ro or ro.get("권장가") is None:
+            skipped.append(pid)
+            continue
+        price = int(ro["권장가"])
+        jeong = fake_jeong(price, pf.get("jeong_fake")) if wj else None
+        targets[pid] = (price, jeong, ro)
+    wb = load_workbook(BytesIO(raw_xlsx))
+    ws = _pick_ws(wb, cfg)
+    found, drop = set(), []
+    for r in range(start, ws.max_row + 1):
+        v = ws.cell(r, c_key).value
+        k = _pid(v) if v not in (None, "") else ""
+        if k and k in targets:
+            price, jeong, _ = targets[k]
+            ws.cell(r, wp).value = price
+            if wj and jeong is not None:
+                ws.cell(r, wj).value = jeong
+            found.add(k)
+        else:
+            drop.append(r)
+    for a, b in _ranges_desc(drop):
+        ws.delete_rows(a, b - a + 1)
+    keep_last = (start - 1) + len(found)
+    for rr in [x for x in ws.row_dimensions if x > keep_last]:
+        del ws.row_dimensions[rr]
+    out = BytesIO()
+    wb.save(out)
+    prev = []
+    for pid in pids:
+        if pid not in found:
+            continue
+        price, jeong, ro = targets[pid]
+        cur = int(_num(ro.get("판매가")))
+        prev.append({"상품명": ro.get("상품명", ""), "현재판매가": cur, "새판매가": price,
+                     "정가": jeong, "권장가(net)": ro.get("권장가"),
+                     "방향": "인상" if price > cur else ("인하" if price < cur else "유지")})
+    missing = [p for p in targets if p not in found]
+    return out.getvalue(), prev, skipped, missing
