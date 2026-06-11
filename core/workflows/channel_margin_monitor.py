@@ -1,14 +1,14 @@
 """channel-margin-monitor — 채널 가격·마진 모니터 (코어 로직).
 
 채널 상품관리 다운로드(라이브 리스팅)를 받아 상품별 마진율 계산 →
-기준마진 대비 이탈(탐지) + 기준마진 달성 권장가 역산.
+기준마진 대비 이탈(탐지) + 기준마진 달성 권장가 역산(100원 올림 → 기준마진 이상 보장).
 
 판매자상품코드 4-tier 해석:
   박스(관리코드) / PC낱개(PC+상품코드) / 소분(변환코드-원코드) / 합포(코드1-CB-코드2).
 매입가 = (코드해석 base) × N,  N = 판매자바코드(빈값/0→1, 분수 가능).
 정산액 = 판매가net×(1-수수료) + 배송비×정산계수.
 이익   = 정산액 - 매입가 - 실택배비.   마진율 = 이익/정산액.
-권장가 = ⌊((매입가+실택배비)/(1-확정마진율) - 배송비×정산계수)/(1-수수료)⌋ (100원 내림).
+권장가 = ⌈((매입가+실택배비)/(1-확정마진율) - 배송비×정산계수)/(1-수수료)⌉ (100원 올림).
 
 reference: product_master.csv · baseline_margin.csv · sobun.csv · margin_floor.csv (app reference/).
 공식·근거 = workflows/channel-margin-monitor.md. (검증: 2026-06-10 골든 705/706)
@@ -131,8 +131,8 @@ def resolve_code(code: str, refs: dict) -> tuple[str, float | None, float | None
     return ("박스", _num(r["박스매입단가"]), _num(r["박스"]), _nfc(r["규격"]), "")
 
 
-def _floor100(x: float) -> int:
-    return int(math.floor(x / 100) * 100)
+def _ceil100(x: float) -> int:
+    return int(math.ceil(x / 100) * 100)
 
 
 # ── 다운로드 파싱 ───────────────────────────────────────────────────────────
@@ -201,10 +201,10 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
             row["마진율"] = round(마진율, 4)
             if base_margin is not None:
                 row["탐지"] = round(마진율 - base_margin, 4)
-        # 권장가 (기준마진 달성 판매가, 100원 내림)
+        # 권장가 (기준마진 달성 판매가, 100원 올림 → 기준마진 이상 보장)
         if base_margin is not None and base_margin < 1:
             권장 = ((매입가 + ship) / (1 - base_margin) - rec["배송비"] * settle) / rate
-            row["권장가"] = _floor100(권장)
+            row["권장가"] = _ceil100(권장)
         out.append(row)
     return out
 
@@ -276,3 +276,114 @@ def merge_listing(existing: list[dict], new: list[dict]) -> tuple[list[dict], in
     seen = {r["상품번호"] for r in existing}
     added = [r for r in new if r["상품번호"] and r["상품번호"] not in seen]
     return existing + added, len(added)
+
+
+# ── 가격 일괄변경 (할인 우선 규칙) ───────────────────────────────────────────
+def adjust_price(판매가: float, 즉시할인: float, 포인트: float,
+                 target_net: float) -> tuple[int, int]:
+    """net(=판매가-즉시할인-포인트)을 target_net으로 맞추는 (새 판매가, 새 즉시할인).
+
+    ★ 할인 우선: 인상 시 즉시할인을 먼저 줄이고 모자라면 판매가를 올린다.
+       인하 시 즉시할인을 먼저 늘리고 모자라면 판매가를 내린다. 포인트는 불변.
+    """
+    판매가, 즉시할인, 포인트 = float(판매가), float(즉시할인), float(포인트)
+    cur_net = 판매가 - 즉시할인 - 포인트
+    delta = target_net - cur_net
+    new_price, new_disc = 판매가, 즉시할인
+    if delta > 0:                                   # 인상: 할인 축소 우선
+        cut = min(즉시할인, delta)
+        new_disc = 즉시할인 - cut
+        new_price = 판매가 + (delta - cut)
+    elif delta < 0:                                 # 인하: 할인 확대 우선
+        need = -delta
+        room = max(cur_net, 0.0)                    # net 0까지만 할인 가능
+        add = min(need, room)
+        new_disc = 즉시할인 + add
+        new_price = 판매가 - (need - add)
+    return int(round(new_price)), int(round(new_disc))
+
+
+def compute_new_prices(rows: list[dict], recs: list[dict],
+                       pids: set) -> tuple[dict, list[str]]:
+    """체크된 상품번호(pids) → {상품번호: (새 판매가, 새 즉시할인)} + 건너뛴 목록.
+
+    target = 권장가(기준마진 달성가). 권장가 없는(미매칭/기준미설정) 상품은 skip.
+    """
+    rec_by = {r["상품번호"]: r for r in recs}
+    row_by = {r["상품번호"]: r for r in rows}
+    new_prices, skipped = {}, []
+    for pid in pids:
+        row, rec = row_by.get(pid), rec_by.get(pid)
+        if not row or not rec or row.get("권장가") is None:
+            skipped.append(pid)
+            continue
+        np_, nd_ = adjust_price(rec["판매가"], rec["즉시할인"], rec["포인트"],
+                                row["권장가"])
+        new_prices[pid] = (np_, nd_)
+    return new_prices, skipped
+
+
+def build_bulk_price_xlsx(raw_xlsx: bytes, new_prices: dict,
+                          cfg: dict) -> tuple[bytes, int, list[str]]:
+    """원본 일괄변경 양식(raw_xlsx, 전체 컬럼) → 체크 상품 행만 가격 수정 후 남김.
+
+    헤더(data_start 이전 행) 보존. new_prices 에 없는 데이터 행은 삭제.
+    returns (xlsx bytes, 남긴 행수, 원본에 없던 상품번호 목록).
+    """
+    wb = load_workbook(BytesIO(raw_xlsx))           # 값+서식 보존 (read_only 금지)
+    ws = wb[cfg["sheet"]] if cfg.get("sheet") else wb[wb.sheetnames[0]]
+    col = cfg["cols"]
+    c_pid, c_price, c_disc = col["상품번호"], col["판매가"], col["즉시할인"]
+    c_unit = c_disc + 1                             # 즉시할인 단위(BG=BF+1)
+    start = cfg["data_start"]
+    found, drop = set(), []
+    for r in range(start, ws.max_row + 1):
+        v = ws.cell(r, c_pid).value
+        pid = _nfc(v) if v not in (None, "") else ""
+        if pid and pid in new_prices:
+            price, disc = new_prices[pid]
+            ws.cell(r, c_price).value = price
+            if disc and disc > 0:
+                ws.cell(r, c_disc).value = disc
+                ws.cell(r, c_unit).value = "원"
+            else:
+                ws.cell(r, c_disc).value = None
+                ws.cell(r, c_unit).value = None
+            found.add(pid)
+        else:
+            drop.append(r)                          # 미체크 행 + 빈행 삭제
+    for r in sorted(drop, reverse=True):
+        ws.delete_rows(r, 1)
+    out = BytesIO()
+    wb.save(out)
+    missing = [p for p in new_prices if p not in found]
+    return out.getvalue(), len(found), missing
+
+
+def append_rows_to_raw(raw_xlsx: bytes, src_xlsx: bytes,
+                       pids: set, cfg: dict) -> bytes:
+    """저장 원본(raw)에 src 양식의 신규 상품번호(pids) 행을 값으로 추가."""
+    tgt = load_workbook(BytesIO(raw_xlsx))
+    tws = tgt[cfg["sheet"]] if cfg.get("sheet") else tgt[tgt.sheetnames[0]]
+    src = load_workbook(BytesIO(src_xlsx), data_only=True)
+    sws = src[cfg["sheet"]] if cfg.get("sheet") else src[src.sheetnames[0]]
+    c_pid = cfg["cols"]["상품번호"]
+    start = cfg["data_start"]
+    src_rows = {}
+    for r in range(start, sws.max_row + 1):
+        v = sws.cell(r, c_pid).value
+        pid = _nfc(v) if v not in (None, "") else ""
+        if pid:
+            src_rows[pid] = r
+    ncol = max(tws.max_column, sws.max_column)
+    dest = tws.max_row + 1
+    for pid in pids:
+        sr = src_rows.get(pid)
+        if not sr:
+            continue
+        for c in range(1, ncol + 1):
+            tws.cell(dest, c).value = sws.cell(sr, c).value
+        dest += 1
+    out = BytesIO()
+    tgt.save(out)
+    return out.getvalue()
