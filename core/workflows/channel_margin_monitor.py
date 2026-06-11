@@ -99,10 +99,7 @@ CHANNEL_CONFIG: dict[str, dict] = {
             "source": {"오퍼코드": "오퍼코드", "옵션코드": "옵션코드", "관리코드": "관리코드",
                        "할인전단가": "정가", "판매단가": "권장가"},
             "price_field": "판매단가",
-            "jeong_field": "할인전단가",
-            # 할인전단가(H)는 무늬용 가짜 정가 — 실제 판매가는 G. 권장가 기준 +20~30% 랜덤·100원 반올림(>판매단가).
-            # (마진/대시보드는 항상 판매단가만 사용. 실제 정가 보존이 아니라 매번 생성 → 일부 채널만.)
-            "jeong_fake": {"min_pct": 0.20, "max_pct": 0.30, "round": 100},
+            "jeong_field": "할인전단가",   # 무늬용 가짜 정가(표준 FAKE_JEONG). 마진은 항상 판매단가만 사용.
         },
     },
     "배민상회": {
@@ -128,8 +125,7 @@ CHANNEL_CONFIG: dict[str, dict] = {
         "ship_fee_policy": {"col": 60, "map": {"무료배송": 0}, "default": 3000},
         # 상품별 수수료(BU=73) + 가격변경 양식용 옵션번호(R=18)·옵션명(U=21) listing 보존.
         "extra_cols": {"수수료raw": 73, "옵션번호": 18, "옵션명": 21},
-        # 가격 일괄변경 = '(배민)양식' append. J=변경판매가(권장가). H=변경소비자가는 무늬용 가짜 —
-        # 현재 소비자가-판매가 차이(마크업)를 그대로 얹음(jeong_gap): 변경소비자가 = 권장가 + (정가−판매가).
+        # 가격 일괄변경 = '(배민)양식' append. J=변경판매가(권장가). H=변경소비자가=무늬용 가짜(표준 FAKE_JEONG).
         "price_form": {
             "mode": "append",
             "template": "baemin_price_template.xlsx",   # reference/ 고정 양식
@@ -141,8 +137,7 @@ CHANNEL_CONFIG: dict[str, dict] = {
                        "옵션명": "옵션명", "관리코드": "관리코드",
                        "현재소비자가": "정가", "현재판매가": "판매가"},
             "price_field": "변경판매가",
-            "jeong_field": "변경소비자가",
-            "jeong_gap": True,                          # 변경소비자가 = 권장가 + (정가−판매가)
+            "jeong_field": "변경소비자가",              # 무늬용 가짜 정가(표준 FAKE_JEONG)
         },
     },
 }
@@ -150,6 +145,10 @@ CHANNEL_CONFIG: dict[str, dict] = {
 
 # 마진미달 판정 임계 (탐지 = 마진율 − 기준마진율 < 이 값). -0.01 = 기준보다 1%p↑ 낮음.
 MARGIN_UNDER_THRESHOLD = -0.01
+
+# 가격변경 양식 '무늬용 정가'(소비자가/할인전단가/정가) 표준 — 전 채널 공통:
+# 권장가 × (1 + 랜덤 20~30%), 100원 반올림, >권장가. jeong_field 있는 채널은 기본 이 방식.
+FAKE_JEONG = {"min_pct": 0.20, "max_pct": 0.30, "round": 100}
 
 
 def _nfc(s) -> str:
@@ -554,17 +553,13 @@ def build_append_items(pf: dict, rows: list[dict], recs: list[dict],
         it = {field: merged.get(key, "") for field, key in src.items()}
         it[price_f] = price
         if jeong_f:
-            fake = pf.get("jeong_fake")
-            if fake:                                  # 무늬용 가짜 정가: 판매가 +20~30% 랜덤·단위 반올림(>판매가)
-                pct = random.uniform(fake.get("min_pct", 0.20), fake.get("max_pct", 0.30))
-                unit = int(fake.get("round", 100))
-                val = int(round(price * (1 + pct) / unit) * unit)
-                it[jeong_f] = val if val > price else price + unit
-            elif pf.get("jeong_gap"):                 # 마크업 유지: 변경소비자가 = 권장가 + (정가−판매가)
-                gap = int(round(_num(merged.get("정가")) - _num(merged.get("판매가"))))
-                it[jeong_f] = price + gap if gap > 0 else price
-            else:
-                it[jeong_f] = int(max(_num(it.get(jeong_f)), price))   # 실제 정가 보존(식봄)
+            # 무늬용 가짜 정가(소비자가/할인전단가/정가) — 전 채널 표준(FAKE_JEONG):
+            # 권장가 +20~30% 랜덤·100원 반올림·>권장가. 채널이 pf['jeong_fake']로 % 오버라이드 가능.
+            fk = {**FAKE_JEONG, **pf.get("jeong_fake", {})}
+            pct = random.uniform(fk["min_pct"], fk["max_pct"])
+            unit = int(fk["round"])
+            val = int(round(price * (1 + pct) / unit) * unit)
+            it[jeong_f] = val if val > price else price + unit
         items.append(it)
         cur = int(_num(ro.get("판매가")))
         preview.append({
