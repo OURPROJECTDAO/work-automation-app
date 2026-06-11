@@ -105,6 +105,30 @@ CHANNEL_CONFIG: dict[str, dict] = {
             "jeong_fake": {"min_pct": 0.20, "max_pct": 0.30, "round": 100},
         },
     },
+    "배민상회": {
+        "key": "baemin",
+        # 수수료 = 채널 단일값이 아니라 **상품별**(다운로드 BU열) → commission_source "download".
+        #   commission = 수수료raw / commission_div + commission_add  (BU 4.5 → 4.5/100 + 0.03 = 0.075). 골든 J식과 일치.
+        "commission_source": "download",
+        "commission_field": "수수료raw",   # extra_cols로 캡처한 BU(73) 값
+        "commission_div": 100,
+        "commission_add": 0.03,           # 추가 고정수수료
+        "ship_settle": 0.967,
+        "real_ship": 2700,                # 스마트스토어 표준(골든 3000/3700 미채택)
+        "baseline_col": "배민상회",
+        "apply_floor": True,
+        "n_source": "ref",                # 합포량 N = hapo_multiplier(상품번호) — 바코드 없음
+        "sheet": "sheet1",
+        "header_row": 2,
+        "data_start": 3,
+        # cols(1-indexed): A=상품번호·V(22)=관리코드(관리용 상품명)·B=상품명·X(24)=판매가·W(23)=소비자가(정가).
+        # 즉시할인·포인트·바코드 컬럼 없음(식봄형).
+        "cols": {"상품번호": 1, "코드": 22, "상품명": 2, "판매가": 24, "정가": 23},
+        # 배송비 = 배송방법(BH=60) 조건부: "무료배송"→0, 그 외(택배배송 등)→3000. 골든 E식과 일치.
+        "ship_fee_policy": {"col": 60, "map": {"무료배송": 0}, "default": 3000},
+        # 상품별 수수료(BU=73) listing 보존.
+        "extra_cols": {"수수료raw": 73},
+    },
 }
 
 
@@ -305,12 +329,18 @@ def parse_download(file, cfg: dict) -> list[dict]:
 
 # ── 마진 계산 ───────────────────────────────────────────────────────────────
 def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
-    comm, settle, ship = cfg["commission"], cfg["ship_settle"], cfg["real_ship"]
+    settle, ship = cfg["ship_settle"], cfg["real_ship"]
     bcol = cfg["baseline_col"]
     apply_floor = cfg.get("apply_floor", True)
-    rate = 1 - comm  # 판매가에 곱하는 정산비율 (예 0.94)
+    comm_src = cfg.get("commission_source")   # "download"=상품별(BU) / None=단일 commission
     out = []
     for rec in recs:
+        if comm_src == "download":             # 배민상회: 수수료raw/div + add (상품별)
+            comm = _num(rec.get(cfg["commission_field"]), 0) / cfg.get("commission_div", 1) \
+                + cfg.get("commission_add", 0.0)
+        else:
+            comm = cfg["commission"]
+        rate = 1 - comm                        # 판매가net에 곱하는 정산비율
         typ, base, stock, spec, note = resolve_code(rec["코드"], refs)
         if cfg.get("n_source") == "ref":
             nv = refs.get("hapo", {}).get(rec["상품번호"], 1.0)  # 합포량(상품번호) 기본 1
@@ -391,34 +421,43 @@ LISTING_COLS = ["상품번호", "코드", "상품명", "판매가", "정가", "�
 
 
 def recs_to_csv(recs: list[dict]) -> str:
-    """parse_download 레코드 → CSV 텍스트 (저장용)."""
+    """parse_download 레코드 → CSV 텍스트 (저장용).
+
+    LISTING_COLS + extra_cols로 들어온 추가 키(예 배민상회 수수료raw)를 자동 포함.
+    """
+    extra = []
+    for r in recs:
+        for k in r:
+            if k not in LISTING_COLS and k not in extra:
+                extra.append(k)
+    cols = LISTING_COLS + extra
     buf = StringIO()
-    w = csv.DictWriter(buf, fieldnames=LISTING_COLS)
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
     w.writeheader()
     for r in recs:
         bar = r.get("바코드")
-        w.writerow({
-            "상품번호": r["상품번호"], "코드": r["코드"], "상품명": r["상품명"],
-            "판매가": r["판매가"], "정가": r.get("정가", ""), "배송비": r["배송비"],
-            "즉시할인": r["즉시할인"], "포인트": r["포인트"],
-            "바코드": "" if bar in (None, "") else bar,
-            "오퍼코드": r.get("오퍼코드", ""), "옵션코드": r.get("옵션코드", ""),
-        })
+        row = {k: r.get(k, "") for k in cols}
+        row["바코드"] = "" if bar in (None, "") else bar
+        w.writerow(row)
     return buf.getvalue()
 
 
 def csv_text_to_recs(text: str) -> list[dict]:
-    """저장 CSV 텍스트 → parse_download 호환 레코드."""
+    """저장 CSV 텍스트 → parse_download 호환 레코드 (추가 컬럼 포함, 구 CSV 하위호환)."""
+    num_cols = {"판매가", "정가", "배송비", "즉시할인", "포인트"}
     recs = []
     for row in csv.DictReader(StringIO(text)):
-        recs.append({
-            "상품번호": _nfc(row.get("상품번호")), "코드": _nfc(row.get("코드")),
-            "상품명": _nfc(row.get("상품명")), "판매가": _num(row.get("판매가")),
-            "정가": _num(row.get("정가")),
-            "배송비": _num(row.get("배송비")), "즉시할인": _num(row.get("즉시할인")),
-            "포인트": _num(row.get("포인트")), "바코드": row.get("바코드") or "",
-            "오퍼코드": _nfc(row.get("오퍼코드")), "옵션코드": _nfc(row.get("옵션코드")),
-        })
+        rec = {"상품번호": "", "코드": "", "상품명": "", "판매가": 0.0, "정가": 0.0,
+               "배송비": 0.0, "즉시할인": 0.0, "포인트": 0.0, "바코드": "",
+               "오퍼코드": "", "옵션코드": ""}
+        for k, v in row.items():
+            if k in num_cols:
+                rec[k] = _num(v)
+            elif k == "바코드":
+                rec[k] = v or ""
+            else:
+                rec[k] = _nfc(v)
+        recs.append(rec)
     return recs
 
 
