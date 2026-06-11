@@ -60,8 +60,12 @@ CHANNEL_CONFIG: dict[str, dict] = {
             "template": "sikbom_price_template.xlsx",  # reference/ 고정 양식
             "sheet": "(식봄)양식",
             "data_start": 7,                        # r1~3 안내·r4~6 헤더/설명
-            "cols": {"상품번호": 1, "코드": 2, "상품명": 3, "정가": 4, "수량별설정": 5, "판매단가": 6},
+            "cols": {"상품번호": 1, "코드": 2, "상품명": 3, "정가": 4, "판매단가": 6},
             "fixed": {5: "n"},                      # E열 수량별 판매단가 설정 = n 고정
+            "source": {"상품번호": "상품번호", "코드": "관리코드", "상품명": "상품명",
+                       "정가": "정가", "판매단가": "권장가"},
+            "price_field": "판매단가",
+            "jeong_field": "정가",
         },
     },
     "캐시노트": {
@@ -81,6 +85,21 @@ CHANNEL_CONFIG: dict[str, dict] = {
         "cols": {"상품번호": 1, "코드": 5, "상품명": 3, "판매가": 14, "정가": 15},
         # 배송비 = 배송정책코드(Y열=25) 조건부: DVP212991→3000, 그 외(DVP447716 등)→0. 골든 J식과 일치.
         "ship_fee_policy": {"col": 25, "map": {"DVP212991": 3000}, "default": 0},
+        # 가격변경 양식(A=오퍼코드 OFR·D=옵션코드 SKU)이 다운로드 Q(17)·R(18)에만 있어 listing에 보존.
+        "extra_cols": {"오퍼코드": 17, "옵션코드": 18},
+        # 가격 일괄변경 = '(캐시노트)양식' append. F=수정·L=Y·N=9999 고정, G=판매단가(권장가)·H=할인전단가(≥판매단가).
+        "price_form": {
+            "mode": "append",
+            "template": "cashnote_price_template.xlsx",   # reference/ 고정 양식(업로드 폼)
+            "sheet": "(캐시노트)양식",
+            "data_start": 4,                              # r1~3 그룹헤더/안내, r2=컬럼명
+            "cols": {"오퍼코드": 1, "옵션코드": 4, "판매단가": 7, "할인전단가": 8, "관리코드": 15},
+            "fixed": {6: "수정", 12: "Y", 14: 9999},       # F 변경타입·L 진열여부·N 재고수량
+            "source": {"오퍼코드": "오퍼코드", "옵션코드": "옵션코드", "관리코드": "관리코드",
+                       "할인전단가": "정가", "판매단가": "권장가"},
+            "price_field": "판매단가",
+            "jeong_field": "할인전단가",
+        },
     },
 }
 
@@ -262,7 +281,7 @@ def parse_download(file, cfg: dict) -> list[dict]:
         if pid in (None, ""):
             continue
         bc = col.get("바코드")
-        recs.append({
+        rec = {
             "상품번호": _pid(pid),
             "코드": _nfc(ws.cell(r, col["코드"]).value),
             "상품명": _nfc(ws.cell(r, col["상품명"]).value),
@@ -272,7 +291,11 @@ def parse_download(file, cfg: dict) -> list[dict]:
             "포인트": _opt(r, "포인트"),
             "정가": _opt(r, "정가"),
             "바코드": ws.cell(r, bc).value if bc else None,
-        })
+            "오퍼코드": "", "옵션코드": "",          # 가격변경 양식 A/D용(캐시노트). 그 외 채널 공백
+        }
+        for name, c in cfg.get("extra_cols", {}).items():   # 다운로드 추가 컬럼 보존(OFR/SKU 등)
+            rec[name] = _nfc(ws.cell(r, c).value)
+        recs.append(rec)
     return recs
 
 
@@ -359,7 +382,8 @@ def run(file, channel: str, ref_dir) -> tuple[list[dict], dict]:
 
 
 # ── 저장 listing (연동데이터) 직렬화 / 병합 ──────────────────────────────────
-LISTING_COLS = ["상품번호", "코드", "상품명", "판매가", "정가", "배송비", "즉시할인", "포인트", "바코드"]
+LISTING_COLS = ["상품번호", "코드", "상품명", "판매가", "정가", "배송비", "즉시할인", "포인트", "바코드",
+                "오퍼코드", "옵션코드"]
 
 
 def recs_to_csv(recs: list[dict]) -> str:
@@ -374,6 +398,7 @@ def recs_to_csv(recs: list[dict]) -> str:
             "판매가": r["판매가"], "정가": r.get("정가", ""), "배송비": r["배송비"],
             "즉시할인": r["즉시할인"], "포인트": r["포인트"],
             "바코드": "" if bar in (None, "") else bar,
+            "오퍼코드": r.get("오퍼코드", ""), "옵션코드": r.get("옵션코드", ""),
         })
     return buf.getvalue()
 
@@ -388,6 +413,7 @@ def csv_text_to_recs(text: str) -> list[dict]:
             "정가": _num(row.get("정가")),
             "배송비": _num(row.get("배송비")), "즉시할인": _num(row.get("즉시할인")),
             "포인트": _num(row.get("포인트")), "바코드": row.get("바코드") or "",
+            "오퍼코드": _nfc(row.get("오퍼코드")), "옵션코드": _nfc(row.get("옵션코드")),
         })
     return recs
 
@@ -444,34 +470,63 @@ def compute_new_prices(rows: list[dict], recs: list[dict],
     return new_prices, skipped
 
 
-def build_price_form_append(template_xlsx: bytes, items: list[dict], pf: dict) -> bytes:
-    """채널 '가격변경 양식' 템플릿에 선택 상품 행만 채워 append (식봄형).
+def build_append_items(pf: dict, rows: list[dict], recs: list[dict],
+                       pids) -> tuple[list[dict], list[dict], list[str]]:
+    """append형 가격변경 양식의 (items, preview, skipped) 생성 — 채널 무관.
 
-    items: [{상품번호, 코드, 상품명, 정가, 판매단가}] — 판매단가 = 권장가.
-    pf = cfg['price_form'] (sheet·data_start·cols·fixed). 템플릿의 기존/예시 데이터행은
-    모두 제거하고 선택 행만 data_start부터 기입. 정가는 판매단가 이상 보장(정가≥판매가 제약).
-    빈행 방지 위해 keep_last 초과 row_dimensions 정리(스마트스토어 양식과 동일 개념).
+    pf['source'] {양식필드: 소스키}: row(우선)/rec 에서 값 추출.
+    pf['price_field']: 권장가가 들어갈 양식필드(정수).
+    pf['jeong_field']: (선택) 정가/할인전단가 필드 → max(소스값, 판매단가) 보장(정가≥판매가).
+    권장가 없는(미매칭/기준 미설정) 상품은 skip.
+    """
+    row_by = {r["상품번호"]: r for r in rows}
+    rec_by = {r["상품번호"]: r for r in recs}
+    src = pf.get("source", {})
+    price_f = pf["price_field"]
+    jeong_f = pf.get("jeong_field")
+    items, preview, skipped = [], [], []
+    for pid in pids:
+        ro = row_by.get(pid)
+        if not ro or ro.get("권장가") is None:
+            skipped.append(pid)
+            continue
+        merged = {**rec_by.get(pid, {}), **ro}       # row 우선
+        price = int(ro["권장가"])
+        it = {field: merged.get(key, "") for field, key in src.items()}
+        it[price_f] = price
+        if jeong_f:
+            it[jeong_f] = int(max(_num(it.get(jeong_f)), price))   # 정가 ≥ 판매단가
+        items.append(it)
+        cur = int(_num(ro.get("판매가")))
+        preview.append({
+            "상품명": ro.get("상품명"), "현재판매가": cur, "새판매단가": price,
+            "정가": it.get(jeong_f) if jeong_f else "",
+            "방향": "인상" if price > cur else ("인하" if price < cur else "유지"),
+        })
+    return items, preview, skipped
+
+
+def build_price_form_append(template_xlsx: bytes, items: list[dict], pf: dict) -> bytes:
+    """채널 '가격변경 양식' 템플릿에 선택 상품 행만 채워 append (식봄·캐시노트형).
+
+    items: [{양식필드: 값}] — build_append_items 가 판매단가(=권장가)·정가/할인전단가까지
+    계산해 넣는다. pf['cols'] {양식필드: 컬럼} 로 기입, pf['fixed'] {컬럼: 값} 고정값.
+    템플릿의 기존/예시 데이터행은 모두 제거하고 data_start부터 기입.
+    빈행 방지 위해 keep_last 초과 row_dimensions 정리(전역 pitfalls).
     """
     wb = load_workbook(BytesIO(template_xlsx))
     ws = wb[pf["sheet"]] if pf.get("sheet") else wb[wb.sheetnames[0]]
-    col = pf["cols"]
+    cols = pf["cols"]
     start = pf["data_start"]
     fixed = pf.get("fixed", {})
     if ws.max_row >= start:                          # 예시/기존 데이터행 제거
         ws.delete_rows(start, ws.max_row - start + 1)
     for i, it in enumerate(items):
         r = start + i
-        price = int(round(it["판매단가"]))
-        ws.cell(r, col["상품번호"]).value = it["상품번호"]
-        if "코드" in col:
-            ws.cell(r, col["코드"]).value = it.get("코드", "")
-        if "상품명" in col:
-            ws.cell(r, col["상품명"]).value = it.get("상품명", "")
-        if "정가" in col:
-            jeong = int(round(_num(it.get("정가"))))
-            ws.cell(r, col["정가"]).value = max(jeong, price)   # 정가 ≥ 판매단가
-        ws.cell(r, col["판매단가"]).value = price
-        for c, val in fixed.items():                # 고정값(예: E열 'n')
+        for field, c in cols.items():
+            if field in it:
+                ws.cell(r, c).value = it[field]
+        for c, val in fixed.items():                 # 고정값(예: 변경타입 '수정'·진열 'Y'·재고 9999)
             ws.cell(r, int(c)).value = val
     keep_last = start - 1 + len(items)
     for rr in [x for x in ws.row_dimensions if x > keep_last]:
