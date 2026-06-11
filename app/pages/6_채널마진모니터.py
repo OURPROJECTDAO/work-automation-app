@@ -220,20 +220,9 @@ if only_miss:
 DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형", "N", "재고",
            "매입가", "판매가", "배송비", "정산액", "마진율", "기준마진율", "탐지", "권장가/제한", "비고"]
 
-# ── 선택(체크박스) — 필터 넘어 상품번호 기준으로 유지 ─────────────────────────
+# ── 선택(체크박스) — 헤더 체크박스로 전체 선택/해제, 필터 넘어 상품번호 기준 유지 ──
 sel = st.session_state.setdefault(f"cmm_sel_{key}", set())
 view_pids = set(view["상품번호"])
-nonce = st.session_state.setdefault(f"cmm_nonce_{key}", 0)
-
-s1, s2, s3 = st.columns([1, 1, 4])
-if s1.button("전체 선택", use_container_width=True, help="현재 필터에 보이는 상품 전체 선택"):
-    sel |= view_pids
-    st.session_state[f"cmm_nonce_{key}"] = nonce + 1
-    st.rerun()
-if s2.button("전체 해제", use_container_width=True, help="현재 필터에 보이는 상품 선택 해제"):
-    sel -= view_pids
-    st.session_state[f"cmm_nonce_{key}"] = nonce + 1
-    st.rerun()
 
 edit_df = view[DISPLAY].copy()
 edit_df.insert(0, "선택", view["상품번호"].isin(sel).values)
@@ -244,9 +233,9 @@ edited = st.data_editor(
     use_container_width=True,
     hide_index=True,
     disabled=DISPLAY,
-    key=f"cmm_ed_{key}_{filter_sig}_{nonce}",
+    key=f"cmm_ed_{key}_{filter_sig}",
     column_config={
-        "선택": st.column_config.CheckboxColumn("선택", help="가격변경/CSV로 내보낼 상품 선택"),
+        "선택": st.column_config.CheckboxColumn("선택", help="가격변경/CSV로 내보낼 상품 선택 (헤더 체크박스로 전체 선택/해제)"),
         "N": st.column_config.NumberColumn("N", format="%.4g", help="판매단위 배수(판매자바코드, 빈값→1, 분수 가능)"),
         "재고": st.column_config.NumberColumn("재고", format="localized"),
         "매입가": st.column_config.NumberColumn("매입가", format="localized"),
