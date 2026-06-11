@@ -302,31 +302,58 @@ dc1.download_button(
 
 if dc2.button(f"🛠️ 가격 일괄변경 양식 생성 (선택 {len(sel_pids)}건)",
               type="primary", use_container_width=True, disabled=(len(sel_pids) == 0)):
-    new_prices, skipped = cmm.compute_new_prices(rows, recs, sel_pids)
-    if not new_prices:
-        st.session_state[f"form_{key}"] = {"error": "선택 상품 중 권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
-    else:
-        rcode, raw = _gh_bytes(_raw_path(key))
-        if rcode != 200 or not raw:
-            st.session_state[f"form_{key}"] = {"error": "원본 양식(.xlsx)이 저장돼 있지 않습니다. '상품관리 갱신 → 전체 교체'를 1회 실행해 주세요."}
+    pf = cfg.get("price_form")
+    row_by = {r["상품번호"]: r for r in rows}
+    rec_by = {r["상품번호"]: r for r in recs}
+    if pf and pf.get("mode") == "append":
+        # 식봄형: '상품 일괄수정' 템플릿에 선택 행만 기입. 새 판매단가 = 권장가(할인 없음).
+        items, prev, skipped = [], [], []
+        for pid in sel_pids:
+            ro = row_by.get(pid)
+            if not ro or ro.get("권장가") is None:
+                skipped.append(pid)
+                continue
+            price = int(ro["권장가"])
+            jeong = int(max(_num(ro.get("정가")), price))
+            items.append({"상품번호": pid, "코드": ro["관리코드"], "상품명": ro["상품명"],
+                          "정가": ro.get("정가", 0), "판매단가": price})
+            cur = int(ro["판매가"])
+            prev.append({"상품명": ro["상품명"], "현재판매가": cur, "새판매단가": price, "정가": jeong,
+                         "방향": "인상" if price > cur else ("인하" if price < cur else "유지")})
+        if not items:
+            st.session_state[f"form_{key}"] = {"error": "선택 상품 중 권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
         else:
-            out, kept, missing = cmm.build_bulk_price_xlsx(raw, new_prices, cfg)
-            rec_by = {r["상품번호"]: r for r in recs}
-            row_by = {r["상품번호"]: r for r in rows}
-            prev = []
-            for pid, (np_, nd_) in new_prices.items():
-                rc, ro = rec_by[pid], row_by[pid]
-                cur_net = rc["판매가"] - rc["즉시할인"] - rc["포인트"]
-                new_net = np_ - nd_ - rc["포인트"]
-                prev.append({
-                    "상품명": ro["상품명"], "현재판매가": int(rc["판매가"]), "현재할인": int(rc["즉시할인"]),
-                    "새판매가": np_, "새할인": nd_, "권장가(net)": ro["권장가"],
-                    "방향": "인상" if new_net > cur_net else ("인하" if new_net < cur_net else "유지"),
-                })
+            out = cmm.build_price_form_append((_REF / pf["template"]).read_bytes(), items, pf)
             st.session_state[f"form_{key}"] = {
-                "bytes": out, "kept": kept, "skipped": skipped, "missing": missing, "preview": prev,
-                "name": f"{channel}_가격일괄변경_{datetime.now(_KST):%Y%m%d}.xlsx",
+                "bytes": out, "kept": len(items), "skipped": skipped, "missing": [],
+                "preview": prev, "append": True,
+                "name": f"{channel}_가격변경_{datetime.now(_KST):%Y%m%d}.xlsx",
             }
+    else:
+        new_prices, skipped = cmm.compute_new_prices(rows, recs, sel_pids)
+        if not new_prices:
+            st.session_state[f"form_{key}"] = {"error": "선택 상품 중 권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
+        else:
+            rcode, raw = _gh_bytes(_raw_path(key))
+            if rcode != 200 or not raw:
+                st.session_state[f"form_{key}"] = {"error": "원본 양식(.xlsx)이 저장돼 있지 않습니다. '상품관리 갱신 → 전체 교체'를 1회 실행해 주세요."}
+            else:
+                out, kept, missing = cmm.build_bulk_price_xlsx(raw, new_prices, cfg)
+                prev = []
+                for pid, (np_, nd_) in new_prices.items():
+                    rc, ro = rec_by[pid], row_by[pid]
+                    cur_net = rc["판매가"] - rc["즉시할인"] - rc["포인트"]
+                    new_net = np_ - nd_ - rc["포인트"]
+                    prev.append({
+                        "상품명": ro["상품명"], "현재판매가": int(rc["판매가"]), "현재할인": int(rc["즉시할인"]),
+                        "새판매가": np_, "새할인": nd_, "권장가(net)": ro["권장가"],
+                        "방향": "인상" if new_net > cur_net else ("인하" if new_net < cur_net else "유지"),
+                    })
+                st.session_state[f"form_{key}"] = {
+                    "bytes": out, "kept": kept, "skipped": skipped, "missing": missing,
+                    "preview": prev, "append": False,
+                    "name": f"{channel}_가격일괄변경_{datetime.now(_KST):%Y%m%d}.xlsx",
+                }
 
 form = st.session_state.get(f"form_{key}")
 if form:
@@ -350,8 +377,14 @@ if form:
                              "현재판매가": st.column_config.NumberColumn(format="localized"),
                              "현재할인": st.column_config.NumberColumn(format="localized"),
                              "새판매가": st.column_config.NumberColumn(format="localized"),
+                             "새판매단가": st.column_config.NumberColumn(format="localized"),
                              "새할인": st.column_config.NumberColumn(format="localized"),
+                             "정가": st.column_config.NumberColumn(format="localized"),
                              "권장가(net)": st.column_config.NumberColumn(format="localized"),
                          })
-        st.caption("★ 가격은 net(판매가−즉시할인−포인트) 기준으로 기준마진 달성가에 맞춥니다. "
-                   "할인 우선: 인상 시 즉시할인을 먼저 줄이고 모자라면 판매가를 올립니다(인하는 반대).")
+        if form.get("append"):
+            st.caption("★ 식봄 '상품 일괄수정' 양식입니다. 선택 상품만 기입 — 판매단가=기준마진 달성 권장가, "
+                       "E열(수량별 판매단가 설정)=n, 정가는 기존값 유지(판매단가 이상 보장). 식봄에 그대로 업로드하세요.")
+        else:
+            st.caption("★ 가격은 net(판매가−즉시할인−포인트) 기준으로 기준마진 달성가에 맞춥니다. "
+                       "할인 우선: 인상 시 즉시할인을 먼저 줄이고 모자라면 판매가를 올립니다(인하는 반대).")
