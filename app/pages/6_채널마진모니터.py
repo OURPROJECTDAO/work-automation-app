@@ -341,6 +341,21 @@ if dc2.button(f"🛠️ 가격 일괄변경 양식 생성 (선택 {len(sel_pids)
                 "preview": prev, "append": True,
                 "name": f"{channel}_가격변경_{datetime.now(_KST):%Y%m%d}.xlsx",
             }
+    elif pf and pf.get("mode") == "filter":
+        # 쿠팡형: 원본 다운로드의 '변경요청' 컬럼(P/Q)에 권장가·가짜정가 기입, 선택만 남김(R/S 미변경).
+        rcode, raw = _gh_bytes(_raw_path(key))
+        if rcode != 200 or not raw:
+            st.session_state[f"form_{key}"] = {"error": "원본 양식(.xlsx)이 저장돼 있지 않습니다. '상품관리 갱신 → 전체 교체'를 1회 실행해 주세요."}
+        else:
+            out, prev, skipped, missing = cmm.build_filter_price_xlsx(raw, rows, sel_pids, cfg)
+            if not prev:
+                st.session_state[f"form_{key}"] = {"error": "선택 상품 중 권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
+            else:
+                st.session_state[f"form_{key}"] = {
+                    "bytes": out, "kept": len(prev), "skipped": skipped, "missing": missing,
+                    "preview": prev, "append": False, "filter": True,
+                    "name": f"{channel}_가격변경_{datetime.now(_KST):%Y%m%d}.xlsx",
+                }
     else:
         new_prices, skipped = cmm.compute_new_prices(rows, recs, sel_pids)
         if not new_prices:
@@ -398,6 +413,10 @@ if form:
             st.caption(f"★ {channel} 일괄수정 양식입니다. 선택 상품만 기입 — 판매단가=기준마진 달성 권장가, "
                        "정가/할인전단가는 판매단가 이상으로 보존, 고정값(변경타입·진열·수량 등)은 양식 규칙대로 채웠습니다. "
                        f"{channel}에 그대로 업로드하세요.")
+        elif form.get("filter"):
+            st.caption(f"★ {channel} 가격 일괄변경 양식입니다. 선택 상품만 남기고 '변경 요청' 칸에 "
+                       "판매가=기준마진 달성 권장가, 할인율기준가=무늬용 가짜정가(권장가+20~30%)를 기입했습니다. "
+                       "판매상태·재고는 건드리지 않았으니 그대로 업로드하세요.")
         else:
             st.caption("★ 가격은 net(판매가−즉시할인−포인트) 기준으로 기준마진 달성가에 맞춥니다. "
                        "할인 우선: 인상 시 즉시할인을 먼저 줄이고 모자라면 판매가를 올립니다(인하는 반대).")
