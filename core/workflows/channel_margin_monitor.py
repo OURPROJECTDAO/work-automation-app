@@ -126,8 +126,24 @@ CHANNEL_CONFIG: dict[str, dict] = {
         "cols": {"상품번호": 1, "코드": 22, "상품명": 2, "판매가": 24, "정가": 23},
         # 배송비 = 배송방법(BH=60) 조건부: "무료배송"→0, 그 외(택배배송 등)→3000. 골든 E식과 일치.
         "ship_fee_policy": {"col": 60, "map": {"무료배송": 0}, "default": 3000},
-        # 상품별 수수료(BU=73) listing 보존.
-        "extra_cols": {"수수료raw": 73},
+        # 상품별 수수료(BU=73) + 가격변경 양식용 옵션번호(R=18)·옵션명(U=21) listing 보존.
+        "extra_cols": {"수수료raw": 73, "옵션번호": 18, "옵션명": 21},
+        # 가격 일괄변경 = '(배민)양식' append. J=변경판매가(권장가). H=변경소비자가는 무늬용 가짜 —
+        # 현재 소비자가-판매가 차이(마크업)를 그대로 얹음(jeong_gap): 변경소비자가 = 권장가 + (정가−판매가).
+        "price_form": {
+            "mode": "append",
+            "template": "baemin_price_template.xlsx",   # reference/ 고정 양식
+            "sheet": "(배민)양식",
+            "data_start": 2,                            # r1=헤더
+            "cols": {"상품번호": 1, "상품명": 2, "옵션번호": 3, "옵션명": 4, "관리코드": 5,
+                     "현재소비자가": 7, "변경소비자가": 8, "현재판매가": 9, "변경판매가": 10},
+            "source": {"상품번호": "상품번호", "상품명": "상품명", "옵션번호": "옵션번호",
+                       "옵션명": "옵션명", "관리코드": "관리코드",
+                       "현재소비자가": "정가", "현재판매가": "판매가"},
+            "price_field": "변경판매가",
+            "jeong_field": "변경소비자가",
+            "jeong_gap": True,                          # 변경소비자가 = 권장가 + (정가−판매가)
+        },
     },
 }
 
@@ -544,6 +560,9 @@ def build_append_items(pf: dict, rows: list[dict], recs: list[dict],
                 unit = int(fake.get("round", 100))
                 val = int(round(price * (1 + pct) / unit) * unit)
                 it[jeong_f] = val if val > price else price + unit
+            elif pf.get("jeong_gap"):                 # 마크업 유지: 변경소비자가 = 권장가 + (정가−판매가)
+                gap = int(round(_num(merged.get("정가")) - _num(merged.get("판매가"))))
+                it[jeong_f] = price + gap if gap > 0 else price
             else:
                 it[jeong_f] = int(max(_num(it.get(jeong_f)), price))   # 실제 정가 보존(식봄)
         items.append(it)
