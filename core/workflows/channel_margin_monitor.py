@@ -42,6 +42,10 @@ CHANNEL_CONFIG: dict[str, dict] = {
 }
 
 
+# 마진미달 판정 임계 (탐지 = 마진율 − 기준마진율 < 이 값). -0.01 = 기준보다 1%p↑ 낮음.
+MARGIN_UNDER_THRESHOLD = -0.01
+
+
 def _nfc(s) -> str:
     return unicodedata.normalize("NFC", str(s)).strip() if s not in (None, "") else ""
 
@@ -211,7 +215,7 @@ def _stats(rows: list[dict]) -> dict:
         "총건수": len(rows),
         "미매칭": sum(1 for r in rows if r["매입가"] is None),
         "미설정": sum(1 for r in rows if r["기준마진율"] is None and r["매입가"] is not None),
-        "마진미달": sum(1 for r in rows if r["탐지"] is not None and r["탐지"] < 0),
+        "마진미달": sum(1 for r in rows if r["탐지"] is not None and r["탐지"] < MARGIN_UNDER_THRESHOLD),
         "제한상품": sum(1 for r in rows if r["제한"]),
         "평균마진율": round(sum(margins) / len(margins), 4) if margins else None,
     }
