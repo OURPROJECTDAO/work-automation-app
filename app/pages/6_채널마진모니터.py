@@ -188,6 +188,10 @@ def _rec_disp(r):
 
 df["권장가/제한"] = df.apply(_rec_disp, axis=1)
 
+search = st.text_input("🔍 검색", placeholder="상품번호 · 관리코드 · 상품명 (부분일치)",
+                       label_visibility="collapsed")
+q = cmm._nfc(search).lower() if search else ""
+
 types = sorted(df["코드유형"].unique().tolist())
 fc1, fc2 = st.columns([2, 3])
 with fc1:
@@ -200,6 +204,10 @@ with fc2:
     only_miss = f4.checkbox("미매칭만")
 
 view = df[df["코드유형"].isin(pick)].copy()
+if q:
+    hay = (view["상품번호"].astype(str) + " ||| " + view["관리코드"].astype(str)
+           + " ||| " + view["상품명"].astype(str)).str.lower()
+    view = view[hay.str.contains(q, regex=False, na=False)]
 if only_under:
     view = view[view["탐지"].notna() & (view["탐지"] < cmm.MARGIN_UNDER_THRESHOLD)]
 if only_zero:
@@ -229,7 +237,7 @@ if s2.button("전체 해제", use_container_width=True, help="현재 필터에 �
 
 edit_df = view[DISPLAY].copy()
 edit_df.insert(0, "선택", view["상품번호"].isin(sel).values)
-filter_sig = hash((tuple(sorted(pick)), only_under, only_zero, only_floor, only_miss))
+filter_sig = hash((tuple(sorted(pick)), only_under, only_zero, only_floor, only_miss, q))
 
 edited = st.data_editor(
     edit_df,
