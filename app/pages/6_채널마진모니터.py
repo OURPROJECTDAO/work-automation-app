@@ -310,20 +310,8 @@ if dc2.button(f"🛠️ 가격 일괄변경 양식 생성 (선택 {len(sel_pids)
     row_by = {r["상품번호"]: r for r in rows}
     rec_by = {r["상품번호"]: r for r in recs}
     if pf and pf.get("mode") == "append":
-        # 식봄형: '상품 일괄수정' 템플릿에 선택 행만 기입. 새 판매단가 = 권장가(할인 없음).
-        items, prev, skipped = [], [], []
-        for pid in sel_pids:
-            ro = row_by.get(pid)
-            if not ro or ro.get("권장가") is None:
-                skipped.append(pid)
-                continue
-            price = int(ro["권장가"])
-            jeong = int(max(cmm._num(ro.get("정가")), price))
-            items.append({"상품번호": pid, "코드": ro["관리코드"], "상품명": ro["상품명"],
-                          "정가": ro.get("정가", 0), "판매단가": price})
-            cur = int(ro["판매가"])
-            prev.append({"상품명": ro["상품명"], "현재판매가": cur, "새판매단가": price, "정가": jeong,
-                         "방향": "인상" if price > cur else ("인하" if price < cur else "유지")})
+        # 식봄·캐시노트형: 채널 '일괄수정' 템플릿에 선택 행만 기입. 새 판매단가 = 권장가.
+        items, prev, skipped = cmm.build_append_items(pf, rows, recs, sel_pids)
         if not items:
             st.session_state[f"form_{key}"] = {"error": "선택 상품 중 권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
         else:
@@ -387,8 +375,9 @@ if form:
                              "권장가(net)": st.column_config.NumberColumn(format="localized"),
                          })
         if form.get("append"):
-            st.caption("★ 식봄 '상품 일괄수정' 양식입니다. 선택 상품만 기입 — 판매단가=기준마진 달성 권장가, "
-                       "E열(수량별 판매단가 설정)=n, 정가는 기존값 유지(판매단가 이상 보장). 식봄에 그대로 업로드하세요.")
+            st.caption(f"★ {channel} 일괄수정 양식입니다. 선택 상품만 기입 — 판매단가=기준마진 달성 권장가, "
+                       "정가/할인전단가는 판매단가 이상으로 보존, 고정값(변경타입·진열·수량 등)은 양식 규칙대로 채웠습니다. "
+                       f"{channel}에 그대로 업로드하세요.")
         else:
             st.caption("★ 가격은 net(판매가−즉시할인−포인트) 기준으로 기준마진 달성가에 맞춥니다. "
                        "할인 우선: 인상 시 즉시할인을 먼저 줄이고 모자라면 판매가를 올립니다(인하는 반대).")
