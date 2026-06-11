@@ -212,6 +212,17 @@ if not recs:
 
 st.caption(f"📦 저장된 상품관리 기준 · 최종 갱신 **{meta.get('updated_at', '?')}** · {len(recs):,}건")
 
+# 구버전 listing 가드: price_form 이 extra_cols 값(예 OFR/SKU)을 쓰는데 저장본에 전부 비어 있으면
+# (extra_cols 도입 전 저장된 스냅샷) 가격변경 양식의 해당 컬럼이 빈 채로 나간다 → 전체 교체 안내.
+_pf = cfg.get("price_form")
+_extra = cfg.get("extra_cols", {})
+if _pf and _extra:
+    _need = [k for k in _extra if k in set(_pf.get("source", {}).values())]
+    _stale = [k for k in _need if all(not (r.get(k) or "") for r in recs)]
+    if _stale:
+        st.warning(f"⚠️ 저장된 상품관리가 구버전이라 가격변경 양식의 **{', '.join(_stale)}**(가) 빈 채로 나갑니다. "
+                   "위 '📥 상품관리 갱신 → **전체 교체**'를 1회 실행하면 채워집니다(신규만 추가로는 기존 행이 안 채워짐).")
+
 rows, stats = cmm.compute_listing(recs, channel, str(_REF))
 
 # ── KPI ──────────────────────────────────────────────────────────────────────
