@@ -314,7 +314,7 @@ if dc2.button(f"🛠️ 가격 일괄변경 양식 생성 (선택 {len(sel_pids)
                 skipped.append(pid)
                 continue
             price = int(ro["권장가"])
-            jeong = int(max(_num(ro.get("정가")), price))
+            jeong = int(max(cmm._num(ro.get("정가")), price))
             items.append({"상품번호": pid, "코드": ro["관리코드"], "상품명": ro["상품명"],
                           "정가": ro.get("정가", 0), "판매단가": price})
             cur = int(ro["판매가"])
