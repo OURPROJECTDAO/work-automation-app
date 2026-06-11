@@ -183,8 +183,27 @@ CHANNEL_CONFIG: dict[str, dict] = {
         #   K(11)=팀구매가(판매가)·J(10)=개인구매가(정가). 즉시할인·포인트·배송비·바코드 컬럼 없음(식봄형).
         #   ※ 골든 D '일반가격(팀구매가*1.1)' 라벨은 거짓 — 실제 D=개인구매가(621/621 검증).
         "cols": {"상품번호": 1, "코드": 5, "상품명": 2, "판매가": 11, "정가": 10},
-        # 가격변경: 다운로드('…수정용')의 팀구매가(K)를 직접 편집·재업로드하는 스마트스토어형으로 추정.
-        #   업로더 inlineStr 허용 여부 미확인 → 가격변경은 별도 검증 후 추가(현재 모니터 전용).
+        # 가격변경 양식('(올웨이즈)양식')이 다운로드 전 컬럼 재업로드형(필수 多) → 양식 채울 컬럼 listing 보존.
+        #   카테고리코드(C3)·판매상태(D4)·1옵션명/값(F6·G7)·재고수량(L12). 2옵션명/값(H/I)·옵션ID(M)은
+        #   선택이고 단일옵션 상품은 항상 공백 → 미캡처(양식 H/I/M 공백 유효, stale 가드 거짓경고 방지).
+        "extra_cols": {"카테고리코드": 3, "판매상태": 4, "옵션명1": 6, "옵션값1": 7, "재고수량": 12},
+        # 가격 일괄변경 = '(올웨이즈)양식' append(식봄/캐시노트/배민형). 전 컬럼 재기입 + J/K 가격만 변경.
+        #   K(팀구매가)=권장가(price_field), J(개인구매가)=무늬용 가짜(jeong_field=표준 FAKE_JEONG, 골든 O 가짜가격 대응).
+        #   나머지 필수(상품명·카테고리·판매상태·1옵션명/값·재고)는 listing 보존값 그대로. H/I/M(선택)은 공백.
+        "price_form": {
+            "mode": "append",
+            "template": "allways_price_template.xlsx",   # reference/ 고정 양식
+            "sheet": "(올웨이즈)양식",
+            "data_start": 4,                             # r1=헤더·r2=가이드·r3=예시
+            "cols": {"상품ID": 1, "상품명": 2, "카테고리코드": 3, "판매상태": 4, "판매자상품코드": 5,
+                     "옵션명1": 6, "옵션값1": 7, "개인구매가": 10, "팀구매가": 11, "재고수량": 12},
+            "source": {"상품ID": "상품번호", "상품명": "상품명", "카테고리코드": "카테고리코드",
+                       "판매상태": "판매상태", "판매자상품코드": "관리코드",
+                       "옵션명1": "옵션명1", "옵션값1": "옵션값1", "재고수량": "재고수량"},
+            "price_field": "팀구매가",      # K = 권장가
+            "jeong_field": "개인구매가",     # J = 무늬용 가짜 정가(표준 FAKE_JEONG). 마진엔 미반영(표시용).
+            "int_fields": ["카테고리코드", "재고수량"],   # 숫자 셀로 기입(텍스트 '103412' 방지)
+        },
     },
 }
 
@@ -679,13 +698,17 @@ def build_price_form_append(template_xlsx: bytes, items: list[dict], pf: dict) -
     cols = pf["cols"]
     start = pf["data_start"]
     fixed = pf.get("fixed", {})
+    int_fields = set(pf.get("int_fields", []))       # 숫자로 기입할 양식필드(올웨이즈 카테고리코드·재고수량)
     if ws.max_row >= start:                          # 예시/기존 데이터행 제거
         ws.delete_rows(start, ws.max_row - start + 1)
     for i, it in enumerate(items):
         r = start + i
         for field, c in cols.items():
             if field in it:
-                ws.cell(r, c).value = it[field]
+                v = it[field]
+                if field in int_fields and isinstance(v, str) and v.lstrip("-").isdigit():
+                    v = int(v)
+                ws.cell(r, c).value = v
         for c, val in fixed.items():                 # 고정값(예: 변경타입 '수정'·진열 'Y'·재고 9999)
             ws.cell(r, int(c)).value = val
     keep_last = start - 1 + len(items)
