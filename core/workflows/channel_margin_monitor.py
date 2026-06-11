@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import csv
 import math
+import random
 import unicodedata
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -99,6 +100,9 @@ CHANNEL_CONFIG: dict[str, dict] = {
                        "할인전단가": "정가", "판매단가": "권장가"},
             "price_field": "판매단가",
             "jeong_field": "할인전단가",
+            # 할인전단가(H)는 무늬용 가짜 정가 — 실제 판매가는 G. 권장가 기준 +20~30% 랜덤·100원 반올림(>판매단가).
+            # (마진/대시보드는 항상 판매단가만 사용. 실제 정가 보존이 아니라 매번 생성 → 일부 채널만.)
+            "jeong_fake": {"min_pct": 0.20, "max_pct": 0.30, "round": 100},
         },
     },
 }
@@ -495,7 +499,14 @@ def build_append_items(pf: dict, rows: list[dict], recs: list[dict],
         it = {field: merged.get(key, "") for field, key in src.items()}
         it[price_f] = price
         if jeong_f:
-            it[jeong_f] = int(max(_num(it.get(jeong_f)), price))   # 정가 ≥ 판매단가
+            fake = pf.get("jeong_fake")
+            if fake:                                  # 무늬용 가짜 정가: 판매가 +20~30% 랜덤·단위 반올림(>판매가)
+                pct = random.uniform(fake.get("min_pct", 0.20), fake.get("max_pct", 0.30))
+                unit = int(fake.get("round", 100))
+                val = int(round(price * (1 + pct) / unit) * unit)
+                it[jeong_f] = val if val > price else price + unit
+            else:
+                it[jeong_f] = int(max(_num(it.get(jeong_f)), price))   # 실제 정가 보존(식봄)
         items.append(it)
         cur = int(_num(ro.get("판매가")))
         preview.append({
