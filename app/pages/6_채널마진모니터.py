@@ -115,6 +115,10 @@ def _col_config(cfg: dict) -> dict:
     rate = 1 - comm                                   # 판매가net에 곱하는 정산비율
     if cfg.get("ship_fee_const") is not None:
         ship_src = f"상수 {int(cfg['ship_fee_const']):,}원(다운로드에 배송비 숫자 없음)"
+    elif cfg.get("ship_fee_policy"):
+        sp = cfg["ship_fee_policy"]
+        paid = ", ".join(f"{k}→{int(v):,}원" for k, v in sp["map"].items())
+        ship_src = f"배송정책코드 조건부({paid}, 그 외→{int(sp.get('default', 0)):,}원)"
     else:
         ship_src = "다운로드 기본배송비"
     if cfg.get("n_source") == "ref":
