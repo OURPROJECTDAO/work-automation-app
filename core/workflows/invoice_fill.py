@@ -25,6 +25,9 @@
   recv_col      : 수령인 표시 컬럼명
   has_guide_row : 헤더 다음 안내문 행 유무 (식봄 .xls = True, 데이터 r2~ / 없으면 데이터 r1~)
   invoice_as_text : (선택) True면 송장번호를 문자열+일반(General)으로 (배민 등 숫자셀 거부 채널)
+  invoice_cell_format : (선택) 송장 셀의 number_format (기본 "General"). "@"=텍스트 서식.
+                        올웨이즈는 값=숫자(int)지만 셀 서식만 텍스트(@)여야 업로드 성공.
+                        as_text(값 자체를 문자열)와는 독립 — 이쪽은 값 유지·서식만 바꿈.
   status_col    : (선택) 출력 시 값 변환할 상태 컬럼명 (예: 배송상태)
   status_map    : (선택) {원값: 새값} 매핑 (예: {"배송준비중": "배송중"}) — 출력 행에 적용
 """
@@ -100,6 +103,7 @@ CHANNEL_CONFIG = {
         "addr_col": "주소",
         "recv_col": "수령인",
         "has_guide_row": False,
+        "invoice_cell_format": "@",  # 값은 숫자(int) 유지, 셀 '서식'만 텍스트(@). 올웨이즈 업로드 요건(2026-06-11)
     },
     "배민상회": {
         "format": "xlsx",
@@ -260,6 +264,7 @@ def _write_template_xlsx(orig_bytes: bytes, parsed: dict, rows: list,
 
     # 1) 모든 데이터 행에 송장번호·택배사 기입
     as_text = cfg.get("invoice_as_text")
+    inv_fmt = cfg.get("invoice_cell_format", "General")  # 송장 셀 서식(기본 일반, 올웨이즈는 @)
     status_col_name = cfg.get("status_col")
     status_map = cfg.get("status_map") or {}
     status_c = (header.index(status_col_name) + 1) if status_col_name and status_col_name in header else None
@@ -269,11 +274,10 @@ def _write_template_xlsx(orig_bytes: bytes, parsed: dict, rows: list,
         cell = ws.cell(er, inv_c)
         if song:
             if as_text:
-                cell.value = to_invoice_text(song)
-                cell.number_format = "General"   # 텍스트값 + 일반 형식(배민 업로드 요건)
+                cell.value = to_invoice_text(song)   # 값 자체를 문자열로(배민)
             else:
-                cell.value = to_invoice_number(song)
-                cell.number_format = "General"   # 숫자값 + 일반 형식(기존 '@' 서식 잔류 방어)
+                cell.value = to_invoice_number(song)  # 값은 숫자(int)
+            cell.number_format = inv_fmt              # 셀 서식: 채널별(기본 General, 올웨이즈 @)
         else:
             cell.value = None
         ws.cell(er, cour_c).value = courier or row.get("_택배사") or ws.cell(er, cour_c).value
