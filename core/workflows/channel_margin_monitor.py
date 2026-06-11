@@ -40,6 +40,21 @@ CHANNEL_CONFIG: dict[str, dict] = {
                  "배송비": 41, "즉시할인": 58, "포인트": 69, "바코드": 78},
         "unitprice_use_col": 7,    # G 단위가격 사용여부: 양식 출력 시 비었으면 'N' 채움
     },
+    "식봄": {
+        "key": "sikbom",
+        "commission": 0.07,        # 식봄 수수료 7% → (1-수수료)=0.93
+        "ship_settle": 0.967,      # 배송비 정산계수 (스마트스토어 동일)
+        "real_ship": 2700,         # 실택배비 (스마트스토어 기준 단일 — 골든 3000/3700 폐기)
+        "ship_fee_const": 3000,    # 식봄 다운로드엔 '배송비명'뿐(숫자 없음) → income측 배송비 상수
+        "baseline_col": "식봄",     # baseline_margin.csv 식봄 컬럼
+        "apply_floor": True,
+        "n_source": "ref",         # 합포량 N = hapo_multiplier(상품번호) — 다운로드 바코드 없음
+        "sheet": "식봄붙여넣기",
+        "header_row": 4,
+        "data_start": 5,
+        # 다운로드 컬럼(1-indexed). 즉시할인·포인트·배송비·바코드 컬럼 없음 → 0/상수/ref
+        "cols": {"상품번호": 1, "코드": 2, "상품명": 6, "판매가": 19},
+    },
 }
 
 
@@ -81,12 +96,23 @@ def load_references(ref_dir) -> dict:
                     d.setdefault(k, row)
         return d
 
+    # 합포량(N) — 상품번호별 판매배수. 바코드 없는 채널 공용(마진율 예외). 파일 없으면 빈 dict.
+    hapo: dict[str, float] = {}
+    hp = ref_dir / "hapo_multiplier.csv"
+    if hp.exists():
+        with open(hp, encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                k = _nfc(row.get("상품번호"))
+                if k and k not in hapo:
+                    hapo[k] = _num(row.get("합포량"), 1.0)
+
     return {
         "pm_by_mgmt": pm_by_mgmt,
         "pm_by_prod": pm_by_prod,
         "sobun": _load("sobun.csv", "변환관리코드"),
         "baseline": _load("baseline_margin.csv", "관리코드"),
         "floor": _load("margin_floor.csv", "관리코드"),
+        "hapo": hapo,
     }
 
 
@@ -153,25 +179,36 @@ def _ranges_desc(nums: list) -> list:
 
 # ── 다운로드 파싱 ───────────────────────────────────────────────────────────
 def parse_download(file, cfg: dict) -> list[dict]:
-    """채널 상품관리 다운로드(.xlsx) → 레코드 리스트."""
+    """채널 상품관리 다운로드(.xlsx) → 레코드 리스트.
+
+    채널별로 없는 컬럼(즉시할인·포인트·배송비·바코드)은 cfg['cols']에서 생략 가능
+    → 0/상수/None 처리. 배송비는 cfg['ship_fee_const'] 있으면 상수 사용(예 식봄).
+    """
     src = BytesIO(file) if isinstance(file, (bytes, bytearray)) else file
     wb = load_workbook(src, data_only=True)  # read_only 금지(pitfalls)
     ws = wb[cfg["sheet"]] if cfg.get("sheet") else wb[wb.sheetnames[0]]
     col = cfg["cols"]
+    ship_const = cfg.get("ship_fee_const")
+
+    def _opt(r, key, default=0.0):
+        c = col.get(key)
+        return _num(ws.cell(r, c).value, default) if c else default
+
     recs = []
     for r in range(cfg["data_start"], ws.max_row + 1):
         pid = ws.cell(r, col["상품번호"]).value
         if pid in (None, ""):
             continue
+        bc = col.get("바코드")
         recs.append({
             "상품번호": _nfc(pid),
             "코드": _nfc(ws.cell(r, col["코드"]).value),
             "상품명": _nfc(ws.cell(r, col["상품명"]).value),
-            "판매가": _num(ws.cell(r, col["판매가"]).value),
-            "배송비": _num(ws.cell(r, col["배송비"]).value),
-            "즉시할인": _num(ws.cell(r, col["즉시할인"]).value),
-            "포인트": _num(ws.cell(r, col["포인트"]).value),
-            "바코드": ws.cell(r, col["바코드"]).value,
+            "판매가": _opt(r, "판매가"),
+            "배송비": float(ship_const) if ship_const is not None else _opt(r, "배송비"),
+            "즉시할인": _opt(r, "즉시할인"),
+            "포인트": _opt(r, "포인트"),
+            "바코드": ws.cell(r, bc).value if bc else None,
         })
     return recs
 
@@ -185,8 +222,12 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
     out = []
     for rec in recs:
         typ, base, stock, spec, note = resolve_code(rec["코드"], refs)
-        n_raw = _num(rec["바코드"], 0)
-        N = 1.0 if n_raw == 0 else n_raw  # 빈값/0 → 1, 분수 허용
+        if cfg.get("n_source") == "ref":
+            nv = refs.get("hapo", {}).get(rec["상품번호"], 1.0)  # 합포량(상품번호) 기본 1
+            N = 1.0 if not nv else nv
+        else:
+            n_raw = _num(rec["바코드"], 0)
+            N = 1.0 if n_raw == 0 else n_raw  # 빈값/0 → 1, 분수 허용
         row = {
             "상품번호": rec["상품번호"], "관리코드": rec["코드"], "상품명": rec["상품명"],
             "규격": spec, "코드유형": typ, "N": N, "재고": stock,
