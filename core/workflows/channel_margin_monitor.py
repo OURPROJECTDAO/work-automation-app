@@ -373,6 +373,10 @@ def build_bulk_price_xlsx(raw_xlsx: bytes, new_prices: dict,
             drop.append(r)                          # 미체크 행 + 빈행 → 삭제(업로드 시 빈행 방지)
     for a, b in _ranges_desc(drop):                 # 연속 구간 묶어 아래부터 삭제
         ws.delete_rows(a, b - a + 1)
+    # delete_rows가 남기는 빈 row_dimensions(빈 <row> 요소 유발) 정리 — 마지막 데이터행 이후 제거
+    keep_last = (start - 1) + len(found)
+    for rr in [x for x in ws.row_dimensions if x > keep_last]:
+        del ws.row_dimensions[rr]
     out = BytesIO()
     wb.save(out)
     missing = [p for p in new_prices if p not in found]
