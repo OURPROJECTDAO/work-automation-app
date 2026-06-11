@@ -18,7 +18,9 @@ from __future__ import annotations
 import csv
 import math
 import random
+import re
 import unicodedata
+import zipfile
 from io import BytesIO, StringIO
 from pathlib import Path
 
@@ -153,8 +155,11 @@ CHANNEL_CONFIG: dict[str, dict] = {
         "header_row": 3,
         "data_start": 4,
         # 키=옵션ID(C=3, 골든 조인키). 코드=업체상품코드(F=6). 상품명=쿠팡 노출 상품명(G=7).
-        # 판매가=판매가격(J=10). 정가=할인율기준가(K=11). 즉시할인·포인트·바코드 없음.
+        # 판매가=판매가격(J=10). 정가=할인율기준가(K=11). 즉시할인·포인트 없음.
         "cols": {"상품번호": 3, "코드": 6, "상품명": 7, "판매가": 10, "정가": 11},
+        # E열(5)=바코드. 판매자택배 상품은 항상 공백, 값이 있으면 로켓그로스 → 판매자택배
+        #   모니터 대상 아님(미매칭이 아니라 배송방식 차이) → parse 단계에서 행 자체 제외.
+        "exclude_row_if_col_filled": 5,
         # 가격변경 = 다운로드의 '변경요청' 컬럼(P/Q)에 기입하는 filter형(스마트스토어식 원본편집).
         #   P(16)=변경 판매가(권장가), Q(17)=변경 할인율기준가(무늬용 가짜=표준 FAKE_JEONG). R/S(판매상태/재고)는 미기입.
         "price_form": {
@@ -193,6 +198,47 @@ def _pid(v) -> str:
     if isinstance(v, float) and v.is_integer():
         return str(int(v))
     return _nfc(v)
+
+
+def _deflo(s: str) -> str:
+    """'510609.0' 같은 정수형 float 문자열 → '510609'. 그 외 원본 유지.
+
+    구 listing에 숫자ID(옵션번호 등)가 엑셀 float로 저장돼 '510609.0'으로 남은 경우
+    라운드트립에서 정수로 복원(재파싱 없이 양식 출력 정상화). 음수/일반 텍스트 불변.
+    """
+    return s[:-2] if re.fullmatch(r"-?\d+\.0", s) else s
+
+
+def _strip_external_links(xlsx_bytes: bytes) -> bytes:
+    """xlsx 패키지에서 외부 연결(externalLinks) 흔적을 제거 → 엑셀 '연결 업데이트' 경고 방지.
+
+    일부 채널 양식 템플릿(배민)이 원본 마스터 통합문서를 가리키는 **고아 외부참조**를
+    품고 있어, 그대로 저장하면 데이터(리터럴 값)는 멀쩡해도 열 때 외부링크 경고가 뜬다.
+    수식이 외부참조를 실제로 쓰지 않으므로(전부 inlineStr/숫자) 안전하게 제거:
+      ① xl/externalLinks/* 파트 ② workbook.xml <externalReferences>
+      ③ workbook.xml.rels 의 externalLink 관계 ④ [Content_Types].xml override.
+    외부링크가 없으면 무손실 no-op(바이트 그대로 반환).
+    """
+    zin = zipfile.ZipFile(BytesIO(xlsx_bytes))
+    if not any(n.startswith("xl/externalLinks/") for n in zin.namelist()):
+        return xlsx_bytes
+    out = BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            n = item.filename
+            if n.startswith("xl/externalLinks/"):
+                continue
+            data = zin.read(n)
+            if n == "xl/workbook.xml":
+                data = re.sub(rb"<externalReferences>.*?</externalReferences>", b"",
+                              data, flags=re.S)
+                data = data.replace(b"<externalReferences/>", b"")
+            elif n == "xl/_rels/workbook.xml.rels":
+                data = re.sub(rb"<Relationship[^>]*externalLink[^>]*/>", b"", data)
+            elif n == "[Content_Types].xml":
+                data = re.sub(rb"<Override[^>]*externalLink[^>]*/>", b"", data)
+            zout.writestr(item, data)
+    return out.getvalue()
 
 
 def _pick_ws(wb, cfg):
@@ -339,6 +385,7 @@ def parse_download(file, cfg: dict) -> list[dict]:
     col = cfg["cols"]
     ship_const = cfg.get("ship_fee_const")
     ship_policy = cfg.get("ship_fee_policy")  # {col, map, default} — 컬럼값 조건부 배송비(캐시노트)
+    excl_col = cfg.get("exclude_row_if_col_filled")  # 그 컬럼에 값 있으면 행 제외(쿠팡 바코드=로켓그로스)
 
     def _opt(r, key, default=0.0):
         c = col.get(key)
@@ -357,6 +404,8 @@ def parse_download(file, cfg: dict) -> list[dict]:
         pid = ws.cell(r, col["상품번호"]).value
         if pid in (None, ""):
             continue
+        if excl_col is not None and ws.cell(r, excl_col).value not in (None, ""):
+            continue                              # 로켓그로스(바코드 값 존재) → 판매자택배 모니터 제외
         bc = col.get("바코드")
         rec = {
             "상품번호": _pid(pid),
@@ -370,8 +419,8 @@ def parse_download(file, cfg: dict) -> list[dict]:
             "바코드": ws.cell(r, bc).value if bc else None,
             "오퍼코드": "", "옵션코드": "",          # 가격변경 양식 A/D용(캐시노트). 그 외 채널 공백
         }
-        for name, c in cfg.get("extra_cols", {}).items():   # 다운로드 추가 컬럼 보존(OFR/SKU 등)
-            rec[name] = _nfc(ws.cell(r, c).value)
+        for name, c in cfg.get("extra_cols", {}).items():   # 다운로드 추가 컬럼 보존(OFR/SKU·옵션번호 등)
+            rec[name] = _pid(ws.cell(r, c).value)           # 숫자ID(옵션번호) float '..0' 방지 — _pid 정수화
         recs.append(rec)
     return recs
 
@@ -505,7 +554,7 @@ def csv_text_to_recs(text: str) -> list[dict]:
             elif k == "바코드":
                 rec[k] = v or ""
             else:
-                rec[k] = _nfc(v)
+                rec[k] = _deflo(_nfc(v))   # 구 listing의 '510609.0'(옵션번호 등) 정수 복원
         recs.append(rec)
     return recs
 
@@ -625,7 +674,7 @@ def build_price_form_append(template_xlsx: bytes, items: list[dict], pf: dict) -
         del ws.row_dimensions[rr]
     out = BytesIO()
     wb.save(out)
-    return out.getvalue()
+    return _strip_external_links(out.getvalue())  # 템플릿 딸린 고아 외부링크 제거(배민)
 
 
 def build_bulk_price_xlsx(raw_xlsx: bytes, new_prices: dict,
@@ -669,7 +718,7 @@ def build_bulk_price_xlsx(raw_xlsx: bytes, new_prices: dict,
     out = BytesIO()
     wb.save(out)
     missing = [p for p in new_prices if p not in found]
-    return out.getvalue(), len(found), missing
+    return _strip_external_links(out.getvalue()), len(found), missing
 
 
 def append_rows_to_raw(raw_xlsx: bytes, src_xlsx: bytes,
@@ -746,6 +795,7 @@ def build_filter_price_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
         del ws.row_dimensions[rr]
     out = BytesIO()
     wb.save(out)
+    xlsx = _strip_external_links(out.getvalue())
     prev = []
     for pid in pids:
         if pid not in found:
@@ -756,4 +806,4 @@ def build_filter_price_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
                      "정가": jeong, "권장가(net)": ro.get("권장가"),
                      "방향": "인상" if price > cur else ("인하" if price < cur else "유지")})
     missing = [p for p in targets if p not in found]
-    return out.getvalue(), prev, skipped, missing
+    return xlsx, prev, skipped, missing
