@@ -863,6 +863,30 @@ def _renumber_row(row_xml: str, old: int, new: int) -> str:
     return re.sub(rf'r="([A-Z]*){old}"', rf'r="\g<1>{new}"', row_xml)
 
 
+def _inline_cells_to_shared(row_xml: str, sst_blocks: list, text2idx: dict) -> str:
+    """행 청크의 inlineStr 셀을 t="s"(sharedStrings 참조)로 변환. 스타일 s= 보존.
+    빈 inlineStr는 빈 스타일셀로. 엑셀 '값만 붙여넣기'가 하는 정규화를 코드가 수행 —
+    원본 raw가 inlineStr(=openpyxl 오염/구 스냅샷)이어도 출력은 항상 네이티브 → 쿠팡 업로드 호환.
+    sst_blocks(verbatim <si> 리스트)·text2idx(텍스트→인덱스)를 in-place 확장."""
+    from xml.sax.saxutils import escape, unescape
+    pat = re.compile(r'<c r="([A-Z]+\d+)"((?: s="\d+")?) t="inlineStr"><is>(.*?)</is></c>', re.S)
+
+    def repl(m):
+        ref, sattr, inner = m.group(1), m.group(2), m.group(3)
+        text = unescape("".join(re.findall(r"<t[^>]*>(.*?)</t>", inner, re.S)))
+        if text == "":
+            return f'<c r="{ref}"{sattr}/>'           # 빈 셀
+        idx = text2idx.get(text)
+        if idx is None:
+            idx = len(sst_blocks)
+            text2idx[text] = idx
+            sp = ' xml:space="preserve"' if text != text.strip() else ""
+            sst_blocks.append(f"<si><t{sp}>{escape(text)}</t></si>")
+        return f'<c r="{ref}"{sattr} t="s"><v>{idx}</v></c>'
+
+    return pat.sub(repl, row_xml)
+
+
 def build_filter_price_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
                             cfg: dict) -> tuple[bytes, list[dict], list[str], list[str]]:
     """원본 다운로드(조회 + '변경요청' 컬럼형, 쿠팡)에서 선택 옵션만 남기고 변경요청 컬럼 기입.
@@ -870,10 +894,12 @@ def build_filter_price_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
     pf['write'] = {판매가: col, 정가: col}. P(판매가)=권장가, Q(정가/할인율기준가)=가짜정가(FAKE_JEONG).
     R/S(판매상태/재고)는 미기입(가격만 변경). 미선택 행 삭제. 키 = cfg['cols']['상품번호'](쿠팡 옵션ID).
 
-    ★ openpyxl load→save 금지: 전 셀을 inlineStr로 바꿔 **쿠팡 업로더가 거부**(골든=네이티브
-       sharedStrings). 대신 원본 .xlsx(전체 교체 저장 = 업로드 바이트 그대로 = 네이티브)를
-       **zip레벨 수술**: 헤더행 보존 + 선택 데이터행만 남겨 연속 재번호 + P/Q 숫자 기입.
-       sharedStrings·styles·mergeCells·네임스페이스·XML선언 전부 원본 유지 → 업로드 성공.
+    ★ 두 단계 네이티브 보장:
+      (1) zip레벨 수술 — openpyxl load→save 금지(전 셀 inlineStr 변질 → 쿠팡 거부). 헤더행 보존 +
+          선택 데이터행만 남겨 연속 재번호 + P/Q 숫자 기입. styles/mergeCells/네임스페이스/XML선언 원본 유지.
+      (2) **inlineStr→sharedStrings 정규화** — 원본 raw가 inlineStr(구 스냅샷·openpyxl 오염·캐시
+          stale)이어도 남긴 행 셀을 t="s"로 변환하고 sharedStrings.xml을 재구성 → **raw 상태와 무관하게
+          출력은 항상 네이티브**(엑셀 '값만 붙여넣기' 동치). 쿠팡 업로더(POI 엄격형) 호환.
     """
     pf = cfg["price_form"]
     wp_col = _col_letter(pf["write"]["판매가"])         # P(16)
@@ -894,8 +920,29 @@ def build_filter_price_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
 
     zin = zipfile.ZipFile(BytesIO(raw_xlsx))
     sheet = _sheet_part(zin, cfg)
-    sst = _read_sst(zin)
+    sst = _read_sst(zin)                                  # 키 조회용(원본 인덱스 해소)
     sml = zin.read(sheet).decode("utf-8")
+
+    # sharedStrings.xml verbatim <si> + 인덱스 맵 (inlineStr→t=s 변환 시 확장)
+    try:
+        sst_raw = zin.read("xl/sharedStrings.xml").decode("utf-8")
+        m_open = re.search(r"<sst\b[^>]*>", sst_raw)
+        sst_open = m_open.group(0)
+        sst_decl = sst_raw[:m_open.start()] or '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
+        sst_blocks = re.findall(r"<si>.*?</si>", sst_raw, re.S)
+        has_sst = True
+    except KeyError:
+        sst_open = ('<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                    'count="0" uniqueCount="0">')
+        sst_decl = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
+        sst_blocks = []
+        has_sst = False
+    text2idx = {}
+    for i, si in enumerate(sst_blocks):
+        t = "".join(re.findall(r"<t[^>]*>(.*?)</t>", si, re.S))
+        from xml.sax.saxutils import unescape as _un
+        text2idx.setdefault(_un(t), i)
+
     sd = re.search(r"<sheetData[^>]*>", sml)
     sd_close = sml.index("</sheetData>")
     prefix, body, suffix = sml[:sd.end()], sml[sd.end():sd_close], sml[sd_close:]
@@ -913,6 +960,7 @@ def build_filter_price_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
             continue                                     # 미선택 행 삭제
         price, jeong, _ = targets[key]
         found.add(key)
+        rx = _inline_cells_to_shared(rx, sst_blocks, text2idx)   # ★ inlineStr→sharedStrings
         rx = _set_num_cell(rx, f"{wp_col}{r_old}", price)
         if wj_col and jeong is not None:
             rx = _set_num_cell(rx, f"{wj_col}{r_old}", jeong)
@@ -924,11 +972,33 @@ def build_filter_price_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
     new_sml = re.sub(r'(<dimension ref="[A-Z]+\d+:[A-Z]+)\d+("\s*/>)',
                      rf"\g<1>{last_row}\g<2>", new_sml)
 
+    # sharedStrings.xml 재구성(count=시트 t=s 참조수 / uniqueCount=si 개수)
+    n_refs = new_sml.count('t="s"')
+    if "count=" in sst_open:
+        sst_open2 = re.sub(r'count="\d+"', f'count="{n_refs}"', sst_open)
+    else:
+        sst_open2 = sst_open[:-1] + f' count="{n_refs}">'
+    if "uniqueCount=" in sst_open2:
+        sst_open2 = re.sub(r'uniqueCount="\d+"', f'uniqueCount="{len(sst_blocks)}"', sst_open2)
+    else:
+        sst_open2 = sst_open2[:-1] + f' uniqueCount="{len(sst_blocks)}">'
+    sst_new = sst_decl + sst_open2 + "".join(sst_blocks) + "</sst>"
+
     out = BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        wrote_sst = False
         for item in zin.infolist():
-            data = new_sml.encode("utf-8") if item.filename == sheet else zin.read(item.filename)
+            fn = item.filename
+            if fn == sheet:
+                data = new_sml.encode("utf-8")
+            elif fn == "xl/sharedStrings.xml":
+                data = sst_new.encode("utf-8"); wrote_sst = True
+            else:
+                data = zin.read(fn)
             zout.writestr(item, data)
+        if not wrote_sst and has_sst is False and sst_blocks:
+            # 원본에 sst 파트가 없었으나 새로 생성해야 하는 경우(쿠팡에선 미발생)
+            zout.writestr("xl/sharedStrings.xml", sst_new.encode("utf-8"))
 
     prev = []
     for pid in pids:
