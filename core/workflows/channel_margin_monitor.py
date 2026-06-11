@@ -64,6 +64,24 @@ CHANNEL_CONFIG: dict[str, dict] = {
             "fixed": {5: "n"},                      # E열 수량별 판매단가 설정 = n 고정
         },
     },
+    "캐시노트": {
+        "key": "cashnote",
+        "commission": 0.06,        # 6% (요율컬럼=6·천년경영 0.94·헤더 '6%기준' 근거. 골든 정산식 0.93은
+                                   #   시트 내부 불일치로 미채택. 행사 차등수수료 0.88(12%)는 무시=단일 수수료, 사용자 확정 2026-06-11)
+        "ship_settle": 0.967,      # 배송비 정산계수 (전 채널 동일)
+        "real_ship": 2700,         # 실택배비 (스마트스토어 표준 단일 — 골든 3000/3700 미채택)
+        "baseline_col": "캐시노트",  # baseline_margin.csv 캐시노트 컬럼
+        "apply_floor": True,
+        "n_source": "ref",         # 합포량 N = hapo_multiplier(상품번호) 채널무관 — 다운로드 바코드 없음
+        "sheet": "상품",
+        "header_row": 3,
+        "data_start": 4,
+        # 다운로드 컬럼(1-indexed). A=ID(상품번호)·E=입점사 관리 코드·C=상품명·N=판매 단가·O=할인 전 단가(정가).
+        # 즉시할인·포인트·바코드 컬럼 없음(식봄형).
+        "cols": {"상품번호": 1, "코드": 5, "상품명": 3, "판매가": 14, "정가": 15},
+        # 배송비 = 배송정책코드(Y열=25) 조건부: DVP212991→3000, 그 외(DVP447716 등)→0. 골든 J식과 일치.
+        "ship_fee_policy": {"col": 25, "map": {"DVP212991": 3000}, "default": 0},
+    },
 }
 
 
@@ -80,6 +98,17 @@ def _num(v, d: float = 0.0) -> float:
         return float(v)
     except (TypeError, ValueError):
         return d
+
+
+def _pid(v) -> str:
+    """상품번호 정규화: 정수값 float(엑셀 숫자셀 46903.0)는 '46903'으로.
+
+    캐시노트 등 다운로드의 상품번호(ID)가 숫자셀로 들어와 _nfc만 쓰면 '46903.0'이
+    되어 hapo_multiplier 키('46903')·골든과 매칭 실패 → N=1 오류. 정수 float만 int화.
+    """
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return _nfc(v)
 
 
 def _pick_ws(wb, cfg):
@@ -204,17 +233,28 @@ def parse_download(file, cfg: dict) -> list[dict]:
     """채널 상품관리 다운로드(.xlsx) → 레코드 리스트.
 
     채널별로 없는 컬럼(즉시할인·포인트·배송비·바코드)은 cfg['cols']에서 생략 가능
-    → 0/상수/None 처리. 배송비는 cfg['ship_fee_const'] 있으면 상수 사용(예 식봄).
+    → 0/상수/None 처리. 배송비 출처 3종(우선순위):
+      ① cfg['ship_fee_const'] 상수(식봄) ② cfg['ship_fee_policy'] 배송정책코드 등
+      컬럼값 조건부(캐시노트: DVP212991→3000, 그외→0) ③ cfg['cols']['배송비'] 숫자(스마트스토어).
     """
     src = BytesIO(file) if isinstance(file, (bytes, bytearray)) else file
     wb = load_workbook(src, data_only=True)  # read_only 금지(pitfalls)
     ws = _pick_ws(wb, cfg)
     col = cfg["cols"]
     ship_const = cfg.get("ship_fee_const")
+    ship_policy = cfg.get("ship_fee_policy")  # {col, map, default} — 컬럼값 조건부 배송비(캐시노트)
 
     def _opt(r, key, default=0.0):
         c = col.get(key)
         return _num(ws.cell(r, c).value, default) if c else default
+
+    def _ship(r):
+        if ship_const is not None:
+            return float(ship_const)
+        if ship_policy:
+            pol = _nfc(ws.cell(r, ship_policy["col"]).value)
+            return float(ship_policy["map"].get(pol, ship_policy.get("default", 0)))
+        return _opt(r, "배송비")
 
     recs = []
     for r in range(cfg["data_start"], ws.max_row + 1):
@@ -223,11 +263,11 @@ def parse_download(file, cfg: dict) -> list[dict]:
             continue
         bc = col.get("바코드")
         recs.append({
-            "상품번호": _nfc(pid),
+            "상품번호": _pid(pid),
             "코드": _nfc(ws.cell(r, col["코드"]).value),
             "상품명": _nfc(ws.cell(r, col["상품명"]).value),
             "판매가": _opt(r, "판매가"),
-            "배송비": float(ship_const) if ship_const is not None else _opt(r, "배송비"),
+            "배송비": _ship(r),
             "즉시할인": _opt(r, "즉시할인"),
             "포인트": _opt(r, "포인트"),
             "정가": _opt(r, "정가"),
