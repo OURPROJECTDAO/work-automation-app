@@ -162,7 +162,8 @@ def resolve_code(code: str, refs: dict) -> tuple[str, float | None, float | None
         r = pm_p.get(_nfc(c[2:]))
         if not r:
             return ("낱개", None, None, "", f"상품코드 미등록: {c[2:]}")
-        return ("낱개", _num(r["매입단가"]), _num(r["낱개"]), _nfc(r["규격"]), "")
+        # 재고 = 그 상품코드 행의 **박스** 재고(낱개[15] 아님). 매입가는 낱개 매입단가 유지.
+        return ("낱개", _num(r["매입단가"]), _num(r["박스"]), _nfc(r["규격"]), "")
     # 4) 박스 (관리코드)
     r = pm_m.get(c)
     if not r:
