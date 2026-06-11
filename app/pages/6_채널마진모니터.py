@@ -111,8 +111,11 @@ def _col_config(cfg: dict) -> dict:
 
     수수료·실택배비·배송비 출처·N 출처가 채널마다 달라 cfg에서 동적 생성.
     """
-    comm = cfg["commission"]; settle = cfg["ship_settle"]; ship = int(cfg["real_ship"])
-    rate = 1 - comm                                   # 판매가net에 곱하는 정산비율
+    per_item = cfg.get("commission_source") == "download"   # 상품별 수수료(배민상회)
+    comm = cfg.get("commission")
+    settle = cfg["ship_settle"]; ship = int(cfg["real_ship"])
+    rate_txt = "(1−상품별수수료)" if per_item else f"{(1 - comm):.2f}"
+    comm_txt = "상품별(다운로드 BU/100+추가)" if per_item else f"{comm*100:.0f}%"
     if cfg.get("ship_fee_const") is not None:
         ship_src = f"상수 {int(cfg['ship_fee_const']):,}원(다운로드에 배송비 숫자 없음)"
     elif cfg.get("ship_fee_policy"):
@@ -142,7 +145,7 @@ def _col_config(cfg: dict) -> dict:
         "배송비": NC("배송비", format="localized",
                    help=f"정산 반영 배송비 — {ship_src}. 정산액에 ×{settle} 가산"),
         "정산액": NC("정산액", format="localized",
-                   help=f"= (판매가 − 즉시할인 − 포인트) × {rate:.2f} + 배송비 × {settle}   (수수료 {comm*100:.0f}%)"),
+                   help=f"= (판매가 − 즉시할인 − 포인트) × {rate_txt} + 배송비 × {settle}   (수수료 {comm_txt})"),
         "마진율": NC("마진율", format="percent",
                    help=f"= (정산액 − 매입가 − {ship:,}) ÷ 정산액   (실택배비 {ship:,}원)"),
         "기준마진율": NC("기준마진율", format="percent",
@@ -151,7 +154,7 @@ def _col_config(cfg: dict) -> dict:
                   help="= 마진율 − 기준마진율. -1%p 미만이면 '마진미달'"),
         "권장가/제한": TC("권장가 / 제한",
                       help=(f"기준마진 달성 판매가(net 기준, 100원 올림): "
-                            f"⌈((매입가+{ship:,})÷(1−기준마진율) − 배송비×{settle})÷{rate:.2f}⌉. "
+                            f"⌈((매입가+{ship:,})÷(1−기준마진율) − 배송비×{settle})÷{rate_txt}⌉. "
                             "제한상품은 제한 텍스트.")),
         "비고": TC("비고", help="미매칭·미등록 사유(정상 매칭이면 빈칸)"),
     }
@@ -160,8 +163,9 @@ def _col_config(cfg: dict) -> dict:
 channel = st.selectbox("채널", list(cmm.CHANNEL_CONFIG.keys()), index=0)
 cfg = cmm.CHANNEL_CONFIG[channel]
 key = cfg["key"]
+_comm_txt = "상품별(다운로드)" if cfg.get("commission_source") == "download" else f"{cfg['commission']*100:.0f}%"
 st.caption(
-    f"수수료 {cfg['commission']*100:.0f}% · 배송비 정산 ×{cfg['ship_settle']} · "
+    f"수수료 {_comm_txt} · 배송비 정산 ×{cfg['ship_settle']} · "
     f"실택배비 {cfg['real_ship']:,}원 · 기준마진 '{cfg['baseline_col']}'"
     + (" · 마진제한 적용" if cfg.get("apply_floor") else "")
 )
@@ -212,16 +216,21 @@ if not recs:
 
 st.caption(f"📦 저장된 상품관리 기준 · 최종 갱신 **{meta.get('updated_at', '?')}** · {len(recs):,}건")
 
-# 구버전 listing 가드: price_form 이 extra_cols 값(예 OFR/SKU)을 쓰는데 저장본에 전부 비어 있으면
-# (extra_cols 도입 전 저장된 스냅샷) 가격변경 양식의 해당 컬럼이 빈 채로 나간다 → 전체 교체 안내.
+# 구버전 listing 가드: 다운로드에서만 캡처되는 필드(price_form용 OFR/SKU, 상품별 수수료 등)가
+# 저장본에 전부 비어 있으면(해당 필드 도입 전 스냅샷) 다운스트림이 빈/오류값 → 전체 교체 안내.
 _pf = cfg.get("price_form")
 _extra = cfg.get("extra_cols", {})
+_stale = []
 if _pf and _extra:
     _need = [k for k in _extra if k in set(_pf.get("source", {}).values())]
-    _stale = [k for k in _need if all(not (r.get(k) or "") for r in recs)]
-    if _stale:
-        st.warning(f"⚠️ 저장된 상품관리가 구버전이라 가격변경 양식의 **{', '.join(_stale)}**(가) 빈 채로 나갑니다. "
-                   "위 '📥 상품관리 갱신 → **전체 교체**'를 1회 실행하면 채워집니다(신규만 추가로는 기존 행이 안 채워짐).")
+    _stale += [k for k in _need if all(not (r.get(k) or "") for r in recs)]
+if cfg.get("commission_source") == "download":
+    _cf = cfg["commission_field"]
+    if all(not str(r.get(_cf) or "").strip() for r in recs):
+        _stale.append(_cf + "(상품별 수수료)")
+if _stale:
+    st.warning(f"⚠️ 저장된 상품관리가 구버전이라 **{', '.join(_stale)}**(가) 비어 있습니다. "
+               "위 '📥 상품관리 갱신 → **전체 교체**'를 1회 실행하면 채워집니다(신규만 추가로는 기존 행이 안 채워짐).")
 
 rows, stats = cmm.compute_listing(recs, channel, str(_REF))
 
