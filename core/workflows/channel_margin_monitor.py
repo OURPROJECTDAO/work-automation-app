@@ -750,19 +750,136 @@ def append_rows_to_raw(raw_xlsx: bytes, src_xlsx: bytes,
     return out.getvalue()
 
 
+def _col_letter(n: int) -> str:
+    """1→A, 16→P, 27→AA."""
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _sheet_part(zin: zipfile.ZipFile, cfg: dict) -> str:
+    """cfg['sheet'] 이름 → 해당 worksheet xml 경로(xl/worksheets/sheetN.xml). 못 찾으면 첫 시트."""
+    names = zin.namelist()
+    want = cfg.get("sheet")
+    try:
+        wbxml = zin.read("xl/workbook.xml").decode("utf-8")
+        rels = zin.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+        rid = None
+        for m in re.finditer(r'<sheet\b[^>]*?/>', wbxml):
+            tag = m.group(0)
+            nm = re.search(r'name="([^"]*)"', tag)
+            ridm = re.search(r'r:id="([^"]*)"', tag)
+            if nm and ridm and (want is None or nm.group(1) == want):
+                rid = ridm.group(1); break
+        if rid:
+            rm = re.search(rf'<Relationship\b[^>]*Id="{re.escape(rid)}"[^>]*/>', rels)
+            if rm:
+                tgt = re.search(r'Target="([^"]*)"', rm.group(0)).group(1)
+                tgt = tgt.lstrip("/")
+                if not tgt.startswith("xl/"):
+                    tgt = "xl/" + tgt
+                if tgt in names:
+                    return tgt
+    except KeyError:
+        pass
+    ws = sorted(n for n in names if re.match(r"xl/worksheets/sheet\d+\.xml$", n))
+    return ws[0]
+
+
+def _read_sst(zin: zipfile.ZipFile) -> list[str]:
+    """sharedStrings.xml → 인덱스별 해소 문자열(모든 <t> 텍스트 연결, XML 언이스케이프)."""
+    import html
+    try:
+        s = zin.read("xl/sharedStrings.xml").decode("utf-8")
+    except KeyError:
+        return []
+    out = []
+    for si in re.findall(r"<si>(.*?)</si>", s, re.S):
+        txt = "".join(re.findall(r"<t[^>]*>(.*?)</t>", si, re.S))
+        out.append(html.unescape(txt))
+    return out
+
+
+def _cell_in_row(row_xml: str, ref: str) -> str | None:
+    """행 청크에서 셀(<c r="ref"...>...</c> 또는 <c r="ref".../>) 원문 반환. 없으면 None."""
+    m = re.search(rf'<c r="{ref}"[^>]*?/>|<c r="{ref}"[^>]*?>.*?</c>', row_xml, re.S)
+    return m.group(0) if m else None
+
+
+def _cell_text(cell_xml: str, sst: list[str]) -> str:
+    """셀 원문 → 표시 문자열(t="s"=sst 조회 / inlineStr / 숫자 / 빈칸)."""
+    import html
+    if cell_xml is None:
+        return ""
+    if 't="s"' in cell_xml:
+        m = re.search(r"<v>(.*?)</v>", cell_xml, re.S)
+        if m:
+            i = int(m.group(1))
+            return sst[i] if 0 <= i < len(sst) else ""
+        return ""
+    if 't="inlineStr"' in cell_xml:
+        return html.unescape("".join(re.findall(r"<t[^>]*>(.*?)</t>", cell_xml, re.S)))
+    m = re.search(r"<v>(.*?)</v>", cell_xml, re.S)
+    return html.unescape(m.group(1)) if m else ""
+
+
+def _set_num_cell(row_xml: str, ref: str, value: int) -> str:
+    """행 청크의 ref 셀을 숫자값으로 기입(t 속성 없는 네이티브형 `<c r s><v>n</v></c>`). 스타일 보존.
+
+    셀이 없으면 직전 존재 셀 뒤에 삽입(컬럼 순서). 쿠팡 변경요청 컬럼은 보통 빈 셀로 존재.
+    """
+    existing = _cell_in_row(row_xml, ref)
+    col = re.match(r"[A-Z]+", ref).group(0)
+    if existing is not None:
+        sm = re.search(r'\ss="(\d+)"', existing)
+        style = f' s="{sm.group(1)}"' if sm else ""
+        new_cell = f'<c r="{ref}"{style}><v>{value}</v></c>'
+        return row_xml.replace(existing, new_cell, 1)
+    # 부재 → 컬럼 순서 삽입: 같은 행에서 ref보다 작은 마지막 셀 뒤
+    want = _col_idx(col)
+    last = None
+    for m in re.finditer(r'<c r="([A-Z]+)\d+"[^>]*?(?:/>|>.*?</c>)', row_xml, re.S):
+        if _col_idx(m.group(1)) < want:
+            last = m
+        else:
+            break
+    new_cell = f'<c r="{ref}"><v>{value}</v></c>'
+    if last:
+        return row_xml[:last.end()] + new_cell + row_xml[last.end():]
+    return row_xml.replace("</row>", new_cell + "</row>", 1)
+
+
+def _col_idx(letters: str) -> int:
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ord(ch) - 64)
+    return n
+
+
+def _renumber_row(row_xml: str, old: int, new: int) -> str:
+    """행 청크의 모든 r 참조(<row r=> 와 <c r=Col###>)의 행번호 old→new."""
+    return re.sub(rf'r="([A-Z]*){old}"', rf'r="\g<1>{new}"', row_xml)
+
+
 def build_filter_price_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
                             cfg: dict) -> tuple[bytes, list[dict], list[str], list[str]]:
     """원본 다운로드(조회 + '변경요청' 컬럼형, 쿠팡)에서 선택 옵션만 남기고 변경요청 컬럼 기입.
 
     pf['write'] = {판매가: col, 정가: col}. P(판매가)=권장가, Q(정가/할인율기준가)=가짜정가(FAKE_JEONG).
     R/S(판매상태/재고)는 미기입(가격만 변경). 미선택 행 삭제. 키 = cfg['cols']['상품번호'](쿠팡 옵션ID).
-    가짜정가는 랜덤이라 기입한 값 그대로 preview에 반환(미리보기-파일 일치).
-    returns (xlsx bytes, preview[dict], skip(권장가없음), missing(원본에 없음)).
+
+    ★ openpyxl load→save 금지: 전 셀을 inlineStr로 바꿔 **쿠팡 업로더가 거부**(골든=네이티브
+       sharedStrings). 대신 원본 .xlsx(전체 교체 저장 = 업로드 바이트 그대로 = 네이티브)를
+       **zip레벨 수술**: 헤더행 보존 + 선택 데이터행만 남겨 연속 재번호 + P/Q 숫자 기입.
+       sharedStrings·styles·mergeCells·네임스페이스·XML선언 전부 원본 유지 → 업로드 성공.
     """
     pf = cfg["price_form"]
-    wp = pf["write"]["판매가"]
-    wj = pf["write"].get("정가")
-    c_key = cfg["cols"]["상품번호"]
+    wp_col = _col_letter(pf["write"]["판매가"])         # P(16)
+    wj_idx = pf["write"].get("정가")
+    wj_col = _col_letter(wj_idx) if wj_idx else None      # Q(17)
+    key_col = _col_letter(cfg["cols"]["상품번호"])        # C(3) 옵션ID
     start = cfg["data_start"]
     row_by = {r["상품번호"]: r for r in rows}
     targets, skipped = {}, []
@@ -772,30 +889,47 @@ def build_filter_price_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
             skipped.append(pid)
             continue
         price = int(ro["권장가"])
-        jeong = fake_jeong(price, pf.get("jeong_fake")) if wj else None
+        jeong = fake_jeong(price, pf.get("jeong_fake")) if wj_col else None
         targets[pid] = (price, jeong, ro)
-    wb = load_workbook(BytesIO(raw_xlsx))
-    ws = _pick_ws(wb, cfg)
-    found, drop = set(), []
-    for r in range(start, ws.max_row + 1):
-        v = ws.cell(r, c_key).value
-        k = _pid(v) if v not in (None, "") else ""
-        if k and k in targets:
-            price, jeong, _ = targets[k]
-            ws.cell(r, wp).value = price
-            if wj and jeong is not None:
-                ws.cell(r, wj).value = jeong
-            found.add(k)
-        else:
-            drop.append(r)
-    for a, b in _ranges_desc(drop):
-        ws.delete_rows(a, b - a + 1)
-    keep_last = (start - 1) + len(found)
-    for rr in [x for x in ws.row_dimensions if x > keep_last]:
-        del ws.row_dimensions[rr]
+
+    zin = zipfile.ZipFile(BytesIO(raw_xlsx))
+    sheet = _sheet_part(zin, cfg)
+    sst = _read_sst(zin)
+    sml = zin.read(sheet).decode("utf-8")
+    sd = re.search(r"<sheetData[^>]*>", sml)
+    sd_close = sml.index("</sheetData>")
+    prefix, body, suffix = sml[:sd.end()], sml[sd.end():sd_close], sml[sd_close:]
+    row_chunks = re.findall(r"<row\b[^>]*>.*?</row>", body, re.S)
+
+    out_rows, found, new_idx = [], set(), start
+    for rx in row_chunks:
+        r_old = int(re.search(r'<row r="(\d+)"', rx).group(1))
+        if r_old < start:
+            out_rows.append(rx)                          # 헤더행(안내·그룹·컬럼명) 그대로
+            continue
+        key = _cell_text(_cell_in_row(rx, f"{key_col}{r_old}"), sst).strip()
+        key = _deflo(key)
+        if key not in targets:
+            continue                                     # 미선택 행 삭제
+        price, jeong, _ = targets[key]
+        found.add(key)
+        rx = _set_num_cell(rx, f"{wp_col}{r_old}", price)
+        if wj_col and jeong is not None:
+            rx = _set_num_cell(rx, f"{wj_col}{r_old}", jeong)
+        out_rows.append(_renumber_row(rx, r_old, new_idx))
+        new_idx += 1
+
+    last_row = new_idx - 1
+    new_sml = prefix + "".join(out_rows) + suffix
+    new_sml = re.sub(r'(<dimension ref="[A-Z]+\d+:[A-Z]+)\d+("\s*/>)',
+                     rf"\g<1>{last_row}\g<2>", new_sml)
+
     out = BytesIO()
-    wb.save(out)
-    xlsx = _strip_external_links(out.getvalue())
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = new_sml.encode("utf-8") if item.filename == sheet else zin.read(item.filename)
+            zout.writestr(item, data)
+
     prev = []
     for pid in pids:
         if pid not in found:
@@ -806,4 +940,4 @@ def build_filter_price_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
                      "정가": jeong, "권장가(net)": ro.get("권장가"),
                      "방향": "인상" if price > cur else ("인하" if price < cur else "유지")})
     missing = [p for p in targets if p not in found]
-    return xlsx, prev, skipped, missing
+    return out.getvalue(), prev, skipped, missing
