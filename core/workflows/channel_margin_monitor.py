@@ -52,8 +52,17 @@ CHANNEL_CONFIG: dict[str, dict] = {
         "sheet": "식봄붙여넣기",
         "header_row": 4,
         "data_start": 5,
-        # 다운로드 컬럼(1-indexed). 즉시할인·포인트·배송비·바코드 컬럼 없음 → 0/상수/ref
-        "cols": {"상품번호": 1, "코드": 2, "상품명": 6, "판매가": 19},
+        # 다운로드 컬럼(1-indexed). 정가=권장가 산출 시 정가≥판매단가 보존용. 즉시할인·포인트·배송비·바코드 없음
+        "cols": {"상품번호": 1, "코드": 2, "상품명": 6, "판매가": 19, "정가": 16},
+        # 가격 일괄변경 = 다운로드와 별개 '상품 일괄수정' 양식에 선택 행을 채워 넣는 append 방식
+        "price_form": {
+            "mode": "append",                       # 템플릿에 선택 행만 기입(스마트스토어=filter와 다름)
+            "template": "sikbom_price_template.xlsx",  # reference/ 고정 양식
+            "sheet": "(식봄)양식",
+            "data_start": 7,                        # r1~3 안내·r4~6 헤더/설명
+            "cols": {"상품번호": 1, "코드": 2, "상품명": 3, "정가": 4, "수량별설정": 5, "판매단가": 6},
+            "fixed": {5: "n"},                      # E열 수량별 판매단가 설정 = n 고정
+        },
     },
 }
 
@@ -221,6 +230,7 @@ def parse_download(file, cfg: dict) -> list[dict]:
             "배송비": float(ship_const) if ship_const is not None else _opt(r, "배송비"),
             "즉시할인": _opt(r, "즉시할인"),
             "포인트": _opt(r, "포인트"),
+            "정가": _opt(r, "정가"),
             "바코드": ws.cell(r, bc).value if bc else None,
         })
     return recs
@@ -244,7 +254,7 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
         row = {
             "상품번호": rec["상품번호"], "관리코드": rec["코드"], "상품명": rec["상품명"],
             "규격": spec, "코드유형": typ, "N": N, "재고": stock,
-            "매입가": None, "판매가": rec["판매가"], "배송비": rec["배송비"],
+            "매입가": None, "판매가": rec["판매가"], "정가": rec.get("정가", 0), "배송비": rec["배송비"],
             "정산액": None, "마진율": None, "기준마진율": None, "탐지": None,
             "권장가": None, "제한": "", "비고": note,
         }
@@ -309,7 +319,7 @@ def run(file, channel: str, ref_dir) -> tuple[list[dict], dict]:
 
 
 # ── 저장 listing (연동데이터) 직렬화 / 병합 ──────────────────────────────────
-LISTING_COLS = ["상품번호", "코드", "상품명", "판매가", "배송비", "즉시할인", "포인트", "바코드"]
+LISTING_COLS = ["상품번호", "코드", "상품명", "판매가", "정가", "배송비", "즉시할인", "포인트", "바코드"]
 
 
 def recs_to_csv(recs: list[dict]) -> str:
@@ -321,7 +331,7 @@ def recs_to_csv(recs: list[dict]) -> str:
         bar = r.get("바코드")
         w.writerow({
             "상품번호": r["상품번호"], "코드": r["코드"], "상품명": r["상품명"],
-            "판매가": r["판매가"], "배송비": r["배송비"],
+            "판매가": r["판매가"], "정가": r.get("정가", ""), "배송비": r["배송비"],
             "즉시할인": r["즉시할인"], "포인트": r["포인트"],
             "바코드": "" if bar in (None, "") else bar,
         })
@@ -335,6 +345,7 @@ def csv_text_to_recs(text: str) -> list[dict]:
         recs.append({
             "상품번호": _nfc(row.get("상품번호")), "코드": _nfc(row.get("코드")),
             "상품명": _nfc(row.get("상품명")), "판매가": _num(row.get("판매가")),
+            "정가": _num(row.get("정가")),
             "배송비": _num(row.get("배송비")), "즉시할인": _num(row.get("즉시할인")),
             "포인트": _num(row.get("포인트")), "바코드": row.get("바코드") or "",
         })
@@ -391,6 +402,43 @@ def compute_new_prices(rows: list[dict], recs: list[dict],
                                 row["권장가"])
         new_prices[pid] = (np_, nd_)
     return new_prices, skipped
+
+
+def build_price_form_append(template_xlsx: bytes, items: list[dict], pf: dict) -> bytes:
+    """채널 '가격변경 양식' 템플릿에 선택 상품 행만 채워 append (식봄형).
+
+    items: [{상품번호, 코드, 상품명, 정가, 판매단가}] — 판매단가 = 권장가.
+    pf = cfg['price_form'] (sheet·data_start·cols·fixed). 템플릿의 기존/예시 데이터행은
+    모두 제거하고 선택 행만 data_start부터 기입. 정가는 판매단가 이상 보장(정가≥판매가 제약).
+    빈행 방지 위해 keep_last 초과 row_dimensions 정리(스마트스토어 양식과 동일 개념).
+    """
+    wb = load_workbook(BytesIO(template_xlsx))
+    ws = wb[pf["sheet"]] if pf.get("sheet") else wb[wb.sheetnames[0]]
+    col = pf["cols"]
+    start = pf["data_start"]
+    fixed = pf.get("fixed", {})
+    if ws.max_row >= start:                          # 예시/기존 데이터행 제거
+        ws.delete_rows(start, ws.max_row - start + 1)
+    for i, it in enumerate(items):
+        r = start + i
+        price = int(round(it["판매단가"]))
+        ws.cell(r, col["상품번호"]).value = it["상품번호"]
+        if "코드" in col:
+            ws.cell(r, col["코드"]).value = it.get("코드", "")
+        if "상품명" in col:
+            ws.cell(r, col["상품명"]).value = it.get("상품명", "")
+        if "정가" in col:
+            jeong = int(round(_num(it.get("정가"))))
+            ws.cell(r, col["정가"]).value = max(jeong, price)   # 정가 ≥ 판매단가
+        ws.cell(r, col["판매단가"]).value = price
+        for c, val in fixed.items():                # 고정값(예: E열 'n')
+            ws.cell(r, int(c)).value = val
+    keep_last = start - 1 + len(items)
+    for rr in [x for x in ws.row_dimensions if x > keep_last]:
+        del ws.row_dimensions[rr]
+    out = BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 
 def build_bulk_price_xlsx(raw_xlsx: bytes, new_prices: dict,
