@@ -38,6 +38,7 @@ CHANNEL_CONFIG: dict[str, dict] = {
         # 다운로드 컬럼 위치(1-indexed)
         "cols": {"상품번호": 1, "코드": 2, "상품명": 4, "판매가": 6,
                  "배송비": 41, "즉시할인": 58, "포인트": 69, "바코드": 78},
+        "unitprice_use_col": 7,    # G 단위가격 사용여부: 양식 출력 시 비었으면 'N' 채움
     },
 }
 
@@ -133,6 +134,21 @@ def resolve_code(code: str, refs: dict) -> tuple[str, float | None, float | None
 
 def _ceil100(x: float) -> int:
     return int(math.ceil(x / 100) * 100)
+
+
+def _ranges_desc(nums: list) -> list:
+    """정렬 정수들 → 연속 구간 [(start,end)] 내림차순(아래부터 삭제용)."""
+    if not nums:
+        return []
+    nums = sorted(set(nums))
+    ranges, s, p = [], nums[0], nums[0]
+    for n in nums[1:]:
+        if n == p + 1:
+            p = n
+        else:
+            ranges.append((s, p)); s = p = n
+    ranges.append((s, p))
+    return list(reversed(ranges))
 
 
 # ── 다운로드 파싱 ───────────────────────────────────────────────────────────
@@ -335,6 +351,7 @@ def build_bulk_price_xlsx(raw_xlsx: bytes, new_prices: dict,
     col = cfg["cols"]
     c_pid, c_price, c_disc = col["상품번호"], col["판매가"], col["즉시할인"]
     c_unit = c_disc + 1                             # 즉시할인 단위(BG=BF+1)
+    c_up = cfg.get("unitprice_use_col")             # 단위가격 사용여부(G) — 있을 때만
     start = cfg["data_start"]
     found, drop = set(), []
     for r in range(start, ws.max_row + 1):
@@ -349,11 +366,13 @@ def build_bulk_price_xlsx(raw_xlsx: bytes, new_prices: dict,
             else:
                 ws.cell(r, c_disc).value = None
                 ws.cell(r, c_unit).value = None
+            if c_up and ws.cell(r, c_up).value in (None, ""):
+                ws.cell(r, c_up).value = "N"        # 비었으면 N, 값 있으면 보존
             found.add(pid)
         else:
-            drop.append(r)                          # 미체크 행 + 빈행 삭제
-    for r in sorted(drop, reverse=True):
-        ws.delete_rows(r, 1)
+            drop.append(r)                          # 미체크 행 + 빈행 → 삭제(업로드 시 빈행 방지)
+    for a, b in _ranges_desc(drop):                 # 연속 구간 묶어 아래부터 삭제
+        ws.delete_rows(a, b - a + 1)
     out = BytesIO()
     wb.save(out)
     missing = [p for p in new_prices if p not in found]
