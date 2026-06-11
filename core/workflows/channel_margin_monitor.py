@@ -73,6 +73,18 @@ def _num(v, d: float = 0.0) -> float:
         return d
 
 
+def _pick_ws(wb, cfg):
+    """cfg['sheet'] 가 있고 존재하면 그 시트, 아니면 첫 시트.
+
+    채널 다운로드의 실제 시트명이 cfg와 다를 수 있어 첫 시트 폴백(예: 식봄 신규
+    다운로드 시트명 != '식봄붙여넣기'). 식봄 다운로드는 단일 시트라 폴백 안전.
+    """
+    name = cfg.get("sheet")
+    if name and name in wb.sheetnames:
+        return wb[name]
+    return wb[wb.sheetnames[0]]
+
+
 # ── reference 로딩 ──────────────────────────────────────────────────────────
 def load_references(ref_dir) -> dict:
     """app reference/ 에서 4종 로드 → dict."""
@@ -186,7 +198,7 @@ def parse_download(file, cfg: dict) -> list[dict]:
     """
     src = BytesIO(file) if isinstance(file, (bytes, bytearray)) else file
     wb = load_workbook(src, data_only=True)  # read_only 금지(pitfalls)
-    ws = wb[cfg["sheet"]] if cfg.get("sheet") else wb[wb.sheetnames[0]]
+    ws = _pick_ws(wb, cfg)
     col = cfg["cols"]
     ship_const = cfg.get("ship_fee_const")
 
@@ -388,7 +400,7 @@ def build_bulk_price_xlsx(raw_xlsx: bytes, new_prices: dict,
     returns (xlsx bytes, 남긴 행수, 원본에 없던 상품번호 목록).
     """
     wb = load_workbook(BytesIO(raw_xlsx))           # 값+서식 보존 (read_only 금지)
-    ws = wb[cfg["sheet"]] if cfg.get("sheet") else wb[wb.sheetnames[0]]
+    ws = _pick_ws(wb, cfg)
     col = cfg["cols"]
     c_pid, c_price, c_disc = col["상품번호"], col["판매가"], col["즉시할인"]
     c_unit = c_disc + 1                             # 즉시할인 단위(BG=BF+1)
@@ -428,9 +440,9 @@ def append_rows_to_raw(raw_xlsx: bytes, src_xlsx: bytes,
                        pids: set, cfg: dict) -> bytes:
     """저장 원본(raw)에 src 양식의 신규 상품번호(pids) 행을 값으로 추가."""
     tgt = load_workbook(BytesIO(raw_xlsx))
-    tws = tgt[cfg["sheet"]] if cfg.get("sheet") else tgt[tgt.sheetnames[0]]
+    tws = _pick_ws(tgt, cfg)
     src = load_workbook(BytesIO(src_xlsx), data_only=True)
-    sws = src[cfg["sheet"]] if cfg.get("sheet") else src[src.sheetnames[0]]
+    sws = _pick_ws(src, cfg)
     c_pid = cfg["cols"]["상품번호"]
     start = cfg["data_start"]
     src_rows = {}
