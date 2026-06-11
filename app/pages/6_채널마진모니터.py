@@ -220,22 +220,18 @@ if only_miss:
 DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형", "N", "재고",
            "매입가", "판매가", "배송비", "정산액", "마진율", "기준마진율", "탐지", "권장가/제한", "비고"]
 
-# ── 선택(체크박스) — 헤더 체크박스로 전체 선택/해제, 필터 넘어 상품번호 기준 유지 ──
-sel = st.session_state.setdefault(f"cmm_sel_{key}", set())
-view_pids = set(view["상품번호"])
-
-edit_df = view[DISPLAY].copy()
-edit_df.insert(0, "선택", view["상품번호"].isin(sel).values)
+# ── 선택 — st.dataframe 다중행 선택(헤더 체크박스=전체선택 + 개별, 현재 필터/검색 기준) ──
 filter_sig = hash((tuple(sorted(pick)), only_under, only_zero, only_floor, only_miss, q))
+view_reset = view.reset_index(drop=True)
 
-edited = st.data_editor(
-    edit_df,
+event = st.dataframe(
+    view_reset[DISPLAY],
     use_container_width=True,
     hide_index=True,
-    disabled=DISPLAY,
-    key=f"cmm_ed_{key}_{filter_sig}",
+    on_select="rerun",
+    selection_mode="multi-row",
+    key=f"cmm_df_{key}_{filter_sig}",
     column_config={
-        "선택": st.column_config.CheckboxColumn("선택", help="가격변경/CSV로 내보낼 상품 선택 (헤더 체크박스로 전체 선택/해제)"),
         "N": st.column_config.NumberColumn("N", format="%.4g", help="판매단위 배수(판매자바코드, 빈값→1, 분수 가능)"),
         "재고": st.column_config.NumberColumn("재고", format="localized"),
         "매입가": st.column_config.NumberColumn("매입가", format="localized"),
@@ -248,30 +244,29 @@ edited = st.data_editor(
         "권장가/제한": st.column_config.TextColumn("권장가 / 제한", help="기준마진 달성 판매가(올림). 제한상품은 제한 텍스트."),
     },
 )
-# 현재 화면 체크 결과를 세션 선택집합에 반영 (화면 밖 선택은 유지)
-checked_now = set(edited.loc[edited["선택"], "상품번호"])
-st.session_state[f"cmm_sel_{key}"] = (sel - view_pids) | checked_now
-sel = st.session_state[f"cmm_sel_{key}"]
+sel_rows = event.selection.rows if event and getattr(event, "selection", None) else []
+sel_pids = set(view_reset.iloc[sel_rows]["상품번호"].tolist()) if sel_rows else set()
 
-st.caption(f"표시 {len(view):,} / 전체 {len(df):,}건 · ✅ 선택 **{len(sel):,}건**")
+st.caption(f"표시 {len(view):,} / 전체 {len(df):,}건 · ✅ 선택 **{len(sel_pids):,}건** "
+           "(표 왼쪽 체크박스로 개별, 헤더 체크박스로 현재 화면 전체 선택)")
 
 # ── 내보내기: CSV / 가격 일괄변경 양식 ───────────────────────────────────────
 dc1, dc2 = st.columns(2)
 
-csv_src = df[df["상품번호"].isin(sel)] if sel else view
+csv_src = df[df["상품번호"].isin(sel_pids)] if sel_pids else view
 csv_buf = StringIO()
 csv_src[DISPLAY].to_csv(csv_buf, index=False)
 dc1.download_button(
-    f"📄 CSV 다운로드 ({'선택 '+str(len(sel)) if sel else '현재필터 '+str(len(view))}건)",
+    f"📄 CSV 다운로드 ({'선택 '+str(len(sel_pids)) if sel_pids else '현재필터 '+str(len(view))}건)",
     data=csv_buf.getvalue().encode("utf-8-sig"),
     file_name=f"{channel}_마진모니터.csv",
     mime="text/csv",
     use_container_width=True,
 )
 
-if dc2.button(f"🛠️ 가격 일괄변경 양식 생성 (선택 {len(sel)}건)",
-              type="primary", use_container_width=True, disabled=(len(sel) == 0)):
-    new_prices, skipped = cmm.compute_new_prices(rows, recs, sel)
+if dc2.button(f"🛠️ 가격 일괄변경 양식 생성 (선택 {len(sel_pids)}건)",
+              type="primary", use_container_width=True, disabled=(len(sel_pids) == 0)):
+    new_prices, skipped = cmm.compute_new_prices(rows, recs, sel_pids)
     if not new_prices:
         st.session_state[f"form_{key}"] = {"error": "선택 상품 중 권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
     else:
