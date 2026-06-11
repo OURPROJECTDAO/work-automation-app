@@ -138,7 +138,7 @@ rows, stats = cmm.compute_listing(recs, channel, str(_REF))
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("총 상품", f"{stats['총건수']:,}")
 c2.metric("평균 마진율", f"{stats['평균마진율']*100:.2f}%" if stats["평균마진율"] is not None else "—")
-c3.metric("마진 미달", f"{stats['마진미달']:,}")
+c3.metric("마진 미달", f"{stats['마진미달']:,}", help="기준마진율보다 1%p 이상 낮음")
 c4.metric("제한 상품", f"{stats['제한상품']:,}")
 c5.metric("기준 미설정", f"{stats['미설정']:,}")
 c6.metric("미매칭", f"{stats['미매칭']:,}")
@@ -151,14 +151,14 @@ with fc1:
     pick = st.multiselect("코드유형", types, default=types)
 with fc2:
     f1, f2, f3, f4 = st.columns(4)
-    only_under = f1.checkbox("마진미달만")
+    only_under = f1.checkbox("마진미달만", help="기준마진율보다 1%p 이상 낮은 상품")
     only_zero = f2.checkbox("재고 0")
     only_floor = f3.checkbox("제한상품만")
     only_miss = f4.checkbox("미매칭만")
 
 view = df[df["코드유형"].isin(pick)].copy()
 if only_under:
-    view = view[view["탐지"].notna() & (view["탐지"] < 0)]
+    view = view[view["탐지"].notna() & (view["탐지"] < cmm.MARGIN_UNDER_THRESHOLD)]
 if only_zero:
     view = view[view["재고"].fillna(-1) == 0]
 if only_floor:
