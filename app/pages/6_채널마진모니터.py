@@ -182,6 +182,9 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
         if not _pat():
             st.error("저장용 PAT(st.secrets GITHUB_PAT)가 없어 커밋할 수 없습니다.")
         else:
+            # 네이티브 raw 필수 채널(filter형=쿠팡): '신규만 추가'(append_rows_to_raw=openpyxl)는
+            #   원본을 inlineStr로 변질시켜 업로더가 거부 → 비활성화. '전체 교체'(업로드 바이트 verbatim)만.
+            native_raw = cfg.get("price_form", {}).get("mode") == "filter"
             b1, b2 = st.columns(2)
             if b1.button("전체 교체 저장", type="primary", use_container_width=True,
                          help="최신 전체 다운로드로 덮어쓰기 (신규+가격변동 반영) + 원본양식 저장"):
@@ -190,8 +193,12 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
                 _load_listing.clear()
                 committed = new_recs
                 flash = f"전체 교체 완료 — {meta['rows']:,}건 ({meta['updated_at']})"
+            _merge_help = ("이 채널은 네이티브 포맷 보존을 위해 '전체 교체'만 사용합니다 "
+                           "(신규만 추가=openpyxl 저장이 원본을 inlineStr로 변질 → 업로드 거부)"
+                           if native_raw else
+                           "기존 유지 + 새 상품번호만 병합 (원본양식에도 신규 행 추가)")
             if b2.button("신규만 추가", use_container_width=True,
-                         help="기존 유지 + 새 상품번호만 병합 (원본양식에도 신규 행 추가)"):
+                         disabled=native_raw, help=_merge_help):
                 cur, _ = _load_listing(key)
                 merged, added = cmm.merge_listing(cur or [], new_recs)
                 meta = _commit_listing(key, merged)
@@ -202,6 +209,9 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
                 _load_listing.clear()
                 committed = merged
                 flash = f"신규 {added:,}건 추가 — 총 {meta['rows']:,}건"
+            if native_raw:
+                st.caption("ℹ️ 이 채널은 '전체 교체'만 사용 — 원본 네이티브 포맷 보존(쿠팡 업로드 호환). "
+                           "신규만 추가는 비활성화됨.")
 
 if committed is not None:
     recs = committed
