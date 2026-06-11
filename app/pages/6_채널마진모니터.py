@@ -106,6 +106,53 @@ def _commit_raw(key: str, xlsx_bytes: bytes):
     _gh(path, "PUT", payload)
 
 
+def _col_config(cfg: dict) -> dict:
+    """표 컬럼 헤더에 채널별 수식 설명(help) 부여 — 사람이 한 번 더 검증.
+
+    수수료·실택배비·배송비 출처·N 출처가 채널마다 달라 cfg에서 동적 생성.
+    """
+    comm = cfg["commission"]; settle = cfg["ship_settle"]; ship = int(cfg["real_ship"])
+    rate = 1 - comm                                   # 판매가net에 곱하는 정산비율
+    if cfg.get("ship_fee_const") is not None:
+        ship_src = f"상수 {int(cfg['ship_fee_const']):,}원(다운로드에 배송비 숫자 없음)"
+    else:
+        ship_src = "다운로드 기본배송비"
+    if cfg.get("n_source") == "ref":
+        n_help = "판매단위 배수(합포량). hapo_multiplier에서 상품번호로 조회 · 빈값→1 · 분수 가능. 매입가에 ×N"
+    else:
+        n_help = "판매단위 배수(판매자바코드) · 빈값→1 · 분수 가능. 매입가에 ×N"
+    NC, TC = st.column_config.NumberColumn, st.column_config.TextColumn
+    return {
+        "상품번호": TC("상품번호", help="채널 상품 고유키(선택·양식 키)"),
+        "관리코드": TC("관리코드", help="판매자상품코드 — 박스(관리코드)/PC낱개/소분(변환코드)/합포(-CB-)"),
+        "상품명": TC("상품명", help="리스팅 상품명"),
+        "규격": TC("규격", help="코드해석 규격(product_master / 소분)"),
+        "코드유형": TC("코드유형", help="박스 · PC낱개 · 소분 · 합포 · 빈코드"),
+        "N": NC("N", format="%.4g", help=n_help),
+        "재고": NC("재고", format="localized",
+                  help="product_master 재고. 박스=박스재고 · PC낱개=그 상품코드의 박스재고 · 소분=원코드 박스재고 · 합포=Σ구성코드 박스재고"),
+        "매입가": NC("매입가", format="localized",
+                   help="기준매입가 × N. 박스=박스매입단가 · PC낱개=낱개매입단가 · 소분=박스매입단가÷내품나누기 · 합포=Σ박스매입단가+700"),
+        "판매가": NC("판매가", format="localized",
+                   help="리스팅 판매가. 정산액엔 즉시할인·포인트 차감 후(net) 반영"),
+        "배송비": NC("배송비", format="localized",
+                   help=f"정산 반영 배송비 — {ship_src}. 정산액에 ×{settle} 가산"),
+        "정산액": NC("정산액", format="localized",
+                   help=f"= (판매가 − 즉시할인 − 포인트) × {rate:.2f} + 배송비 × {settle}   (수수료 {comm*100:.0f}%)"),
+        "마진율": NC("마진율", format="percent",
+                   help=f"= (정산액 − 매입가 − {ship:,}) ÷ 정산액   (실택배비 {ship:,}원)"),
+        "기준마진율": NC("기준마진율", format="percent",
+                     help=f"baseline_margin '{cfg['baseline_col']}' 컬럼의 확정마진율"),
+        "탐지": NC("탐지(현-기준)", format="percent",
+                  help="= 마진율 − 기준마진율. -1%p 미만이면 '마진미달'"),
+        "권장가/제한": TC("권장가 / 제한",
+                      help=(f"기준마진 달성 판매가(net 기준, 100원 올림): "
+                            f"⌈((매입가+{ship:,})÷(1−기준마진율) − 배송비×{settle})÷{rate:.2f}⌉. "
+                            "제한상품은 제한 텍스트.")),
+        "비고": TC("비고", help="미매칭·미등록 사유(정상 매칭이면 빈칸)"),
+    }
+
+
 channel = st.selectbox("채널", list(cmm.CHANNEL_CONFIG.keys()), index=0)
 cfg = cmm.CHANNEL_CONFIG[channel]
 key = cfg["key"]
@@ -231,18 +278,7 @@ event = st.dataframe(
     on_select="rerun",
     selection_mode="multi-row",
     key=f"cmm_df_{key}_{filter_sig}",
-    column_config={
-        "N": st.column_config.NumberColumn("N", format="%.4g", help="판매단위 배수(판매자바코드, 빈값→1, 분수 가능)"),
-        "재고": st.column_config.NumberColumn("재고", format="localized"),
-        "매입가": st.column_config.NumberColumn("매입가", format="localized"),
-        "판매가": st.column_config.NumberColumn("판매가", format="localized"),
-        "배송비": st.column_config.NumberColumn("배송비", format="localized"),
-        "정산액": st.column_config.NumberColumn("정산액", format="localized"),
-        "마진율": st.column_config.NumberColumn("마진율", format="percent"),
-        "기준마진율": st.column_config.NumberColumn("기준마진율", format="percent"),
-        "탐지": st.column_config.NumberColumn("탐지(현-기준)", format="percent"),
-        "권장가/제한": st.column_config.TextColumn("권장가 / 제한", help="기준마진 달성 판매가(올림). 제한상품은 제한 텍스트."),
-    },
+    column_config=_col_config(cfg),
 )
 sel_rows = event.selection.rows if event and getattr(event, "selection", None) else []
 sel_pids = set(view_reset.iloc[sel_rows]["상품번호"].tolist()) if sel_rows else set()
