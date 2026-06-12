@@ -204,7 +204,9 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
                 meta = _commit_listing(key, merged)
                 added_pids = {r["상품번호"] for r in new_recs} - {r["상품번호"] for r in (cur or [])}
                 rcode, rawb = _gh_bytes(_raw_path(key))
-                newraw = cmm.append_rows_to_raw(rawb, up_bytes, added_pids, cfg) if (rcode == 200 and rawb) else up_bytes
+                newraw = (up_bytes if cfg.get("consolidate")          # 알리 다중시트: openpyxl raw 병합 부적합 → 최신 업로드 유지(raw 미사용)
+                          else cmm.append_rows_to_raw(rawb, up_bytes, added_pids, cfg)
+                          if (rcode == 200 and rawb) else up_bytes)
                 _commit_raw(key, newraw)
                 _load_listing.clear()
                 committed = merged
