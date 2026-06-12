@@ -9,19 +9,40 @@ import base64
 import json
 import sys
 import urllib.request
-from io import StringIO
+from io import BytesIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # repo root
 
 import pandas as pd
 import streamlit as st
+from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 
 from core.workflows import upload_monitor as um
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_REPO = "OURPROJECTDAO/work-automation-app"
 _SKIP_PATH = "reference/upload_skip.csv"
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_CODE_COLS = {"상품코드", "관리코드"}  # 엑셀 자동변환(앞0 제거·날짜화) 방지 → 텍스트 서식
+
+
+def _to_xlsx(df, text_cols, sheet_name="업로드감시") -> bytes:
+    """DataFrame → xlsx bytes. text_cols 컬럼은 문자열+@ 서식(상품코드 앞0·관리코드 날짜화 방지)."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    ws.append(list(df.columns))
+    for _, row in df.iterrows():
+        ws.append([(v.item() if hasattr(v, "item") else v) for v in row.tolist()])
+    for ci, col in enumerate(df.columns, start=1):
+        if col in text_cols:
+            for cell in ws[get_column_letter(ci)]:
+                cell.number_format = "@"
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
 
 
 def _pat():
@@ -181,20 +202,18 @@ amt = int(view["재고금액"].sum()) if len(view) else 0
 st.caption(f"표시 {len(view):,} / 전체 {len(df):,}건 · 재고금액합 {amt:,}원 · "
            f"✅ 선택 **{len(sel_codes):,}건** (표 왼쪽 체크박스로 개별, 헤더로 화면 전체)")
 
-# ── 내보내기 (CSV) ────────────────────────────────────────────────────────────
+# ── 내보내기 (XLSX — 상품코드/관리코드 텍스트 서식, 엑셀 자동변환 방지) ──────────
 csv_src = view_reset.iloc[sel_rows] if sel_rows else view_reset
 exp = csv_src[base_cols + selected].rename(columns=um.CHANNEL_LABEL)
-buf = StringIO()
-exp.to_csv(buf, index=False)
 if len(selected) == 1:
     tag = um.CHANNEL_LABEL[selected[0]]
 elif len(selected) == len(KEYS) or not selected:
     tag = "전체"
 else:
     tag = f"{len(selected)}채널"
-st.download_button("📥 CSV 다운로드 (선택 또는 현재 화면)",
-                   buf.getvalue().encode("utf-8-sig"),
-                   file_name=f"업로드감시_{tag}.csv", mime="text/csv", key="um_csv_dl")
+st.download_button("📥 엑셀(XLSX) 다운로드 (선택 또는 현재 화면)",
+                   _to_xlsx(exp, _CODE_COLS),
+                   file_name=f"업로드감시_{tag}.xlsx", mime=_XLSX_MIME, key="um_xlsx_dl")
 
 # ── 이미지 포함 CSV (대표 A1 / 상세 B1 실검사) ───────────────────────────────
 if "um_img_cache" not in st.session_state:
@@ -210,18 +229,16 @@ def _probe_view(codes):
     return cache
 
 
-st.caption("🖼 대표(A1)·상세(B1) 이미지 유무·확장자·URL을 gi.esmplus.com에서 실검사해 CSV에 추가합니다 "
+st.caption("🖼 대표(A1)·상세(B1) 이미지 유무·확장자·URL을 gi.esmplus.com에서 실검사해 엑셀에 추가합니다 "
            "(관리코드 기준, 빈 관리코드는 제외). 같은 관리코드는 세션 내 재검사 안 함.")
-if st.button("🖼 이미지 확인 후 CSV 만들기 (선택 또는 현재 화면)"):
+if st.button("🖼 이미지 확인 후 엑셀 만들기 (선택 또는 현재 화면)"):
     cache = _probe_view(csv_src["관리코드"].tolist())
     enr = csv_src[base_cols].copy()
     for ic in um.IMG_COLS:
         enr[ic] = csv_src["관리코드"].map(lambda m, ic=ic: cache.get(um._nfc(m), {}).get(ic, ""))
     for ch in selected:
         enr[um.CHANNEL_LABEL[ch]] = csv_src[ch].values
-    ibuf = StringIO()
-    enr.to_csv(ibuf, index=False)
-    st.session_state["um_img_csv"] = ibuf.getvalue().encode("utf-8-sig")
+    st.session_state["um_img_csv"] = _to_xlsx(enr, _CODE_COLS)
     st.session_state["um_img_tag"] = tag
     a_o = int((enr["대표이미지유무"] == "O").sum())
     b_o = int((enr["상세이미지유무"] == "O").sum())
@@ -231,9 +248,9 @@ if st.session_state.get("um_img_csv"):
     s = st.session_state["um_img_summary"]
     st.caption(f"대표(A1) 있음 **{s[0]}** · 없음 {s[1]}  /  상세(B1) 있음 **{s[2]}** · 없음 {s[3]} "
                "— 전부 '없음'이면 배포 환경에서 gi.esmplus.com 접근이 막힌 것일 수 있습니다.")
-    st.download_button("📥 이미지 포함 CSV 다운로드", st.session_state["um_img_csv"],
-                       file_name=f"업로드감시_{st.session_state.get('um_img_tag','전체')}_이미지.csv",
-                       mime="text/csv", key="um_img_dl")
+    st.download_button("📥 이미지 포함 엑셀(XLSX) 다운로드", st.session_state["um_img_csv"],
+                       file_name=f"업로드감시_{st.session_state.get('um_img_tag','전체')}_이미지.xlsx",
+                       mime=_XLSX_MIME, key="um_img_dl")
 
 st.divider()
 st.subheader("🚫 채널별 업로드제외 (등록 / 해제)")
