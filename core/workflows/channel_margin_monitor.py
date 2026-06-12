@@ -232,6 +232,28 @@ CHANNEL_CONFIG: dict[str, dict] = {
         # consolidate 채널은 cols/sheet 미사용(다중시트). 즉시할인·포인트·배송비·바코드·정가 없음.
         # 가격변경 미구현(AliExpress 가격/재고 업로드도 동일 다중시트 양식 → 별도 검증 후).
     },
+    "esm": {
+        "key": "esm",
+        "commission": 0.175,       # 17.5% 단일 (골든 정산=가격×0.825=×(1−0.175) 정확 재현, 사용자 확정 2026-06-12).
+                                   #   다운로드 O열 판매이용료(13/11/9%)는 카테고리 수수료라 미사용.
+                                   #   골든 권장가 0.83·헤더 '17%기준'은 내부 불일치로 미채택(정산 우선).
+        "ship_settle": 0.967,
+        "real_ship": 2700,         # 스마트스토어 표준 단일 (골든 3000/3700·합포+700·ROUND 미채택)
+        "baseline_col": "ESM",     # baseline_margin.csv ESM 컬럼
+        "apply_floor": True,
+        "n_source": "ref",         # 합포 N = hapo_multiplier(A 마스터상품번호·채널무관). 다운로드 바코드 없음.
+                                   #   ⚠️ 골든 N은 #REF!(소스 N열 삭제) → N 자체는 골든 대조 불가(consolidation+입력으로 검증).
+        "sheet": None,             # 다운로드 시트명 가변(worksheet1/합본) → 첫 시트
+        "header_row": 1,
+        "data_start": 2,
+        # ESM(G마켓+옥션 통합) 다운로드는 1회 500상품 한도라 여러 배치로 받음. F(사이트)=='지마켓' 행만 모니터,
+        #   A(마스터상품번호) 중복제거. parse가 자동 처리 → 수기 합치기·중복제거 불필요('신규만추가' 다회 or '전체교체' 합본).
+        #   배송비 AI: '무료'→0, 그외 '3,000' 등 숫자(_num 콤마 허용). 즉시할인·포인트·바코드·정가 컬럼 없음.
+        "include_row_if_col_value": {"col": 6, "value": "지마켓"},   # F=사이트
+        "dedup_key": "상품번호",                                      # A 마스터상품번호(키=골든 조인+hapo N)
+        "cols": {"상품번호": 1, "코드": 5, "상품명": 3, "판매가": 9, "배송비": 35},
+        # 가격변경 미구현(모니터만) — 알리와 동일.
+    },
 }
 
 
@@ -251,6 +273,11 @@ def _num(v, d: float = 0.0) -> float:
     try:
         return float(v)
     except (TypeError, ValueError):
+        if isinstance(v, str):                       # "3,000"(천단위 콤마) → 3000. "무료" 등 비숫자 → d (ESM 배송비)
+            try:
+                return float(v.replace(",", "").strip())
+            except ValueError:
+                return d
         return d
 
 
@@ -501,6 +528,7 @@ def parse_download(file, cfg: dict) -> list[dict]:
     ship_const = cfg.get("ship_fee_const")
     ship_policy = cfg.get("ship_fee_policy")  # {col, map, default} — 컬럼값 조건부 배송비(캐시노트)
     excl_col = cfg.get("exclude_row_if_col_filled")  # 그 컬럼에 값 있으면 행 제외(쿠팡 바코드=로켓그로스)
+    incl = cfg.get("include_row_if_col_value")       # {col,value} 그 컬럼값==value 행만(ESM 사이트=지마켓)
 
     def _opt(r, key, default=0.0):
         c = col.get(key)
@@ -521,6 +549,8 @@ def parse_download(file, cfg: dict) -> list[dict]:
             continue
         if excl_col is not None and ws.cell(r, excl_col).value not in (None, ""):
             continue                              # 로켓그로스(바코드 값 존재) → 판매자택배 모니터 제외
+        if incl is not None and _nfc(ws.cell(r, incl["col"]).value) != incl["value"]:
+            continue                              # ESM: 사이트(F)=='지마켓' 행만(옥션 제외)
         bc = col.get("바코드")
         rec = {
             "상품번호": _pid(pid),
@@ -537,6 +567,15 @@ def parse_download(file, cfg: dict) -> list[dict]:
         for name, c in cfg.get("extra_cols", {}).items():   # 다운로드 추가 컬럼 보존(OFR/SKU·옵션번호 등)
             rec[name] = _pid(ws.cell(r, c).value)           # 숫자ID(옵션번호) float '..0' 방지 — _pid 정수화
         recs.append(rec)
+    dk = cfg.get("dedup_key")
+    if dk:                                        # ESM: A(마스터상품번호) 중복제거(여러 배치 다운로드 합본·재업로드 안전)
+        seen, uniq = set(), []
+        for rec in recs:
+            k = rec.get(dk)
+            if k in seen:
+                continue
+            seen.add(k); uniq.append(rec)
+        recs = uniq
     return recs
 
 
