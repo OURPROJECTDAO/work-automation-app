@@ -12,7 +12,9 @@ resolve_code 4-tier 재사용). → "하나라도 업로드면 업로드됨"이 
 """
 from __future__ import annotations
 
+import concurrent.futures as _cf
 import csv
+import urllib.request as _ur
 from pathlib import Path
 
 from .channel_margin_monitor import _nfc, _num, load_references
@@ -223,3 +225,60 @@ def channel_summary(rows: list[dict]) -> list[dict]:
 def gap_list_for_channel(rows: list[dict], key: str) -> list[dict]:
     """특정 채널의 업로드필요 상품(재고금액 desc, 이미 정렬됨)."""
     return [r for r in rows if r.get(key) == ST_NEED_UP]
+
+
+# ── 이미지 실검사 (대표 A1 / 상세 B1, jpg→png) ───────────────────────────────
+# 호스트 패턴: gi.esmplus.com/td680708/{관리코드}/{관리코드}_A1|B1.{ext}. 키=관리코드.
+# 등록 워크플로우 공통 패턴(smartstore/esm-register)과 동일. A1/B1 독립 프로브.
+IMG_HOST = "https://gi.esmplus.com/td680708"
+IMG_COLS = ["대표이미지유무", "대표확장자", "대표이미지URL",
+            "상세이미지유무", "상세확장자", "상세이미지URL"]
+
+
+def _img_url(mg: str, slot: str, ext: str) -> str:
+    return f"{IMG_HOST}/{mg}/{mg}_{slot}.{ext}"
+
+
+def _head_ok(u: str, timeout: float = 6.0) -> bool:
+    req = _ur.Request(u, method="HEAD")
+    req.add_header("User-Agent", "Mozilla/5.0")
+    try:
+        with _ur.urlopen(req, timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def probe_slot(mg: str, slot: str) -> tuple[str, str]:
+    """관리코드+슬롯(A1/B1) → (확장자, URL). jpg→png 실검사. 없으면 ('','')."""
+    mg = _nfc(mg)
+    if not mg:
+        return "", ""
+    for ext in ("jpg", "png"):
+        u = _img_url(mg, slot, ext)
+        if _head_ok(u):
+            return ext, u
+    return "", ""
+
+
+def probe_image(mg: str) -> dict:
+    """관리코드 → 대표(A1)·상세(B1) 유무/확장자/URL dict (IMG_COLS)."""
+    a_ext, a_url = probe_slot(mg, "A1")
+    b_ext, b_url = probe_slot(mg, "B1")
+    return {
+        "대표이미지유무": "O" if a_url else "X", "대표확장자": a_ext, "대표이미지URL": a_url,
+        "상세이미지유무": "O" if b_url else "X", "상세확장자": b_ext, "상세이미지URL": b_url,
+    }
+
+
+def probe_images(codes, workers: int = 24) -> dict[str, dict]:
+    """관리코드 리스트 → {관리코드: probe_image dict}. 빈값 제외·dedup·병렬."""
+    uniq = sorted({_nfc(c) for c in codes if _nfc(c)})
+    out: dict[str, dict] = {}
+    if not uniq:
+        return out
+    with _cf.ThreadPoolExecutor(max_workers=min(workers, len(uniq))) as ex:
+        futs = {ex.submit(probe_image, c): c for c in uniq}
+        for f in _cf.as_completed(futs):
+            out[futs[f]] = f.result()
+    return out
