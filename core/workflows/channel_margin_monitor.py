@@ -253,7 +253,22 @@ CHANNEL_CONFIG: dict[str, dict] = {
         "dedup_key": "상품번호",                                      # A 마스터상품번호(키=골든 조인+hapo N)
         "multi_file": True,        # 다운로드 500상품 한도 → 여러 배치. 업로더 다중파일 허용(이어붙이기+A중복제거 자동, 수기병합 불요)
         "cols": {"상품번호": 1, "코드": 5, "상품명": 3, "판매가": 9, "배송비": 35},
-        # 가격변경 미구현(모니터만) — 알리와 동일.
+        # 가격변경 양식 키 = 사이트 상품번호(B, 다운로드 col2) — 모니터키 A(마스터)와 다름 → extra_cols로 listing 보존.
+        "extra_cols": {"사이트상품번호": 2},
+        # 가격변경 = append('(ESM)양식'): B=사이트상품번호·C=판매가(권장가). A=순번(데코). 정가 칸 없음(jeong 없음).
+        #   템플릿 r1~5는 보호블록(다운로드 안내 '6행부터 입력') → data_start 6, 예시 r5 보존.
+        "price_form": {
+            "mode": "append",
+            "template": "esm_price_template.xlsx",   # reference/ 고정 양식(클린 r1~5)
+            "sheet": "(ESM)양식",
+            "data_start": 6,
+            "seq_col": 1,                            # A열 순번 1,2,3…
+            "cols": {"사이트상품번호": 2, "판매가": 3},
+            "source": {"사이트상품번호": "사이트상품번호"},
+            "price_field": "판매가",                  # C = 권장가
+            "int_fields": ["사이트상품번호"],          # B는 숫자셀(다운로드 동일)
+            # jeong_field 없음 — 양식에 정가/할인전단가 칸 없음.
+        },
     },
 }
 
@@ -816,10 +831,13 @@ def build_price_form_append(template_xlsx: bytes, items: list[dict], pf: dict) -
     start = pf["data_start"]
     fixed = pf.get("fixed", {})
     int_fields = set(pf.get("int_fields", []))       # 숫자로 기입할 양식필드(올웨이즈 카테고리코드·재고수량)
+    seq_col = pf.get("seq_col")                       # (선택) 순번 컬럼 — 1,2,3… 기입(ESM A열 데코)
     if ws.max_row >= start:                          # 예시/기존 데이터행 제거
         ws.delete_rows(start, ws.max_row - start + 1)
     for i, it in enumerate(items):
         r = start + i
+        if seq_col:
+            ws.cell(r, int(seq_col)).value = i + 1
         for field, c in cols.items():
             if field in it:
                 v = it[field]
