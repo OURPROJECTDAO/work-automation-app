@@ -106,6 +106,25 @@ def _commit_raw(key: str, xlsx_bytes: bytes):
     _gh(path, "PUT", payload)
 
 
+_BASELINE_PATH = "reference/baseline_margin.csv"
+
+
+@st.cache_data(ttl=600, show_spinner="기준마진율 불러오는 중...")
+def _load_baseline_text() -> str:
+    """baseline_margin.csv 를 GitHub 라이브로 읽음(로컬 배포본 대신) → 편집 즉시 반영."""
+    code, text = _gh(_BASELINE_PATH, raw=True)
+    return text if code == 200 else ""
+
+
+def _commit_baseline(new_text: str):
+    code, m = _gh(_BASELINE_PATH)
+    payload = {"message": "data(baseline): 기준마진율 갱신(대시보드 편집)",
+               "content": base64.b64encode(new_text.encode("utf-8")).decode()}
+    if code == 200:
+        payload["sha"] = m["sha"]
+    _gh(_BASELINE_PATH, "PUT", payload)
+
+
 def _col_config(cfg: dict) -> dict:
     """표 컬럼 헤더에 채널별 수식 설명(help) 부여 — 사람이 한 번 더 검증.
 
@@ -264,7 +283,9 @@ if _stale:
     st.warning(f"⚠️ 저장된 상품관리가 구버전이라 **{', '.join(_stale)}**(가) 비어 있습니다. "
                "위 '📥 상품관리 갱신 → **전체 교체**'를 1회 실행하면 채워집니다(신규만 추가로는 기존 행이 안 채워짐).")
 
-rows, stats = cmm.compute_listing(recs, channel, str(_REF))
+_baseline_text = _load_baseline_text()
+_baseline_override = cmm.parse_baseline_dict(_baseline_text) if _baseline_text else None
+rows, stats = cmm.compute_listing(recs, channel, str(_REF), baseline_override=_baseline_override)
 
 # ── KPI ──────────────────────────────────────────────────────────────────────
 c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -452,3 +473,67 @@ if form:
         else:
             st.caption("★ 가격은 net(판매가−즉시할인−포인트) 기준으로 기준마진 달성가에 맞춥니다. "
                        "할인 우선: 인상 시 즉시할인을 먼저 줄이고 모자라면 판매가를 올립니다(인하는 반대).")
+
+
+# ── 기준마진율 설정: 현재 마진율 → 기준마진율 (전 채널 공통 baseline_margin 편집) ──
+st.divider()
+st.markdown("#### 🎯 기준마진율 설정 (현재 마진율 → 기준)")
+_bcol = cfg["baseline_col"]
+st.caption(f"선택한 상품의 **현재 마진율**을 이 채널({channel}=`{_bcol}`)의 기준마진율로 저장합니다. "
+           "0.1%p 자리 반올림 · 이 채널 컬럼만 수정(다른 채널 보존) · 저장 즉시 반영. "
+           "미달 상품이면 그 마진을 목표로 인정 → 더 이상 미달로 안 잡힙니다.")
+_oc1, _oc2 = st.columns([2, 1])
+_off_lbl = _oc1.radio("기준값", ["현재 그대로", "현재 −1%p 여유"], horizontal=True,
+                      key=f"bl_off_{key}", label_visibility="collapsed")
+_off = 0.01 if "−1%p" in _off_lbl else 0.0
+if _oc2.button(f"🎯 기준마진율 = 현재 (선택 {len(sel_pids)}건)", type="primary",
+               use_container_width=True, disabled=(len(sel_pids) == 0)):
+    if not _pat():
+        st.session_state[f"bl_{key}"] = {"error": "저장용 PAT(st.secrets GITHUB_PAT)가 없어 커밋할 수 없습니다."}
+    else:
+        _prop, _conf = cmm.propose_baseline(rows, sel_pids, offset=_off)
+        if not _prop and not _conf:
+            st.session_state[f"bl_{key}"] = {"error": "선택 상품 중 마진율 산출 가능 항목이 없습니다(미매칭/정산불가)."}
+        else:
+            st.session_state[f"bl_{key}"] = {"proposals": _prop, "conflicts": _conf, "bcol": _bcol}
+
+_stage = st.session_state.get(f"bl_{key}")
+if _stage:
+    if _stage.get("error"):
+        st.warning(_stage["error"])
+    else:
+        _prop = dict(_stage["proposals"])
+        _conf = _stage["conflicts"]
+        _resolved = {}
+        if _conf:
+            st.warning(f"⚠️ 같은 관리코드에 현재 마진율이 다른 상품이 있습니다 ({len(_conf)} 관리코드). "
+                       "어느 값을 기준으로 쓸지 골라주세요.")
+            for _code, _cands in _conf.items():
+                _opts = sorted({c["값"] for c in _cands})
+                _names = " · ".join(f"{(c['상품명'] or '')[:16]} {c['마진율']*100:.1f}%" for c in _cands[:5])
+                _pick = st.radio(f"`{_code}` — {_names}", _opts,
+                                 format_func=lambda v: f"{v*100:.1f}%",
+                                 horizontal=True, key=f"bl_cf_{key}_{_code}")
+                _resolved[_code] = _pick
+        _merged = {**_prop, **_resolved}
+        _curbase = cmm.parse_baseline_dict(_load_baseline_text())
+        _prev = []
+        for _code, _v in sorted(_merged.items()):
+            _old = (_curbase.get(_code, {}) or {}).get(_bcol, "") or ""
+            _dir = "신규" if not _old else ("↑ 상향" if _v > float(_old) else ("↓ 하향" if _v < float(_old) else "유지"))
+            _prev.append({"관리코드": _code, f"기존 {_bcol}": (f"{float(_old)*100:.1f}%" if _old else "—"),
+                          "새 기준": f"{_v*100:.1f}%", "방향": _dir})
+        st.caption(f"적용 대상 **{len(_merged)} 관리코드** · 이 채널({_bcol}) 컬럼만 수정")
+        st.dataframe(pd.DataFrame(_prev), use_container_width=True, hide_index=True)
+        _bb1, _bb2, _ = st.columns([1, 1, 2])
+        if _bb1.button("💾 저장 (커밋)", type="primary", key=f"bl_save_{key}",
+                       disabled=(len(_merged) == 0)):
+            _newtext, _upd, _added = cmm.update_baseline_csv(_load_baseline_text(), _bcol, _merged)
+            _commit_baseline(_newtext)
+            _load_baseline_text.clear()
+            st.session_state.pop(f"bl_{key}", None)
+            st.success(f"기준마진율 저장 완료 — 수정 {_upd} · 신규 {_added} 관리코드 ({_bcol}). 표에 즉시 반영됩니다.")
+            st.rerun()
+        if _bb2.button("취소", key=f"bl_cancel_{key}"):
+            st.session_state.pop(f"bl_{key}", None)
+            st.rerun()
