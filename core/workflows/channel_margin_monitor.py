@@ -666,11 +666,17 @@ def _stats(rows: list[dict]) -> dict:
     }
 
 
-def compute_listing(recs: list[dict], channel: str, ref_dir) -> tuple[list[dict], dict]:
-    """저장된 listing 레코드 + 채널 → (결과 레코드, 통계)."""
+def compute_listing(recs: list[dict], channel: str, ref_dir, baseline_override=None) -> tuple[list[dict], dict]:
+    """저장된 listing 레코드 + 채널 → (결과 레코드, 통계).
+
+    baseline_override({관리코드:{채널:값}})가 주어지면 로컬 baseline_margin 대신 사용
+    (대시보드에서 GitHub 라이브로 읽은 기준마진율 → 편집 즉시 반영).
+    """
     if channel not in CHANNEL_CONFIG:
         raise ValueError(f"지원하지 않는 채널: {channel}")
     refs = load_references(ref_dir)
+    if baseline_override is not None:
+        refs["baseline"] = baseline_override
     rows = compute(recs, refs, CHANNEL_CONFIG[channel])
     return rows, _stats(rows)
 
@@ -734,6 +740,100 @@ def merge_listing(existing: list[dict], new: list[dict]) -> tuple[list[dict], in
     seen = {r["상품번호"] for r in existing}
     added = [r for r in new if r["상품번호"] and r["상품번호"] not in seen]
     return existing + added, len(added)
+
+
+# ── 기준마진율(baseline_margin) 편집 — 현재 마진율 → 기준마진율 ────────────────
+def parse_baseline_dict(text: str) -> dict:
+    """baseline_margin CSV 텍스트 → {관리코드: {채널: 값문자열}} (compute_listing override용)."""
+    if text and text[0] == "\ufeff":
+        text = text[1:]
+    d: dict[str, dict] = {}
+    for row in csv.DictReader(StringIO(text)):
+        k = _nfc(row.get("관리코드"))
+        if k and k not in d:
+            d[k] = row
+    return d
+
+
+def _fmt_margin(v: float) -> str:
+    """0.092 → '0.092', 0.05 → '0.05' (불필요한 끝 0 제거). 저장 표기 통일."""
+    s = f"{v:.3f}"
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def propose_baseline(rows: list[dict], pids, offset: float = 0.0,
+                     round_to: int = 3) -> tuple[dict, dict]:
+    """선택 상품(pids)의 현재 마진율 → 기준마진율 제안. 관리코드별 그룹.
+
+    값 = round(현재마진율 − offset, round_to)  (round_to=3 → 0.1%p 자리).
+    반환 (proposals, conflicts):
+      proposals {관리코드: 값}     — 관리코드당 (반올림 후) 후보 단일.
+      conflicts {관리코드: [{값,상품번호,상품명,마진율}...]}
+        — 같은 관리코드에 서로 다른 마진율(합포·중복리스팅) → 사용자 선택 필요.
+    마진율 None(미매칭/정산불가) 행은 제외.
+    """
+    row_by = {r["상품번호"]: r for r in rows}
+    by_code: dict[str, dict] = {}
+    for pid in pids:
+        r = row_by.get(pid)
+        if not r or r.get("마진율") is None:
+            continue
+        code = r["관리코드"]
+        val = round(float(r["마진율"]) - offset, round_to)
+        by_code.setdefault(code, {}).setdefault(val, []).append(r)
+    proposals, conflicts = {}, {}
+    for code, valmap in by_code.items():
+        if len(valmap) == 1:
+            proposals[code] = next(iter(valmap))
+        else:
+            cands = []
+            for v, rs in sorted(valmap.items()):
+                for r in rs:
+                    cands.append({"값": v, "상품번호": r["상품번호"],
+                                  "상품명": r.get("상품명", ""), "마진율": r.get("마진율")})
+            conflicts[code] = cands
+    return proposals, conflicts
+
+
+def update_baseline_csv(text: str, channel_col: str, updates: dict) -> tuple[str, int, int]:
+    """baseline CSV의 channel_col을 updates{관리코드:값}로 갱신 → (새 텍스트, 갱신수, 신규행수).
+
+    기존 행은 그 채널 컬럼만 수정(다른 채널·다른 관리코드 보존). 없는 관리코드는 행 추가
+    (그 채널만 채우고 나머지 공백). 헤더/열순서/BOM(utf-8-sig)/CRLF 보존.
+    """
+    bom = text.startswith("\ufeff")
+    if bom:
+        text = text[1:]
+    rows = list(csv.reader(StringIO(text)))
+    header = rows[0]
+    code_i = header.index("관리코드")
+    col_i = header.index(channel_col)
+    remaining = {_nfc(k): v for k, v in updates.items()}
+    upd = 0
+    out = [header]
+    for row in rows[1:]:
+        if not row:
+            continue
+        code = _nfc(row[code_i]) if code_i < len(row) else ""
+        if code in remaining:
+            while len(row) < len(header):
+                row.append("")
+            row[col_i] = _fmt_margin(remaining.pop(code))
+            upd += 1
+        out.append(row)
+    added = 0
+    for code, v in remaining.items():
+        nr = [""] * len(header)
+        nr[code_i] = code
+        nr[col_i] = _fmt_margin(v)
+        out.append(nr)
+        added += 1
+    buf = StringIO()
+    csv.writer(buf, lineterminator="\r\n").writerows(out)
+    res = buf.getvalue()
+    return (("\ufeff" + res) if bom else res), upd, added
 
 
 # ── 가격 일괄변경 (할인 우선 규칙) ───────────────────────────────────────────
