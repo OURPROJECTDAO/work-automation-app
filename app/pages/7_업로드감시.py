@@ -153,16 +153,24 @@ if selected:
 else:
     st.caption("채널을 하나 이상 선택하면 해당 상태 컬럼과 컬럼 필터가 표시됩니다.")
 
-sc1, sc2 = st.columns([3, 2])
+sc1, sc2, sc3, sc4 = st.columns([3, 1.5, 1.6, 1.4])
 search = sc1.text_input("🔍 검색", placeholder="관리코드 · 상품코드 · 상품명 (부분일치)",
                         label_visibility="collapsed")
-show_excluded = sc2.checkbox("전채널 제외 상품 포함", value=False,
+min_stock = sc2.number_input("박스재고 ≥", min_value=0, value=0, step=1,
+                             help="박스재고가 이 값 이상인 상품만 (0=미적용)")
+min_amount = sc3.number_input("재고금액 ≥ (원)", min_value=0, value=0, step=100000,
+                              help="재고금액(박스재고×박스매입가)이 이 값 이상만 (0=미적용)")
+show_excluded = sc4.checkbox("전채널 제외 포함", value=False,
                              help="모든 채널이 '업로드제외'인 상품(비대상)은 기본 숨김")
 
-# ── 행 필터 (전채널제외 숨김 + 선택 채널 상태 AND + 검색) ─────────────────────
+# ── 행 필터 (전채널제외 숨김 + 임계값 + 선택 채널 상태 AND + 검색) ─────────────
 view = df.copy()
 if not show_excluded:
     view = view[~(view[KEYS] == um.ST_SKIP_CH).all(axis=1)]
+if min_stock > 0:
+    view = view[view["박스재고"] >= min_stock]
+if min_amount > 0:
+    view = view[view["재고금액"] >= min_amount]
 for k in selected:
     s = col_status.get(k, "(전체)")
     if s != "(전체)":
@@ -180,7 +188,8 @@ disp = view_reset[base_cols + selected].rename(columns=um.CHANNEL_LABEL)
 
 filter_sig = hash((tuple(selected),
                    tuple(col_status.get(k, "(전체)") for k in selected),
-                   um._nfc(search) if search else "", show_excluded, len(view_reset)))
+                   um._nfc(search) if search else "", show_excluded,
+                   min_stock, min_amount, len(view_reset)))
 event = st.dataframe(
     disp,
     use_container_width=True,
