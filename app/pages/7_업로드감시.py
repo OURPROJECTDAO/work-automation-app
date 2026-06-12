@@ -194,7 +194,46 @@ else:
     tag = f"{len(selected)}채널"
 st.download_button("📥 CSV 다운로드 (선택 또는 현재 화면)",
                    buf.getvalue().encode("utf-8-sig"),
-                   file_name=f"업로드감시_{tag}.csv", mime="text/csv")
+                   file_name=f"업로드감시_{tag}.csv", mime="text/csv", key="um_csv_dl")
+
+# ── 이미지 포함 CSV (대표 A1 / 상세 B1 실검사) ───────────────────────────────
+if "um_img_cache" not in st.session_state:
+    st.session_state.um_img_cache = {}
+
+
+def _probe_view(codes):
+    cache = st.session_state.um_img_cache
+    todo = sorted({um._nfc(c) for c in codes if um._nfc(c) and um._nfc(c) not in cache})
+    if todo:
+        with st.spinner(f"{len(todo)}개 관리코드 이미지 실검사 중..."):
+            cache.update(um.probe_images(todo))
+    return cache
+
+
+st.caption("🖼 대표(A1)·상세(B1) 이미지 유무·확장자·URL을 gi.esmplus.com에서 실검사해 CSV에 추가합니다 "
+           "(관리코드 기준, 빈 관리코드는 제외). 같은 관리코드는 세션 내 재검사 안 함.")
+if st.button("🖼 이미지 확인 후 CSV 만들기 (선택 또는 현재 화면)"):
+    cache = _probe_view(csv_src["관리코드"].tolist())
+    enr = csv_src[base_cols].copy()
+    for ic in um.IMG_COLS:
+        enr[ic] = csv_src["관리코드"].map(lambda m, ic=ic: cache.get(um._nfc(m), {}).get(ic, ""))
+    for ch in selected:
+        enr[um.CHANNEL_LABEL[ch]] = csv_src[ch].values
+    ibuf = StringIO()
+    enr.to_csv(ibuf, index=False)
+    st.session_state["um_img_csv"] = ibuf.getvalue().encode("utf-8-sig")
+    st.session_state["um_img_tag"] = tag
+    a_o = int((enr["대표이미지유무"] == "O").sum())
+    b_o = int((enr["상세이미지유무"] == "O").sum())
+    st.session_state["um_img_summary"] = (a_o, len(enr) - a_o, b_o, len(enr) - b_o)
+
+if st.session_state.get("um_img_csv"):
+    s = st.session_state["um_img_summary"]
+    st.caption(f"대표(A1) 있음 **{s[0]}** · 없음 {s[1]}  /  상세(B1) 있음 **{s[2]}** · 없음 {s[3]} "
+               "— 전부 '없음'이면 배포 환경에서 gi.esmplus.com 접근이 막힌 것일 수 있습니다.")
+    st.download_button("📥 이미지 포함 CSV 다운로드", st.session_state["um_img_csv"],
+                       file_name=f"업로드감시_{st.session_state.get('um_img_tag','전체')}_이미지.csv",
+                       mime="text/csv", key="um_img_dl")
 
 st.divider()
 st.subheader("🚫 채널별 업로드제외 (등록 / 해제)")
