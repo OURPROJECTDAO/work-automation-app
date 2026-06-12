@@ -174,11 +174,28 @@ st.caption(
 committed = None
 flash = None
 with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
-    up = st.file_uploader(f"{channel} 상품관리 다운로드 (.xlsx 전체 업로드)", type=["xlsx"], key=f"up_{key}")
-    if up is not None:
-        up_bytes = up.getvalue()
-        new_recs = cmm.parse_download(up_bytes, cfg)
-        st.write(f"업로드 파싱: **{len(new_recs):,}건**")
+    multi = cfg.get("multi_file", False)   # ESM: 다운로드 500상품 한도 → 여러 배치 한번에
+    up = st.file_uploader(
+        f"{channel} 상품관리 다운로드 (.xlsx 전체 업로드)"
+        + ("  — 여러 배치 파일을 한 번에 올리면 자동 병합" if multi else ""),
+        type=["xlsx"], key=f"up_{key}", accept_multiple_files=multi)
+    files = (up or []) if multi else ([up] if up is not None else [])
+    if files:
+        up_bytes = files[0].getvalue()      # raw 저장용(대표). multi(ESM)는 raw 미사용(모니터 전용)
+        new_recs = []
+        for f in files:                      # 여러 파일 파싱·이어붙이기(파일내 지마켓필터·dedup은 parse가 처리)
+            new_recs += cmm.parse_download(f.getvalue(), cfg)
+        dk = cfg.get("dedup_key")            # 다중파일 교차 중복제거(keep first)
+        if dk:
+            _seen, _uniq = set(), []
+            for r in new_recs:
+                k = r.get(dk)
+                if k in _seen:
+                    continue
+                _seen.add(k); _uniq.append(r)
+            new_recs = _uniq
+        st.write(f"업로드 파싱: **{len(new_recs):,}건**"
+                 + (f" ({len(files)}개 파일 병합)" if multi and len(files) > 1 else ""))
         if not _pat():
             st.error("저장용 PAT(st.secrets GITHUB_PAT)가 없어 커밋할 수 없습니다.")
         else:
@@ -187,27 +204,30 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
             native_raw = cfg.get("price_form", {}).get("mode") == "filter"
             b1, b2 = st.columns(2)
             if b1.button("전체 교체 저장", type="primary", use_container_width=True,
-                         help="최신 전체 다운로드로 덮어쓰기 (신규+가격변동 반영) + 원본양식 저장"):
+                         help="최신 전체 다운로드로 덮어쓰기 (신규+가격변동 반영)"
+                              + ("" if multi else " + 원본양식 저장")):
                 meta = _commit_listing(key, new_recs)
-                _commit_raw(key, up_bytes)          # 원본 양식(전체 컬럼) 저장
+                if not multi:                # multi(ESM)=모니터전용 → raw 불요
+                    _commit_raw(key, up_bytes)          # 원본 양식(전체 컬럼) 저장
                 _load_listing.clear()
                 committed = new_recs
                 flash = f"전체 교체 완료 — {meta['rows']:,}건 ({meta['updated_at']})"
             _merge_help = ("이 채널은 네이티브 포맷 보존을 위해 '전체 교체'만 사용합니다 "
                            "(신규만 추가=openpyxl 저장이 원본을 inlineStr로 변질 → 업로드 거부)"
                            if native_raw else
-                           "기존 유지 + 새 상품번호만 병합 (원본양식에도 신규 행 추가)")
+                           "기존 유지 + 새 상품번호만 병합 (기존 상품의 가격변동은 미반영 → 갱신은 '전체 교체')")
             if b2.button("신규만 추가", use_container_width=True,
                          disabled=native_raw, help=_merge_help):
                 cur, _ = _load_listing(key)
                 merged, added = cmm.merge_listing(cur or [], new_recs)
                 meta = _commit_listing(key, merged)
-                added_pids = {r["상품번호"] for r in new_recs} - {r["상품번호"] for r in (cur or [])}
-                rcode, rawb = _gh_bytes(_raw_path(key))
-                newraw = (up_bytes if cfg.get("consolidate")          # 알리 다중시트: openpyxl raw 병합 부적합 → 최신 업로드 유지(raw 미사용)
-                          else cmm.append_rows_to_raw(rawb, up_bytes, added_pids, cfg)
-                          if (rcode == 200 and rawb) else up_bytes)
-                _commit_raw(key, newraw)
+                if not multi:                # multi(ESM)=raw 미사용 → append 생략
+                    added_pids = {r["상품번호"] for r in new_recs} - {r["상품번호"] for r in (cur or [])}
+                    rcode, rawb = _gh_bytes(_raw_path(key))
+                    newraw = (up_bytes if cfg.get("consolidate")          # 알리 다중시트: openpyxl raw 병합 부적합 → 최신 업로드 유지(raw 미사용)
+                              else cmm.append_rows_to_raw(rawb, up_bytes, added_pids, cfg)
+                              if (rcode == 200 and rawb) else up_bytes)
+                    _commit_raw(key, newraw)
                 _load_listing.clear()
                 committed = merged
                 flash = f"신규 {added:,}건 추가 — 총 {meta['rows']:,}건"
