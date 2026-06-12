@@ -122,10 +122,13 @@ selected = [k for k in KEYS if st.session_state.get(f"um_ch_{k}", True)]
 # ── 컬럼별(헤더) 상태 필터 — 선택 채널만 ──────────────────────────────────────
 col_status: dict[str, str] = {}
 if selected:
-    st.caption("컬럼 필터 (선택 채널별 상태)")
+    st.markdown("**🔎 채널 컬럼별 상태 필터** — 채널마다 보고 싶은 상태를 고르세요 "
+                "(예: 스마트스토어 = `이상없음`). 여러 채널이면 AND로 걸립니다.")
     fcols = st.columns(len(selected))
     for k, col in zip(selected, fcols):
-        col_status[k] = col.selectbox(um.CHANNEL_LABEL[k], ALL_STATUS, index=0, key=f"um_st_{k}")
+        col_status[k] = col.selectbox(
+            f"{um.CHANNEL_LABEL[k]} 상태", ALL_STATUS, index=0, key=f"um_st_{k}",
+            help=f"표의 '{um.CHANNEL_LABEL[k]}' 컬럼을 이 상태인 행만 보이게 필터합니다.")
 else:
     st.caption("채널을 하나 이상 선택하면 해당 상태 컬럼과 컬럼 필터가 표시됩니다.")
 
