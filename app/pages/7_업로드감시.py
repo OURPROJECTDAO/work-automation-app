@@ -55,41 +55,56 @@ st.dataframe(sdf, hide_index=True, use_container_width=True,
              column_config={"업로드필요": st.column_config.NumberColumn(format="localized"),
                             "품절처리필요": st.column_config.NumberColumn(format="localized")})
 
-# ── 필터 ──────────────────────────────────────────────────────────────────────
-labels = ["(전체)"] + [c[1] for c in um.CHANNELS]
-label2key = {c[1]: c[0] for c in um.CHANNELS}
-fc1, fc2, fc3 = st.columns([2, 2, 3])
-ch_label = fc1.selectbox("채널", labels, index=0)
-status_pick = fc2.selectbox("상태", ["업로드필요", "품절처리필요", "(전체 상태)"], index=0)
-search = fc3.text_input("🔍 검색", placeholder="관리코드 · 상품코드 · 상품명 (부분일치)",
-                        label_visibility="collapsed")
+# ── 채널 선택 (체크박스 + 전체 선택/해제) ────────────────────────────────────
+ALL_STATUS = ["(전체)", um.ST_NEED_UP, um.ST_OK, um.ST_NEED_SOLD, um.ST_SKIP]
 
+
+def _toggle_all_channels():
+    all_on = all(st.session_state.get(f"um_ch_{k}", True) for k in KEYS)
+    for k in KEYS:
+        st.session_state[f"um_ch_{k}"] = not all_on
+
+
+tcol, _ = st.columns([1, 5])
+tcol.button("전체 선택/해제", on_click=_toggle_all_channels, use_container_width=True)
+ch_boxes = st.columns(len(um.CHANNELS))
+for (k, label, _au), col in zip(um.CHANNELS, ch_boxes):
+    col.checkbox(label, value=True, key=f"um_ch_{k}")
+selected = [k for k in KEYS if st.session_state.get(f"um_ch_{k}", True)]
+
+# ── 컬럼별(헤더) 상태 필터 — 선택 채널만 ──────────────────────────────────────
+col_status: dict[str, str] = {}
+if selected:
+    st.caption("컬럼 필터 (선택 채널별 상태)")
+    fcols = st.columns(len(selected))
+    for k, col in zip(selected, fcols):
+        col_status[k] = col.selectbox(um.CHANNEL_LABEL[k], ALL_STATUS, index=0, key=f"um_st_{k}")
+else:
+    st.caption("채널을 하나 이상 선택하면 해당 상태 컬럼과 컬럼 필터가 표시됩니다.")
+
+search = st.text_input("🔍 검색", placeholder="관리코드 · 상품코드 · 상품명 (부분일치)",
+                       label_visibility="collapsed")
+
+# ── 행 필터 (선택 채널 상태 AND + 검색) ───────────────────────────────────────
 view = df.copy()
-ch_key = label2key.get(ch_label)
-if ch_key:                                    # 특정 채널
-    if status_pick == "업로드필요":
-        view = view[view[ch_key] == um.ST_NEED_UP]
-    elif status_pick == "품절처리필요":
-        view = view[view[ch_key] == um.ST_NEED_SOLD]
-else:                                         # 전체 채널 = 합집합 기준
-    if status_pick == "업로드필요":
-        view = view[(view[KEYS] == um.ST_NEED_UP).any(axis=1)]
-    elif status_pick == "품절처리필요":
-        view = view[(view[KEYS] == um.ST_NEED_SOLD).any(axis=1)]
-
+for k in selected:
+    s = col_status.get(k, "(전체)")
+    if s != "(전체)":
+        view = view[view[k] == s]
 if search:
     q = um._nfc(search).lower()
     hay = (view["관리코드"].astype(str) + " ||| " + view["상품코드"].astype(str)
            + " ||| " + view["상품명"].astype(str)).str.lower()
     view = view[hay.str.contains(q, regex=False, na=False)]
 
-# 표시: 기본정보 + 채널상태(선택 채널을 앞으로). 채널키→라벨 헤더.
+# 표시: 기본정보 + 선택 채널 컬럼(재고금액 옆). 채널키→라벨 헤더.
 base_cols = ["상품코드", "관리코드", "상품명", "박스재고", "박스매입가", "재고금액"]
-chan_cols = ([ch_key] if ch_key else []) + [k for k in KEYS if k != ch_key]
 view_reset = view.reset_index(drop=True)
-disp = view_reset[base_cols + chan_cols].rename(columns=um.CHANNEL_LABEL)
+disp = view_reset[base_cols + selected].rename(columns=um.CHANNEL_LABEL)
 
-filter_sig = hash((ch_label, status_pick, um._nfc(search) if search else "", len(view_reset)))
+filter_sig = hash((tuple(selected),
+                   tuple(col_status.get(k, "(전체)") for k in selected),
+                   um._nfc(search) if search else "", len(view_reset)))
 event = st.dataframe(
     disp,
     use_container_width=True,
@@ -113,10 +128,15 @@ st.caption(f"표시 {len(view):,} / 전체 {len(df):,}건 · 재고금액합 {am
 
 # ── 내보내기 (CSV) ────────────────────────────────────────────────────────────
 csv_src = view_reset.iloc[sel_rows] if sel_rows else view_reset
-exp = csv_src[base_cols + list(KEYS)].rename(columns=um.CHANNEL_LABEL)
+exp = csv_src[base_cols + selected].rename(columns=um.CHANNEL_LABEL)
 buf = StringIO()
 exp.to_csv(buf, index=False)
-tag = ch_label if ch_key else "전체"
+if len(selected) == 1:
+    tag = um.CHANNEL_LABEL[selected[0]]
+elif len(selected) == len(KEYS) or not selected:
+    tag = "전체"
+else:
+    tag = f"{len(selected)}채널"
 st.download_button("📥 CSV 다운로드 (선택 또는 현재 화면)",
                    buf.getvalue().encode("utf-8-sig"),
                    file_name=f"업로드감시_{tag}.csv", mime="text/csv")
