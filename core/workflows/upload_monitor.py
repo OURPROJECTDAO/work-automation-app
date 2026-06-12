@@ -37,6 +37,7 @@ ST_OK = "이상없음"
 ST_NEED_UP = "업로드필요"
 ST_NEED_SOLD = "품절처리필요"
 ST_SKIP = "업로드불필요"
+ST_SKIP_CH = "업로드제외"      # 해당 채널 업로드x (사용자 지정, 업로드필요보다 우선)
 
 # 비판매(회계·부자재) 제외. 반품/파렛트 중분류는 명확한 비판매라 코드 제외.
 # 그 외 부자재(포장박스 '3번'·테이프·랩·환불상계 등)는 실분류(창고존, 예 '통조림-C동')에
@@ -114,6 +115,36 @@ def _load_exclude(ref_dir) -> set[str]:
     return out
 
 
+def parse_skip_text(text: str) -> set[tuple[str, str]]:
+    """upload_skip.csv 텍스트 → {(상품코드, 채널key)}. 채널별 업로드제외 쌍."""
+    import io
+    out: set[tuple[str, str]] = set()
+    if not text:
+        return out
+    for row in csv.DictReader(io.StringIO(text)):
+        sc, ch = _nfc(row.get("상품코드")), _nfc(row.get("채널"))
+        if sc and ch:
+            out.add((sc, ch))
+    return out
+
+
+def build_skip_text(pairs) -> str:
+    """{(상품코드, 채널key)} → upload_skip.csv 텍스트(헤더·정렬·dedup)."""
+    lines = ["상품코드,채널"]
+    for sc, ch in sorted(set(pairs)):
+        lines.append(f"{sc},{ch}")
+    return "\n".join(lines) + "\n"
+
+
+def _load_skip(ref_dir) -> set[tuple[str, str]]:
+    """reference/upload_skip.csv → {(상품코드, 채널key)}. 없으면 빈 set."""
+    p = Path(ref_dir) / "upload_skip.csv"
+    if not p.exists():
+        return set()
+    with open(p, encoding="utf-8-sig") as f:
+        return parse_skip_text(f.read())
+
+
 def build_uploaded_sets(ref_dir, refs: dict, keys: list[str] | None = None) -> dict[str, set[str]]:
     """채널별 업로드된 상품코드 집합. {key: set(상품코드)}."""
     keys = keys or CHANNEL_KEYS
@@ -126,17 +157,24 @@ def build_uploaded_sets(ref_dir, refs: dict, keys: list[str] | None = None) -> d
     return uploaded
 
 
-def build_gap_table(ref_dir, refs: dict | None = None) -> list[dict]:
+def build_gap_table(ref_dir, refs: dict | None = None,
+                    skip_pairs: set | None = None) -> list[dict]:
     """업로드감시 메인 테이블 (재고금액 desc).
 
     각 row: 상품코드·관리코드·상품명·박스재고·박스매입가·재고금액 + 채널키별 상태.
-    상태 = 이상없음 / 업로드필요 / 품절처리필요 / 업로드불필요.
-    노이즈(재고≤0 & 어디에도 미업로드) 행은 제외.
+    상태 = 이상없음 / 업로드필요 / 품절처리필요 / 업로드불필요 / 업로드제외.
+    - 노이즈(재고≤0 & 어디에도 미업로드) 행은 제외.
+    - 채널별 업로드제외(skip): (상품코드,채널) 쌍은 그 채널이 '업로드필요'일 때 '업로드제외'로 덮음(우선).
+      skip_pairs 인자가 있으면 그걸 쓰고(페이지 라이브 read), 없으면 reference/upload_skip.csv.
     """
     if refs is None:
         refs = load_references(ref_dir)
     uploaded = build_uploaded_sets(ref_dir, refs)
     exclude = _load_exclude(ref_dir)
+    skip = _load_skip(ref_dir) if skip_pairs is None else set(skip_pairs)
+    skip_by_sc: dict[str, set[str]] = {}
+    for sc, ch in skip:
+        skip_by_sc.setdefault(sc, set()).add(ch)
 
     rows: list[dict] = []
     for sc, r in refs["pm_by_prod"].items():
@@ -147,6 +185,7 @@ def build_gap_table(ref_dir, refs: dict | None = None) -> list[dict]:
         any_up = any(sc in uploaded[k] for k in CHANNEL_KEYS)
         if stock <= 0 and not any_up:
             continue  # 노이즈 제외
+        sc_skip = skip_by_sc.get(sc, set())
         row = {
             "상품코드": sc,
             "관리코드": _nfc(r.get("관리코드")),
@@ -158,24 +197,26 @@ def build_gap_table(ref_dir, refs: dict | None = None) -> list[dict]:
         for key in CHANNEL_KEYS:
             up = sc in uploaded[key]
             if stock > 0:
-                row[key] = ST_OK if up else ST_NEED_UP
+                stt = ST_OK if up else ST_NEED_UP
             else:
-                row[key] = ST_NEED_SOLD if up else ST_SKIP
+                stt = ST_NEED_SOLD if up else ST_SKIP
+            if stt == ST_NEED_UP and key in sc_skip:   # 채널별 업로드제외 우선
+                stt = ST_SKIP_CH
+            row[key] = stt
         rows.append(row)
     rows.sort(key=lambda x: x["재고금액"], reverse=True)
     return rows
 
 
 def channel_summary(rows: list[dict]) -> list[dict]:
-    """채널별 라이트 KPI: 미업로드 건수(+ 품절처리 건수, 재고금액 합은 표에).
-
-    returns [{key, label, 업로드필요, 품절처리필요}].
-    """
+    """채널별 라이트 KPI: 업로드필요 · 품절처리필요 · 업로드제외 건수."""
     out = []
     for key, label, _ in CHANNELS:
         need = sum(1 for r in rows if r[key] == ST_NEED_UP)
         sold = sum(1 for r in rows if r[key] == ST_NEED_SOLD)
-        out.append({"key": key, "label": label, "업로드필요": need, "품절처리필요": sold})
+        skip = sum(1 for r in rows if r[key] == ST_SKIP_CH)
+        out.append({"key": key, "label": label,
+                    "업로드필요": need, "품절처리필요": sold, "업로드제외": skip})
     return out
 
 
