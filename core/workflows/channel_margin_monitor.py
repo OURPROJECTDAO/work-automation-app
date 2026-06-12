@@ -205,6 +205,33 @@ CHANNEL_CONFIG: dict[str, dict] = {
             "int_fields": ["카테고리코드", "재고수량"],   # 숫자 셀로 기입(텍스트 '103412' 방지)
         },
     },
+    "알리": {
+        "key": "ali",
+        "commission": 0.09,        # 9% 단일 (골든 F=판매가×0.91 전건 검증)
+        "ship_settle": 0.967,
+        "real_ship": 2700,         # 스마트스토어 표준 (골든 3000·합포묶음+700 미채택)
+        "ship_fee_const": 0,       # 배송비 항상 0 (골든 E 전건 0)
+        "baseline_col": "알리",
+        "apply_floor": True,
+        "n_source": "ref",         # 합포 N = hapo_multiplier(알리상품번호) — 골든 N과 677/677 일치
+        # 알리 전용 정제(매크로 ALI상품매크로V2 자동화): AliExpress 대량등록 export는
+        #   카테고리별 다중시트(+각 *_hide 숨김시트, global_hide) + 다단헤더(r1 그룹·r2 라벨·r3 옵션필수·r4~5 설명/예시).
+        #   보이는 카테고리 시트만 통합 → 헤더행(r2) 라벨로 4컬럼 추출(id·*제품 이름·*제품 소매 가격·SKU 코드).
+        "consolidate": {
+            "header_row": 2,
+            "data_start": 5,          # 매크로 startRow=5. r5 '--' 예시행은 require_numeric_id로 제거.
+            "skip_sheets": ["지침"],
+            "require_numeric_id": True,  # 알리상품번호(16자리 숫자)만 — 예시 '--'/설명행 제외
+            "labels": {               # 레코드필드 → r2 헤더 라벨
+                "상품번호": "id",
+                "상품명": "*제품 이름",
+                "판매가": "*제품 소매 가격",
+                "코드": "SKU 코드",
+            },
+        },
+        # consolidate 채널은 cols/sheet 미사용(다중시트). 즉시할인·포인트·배송비·바코드·정가 없음.
+        # 가격변경 미구현(AliExpress 가격/재고 업로드도 동일 다중시트 양식 → 별도 검증 후).
+    },
 }
 
 
@@ -409,6 +436,53 @@ def _ranges_desc(nums: list) -> list:
 
 
 # ── 다운로드 파싱 ───────────────────────────────────────────────────────────
+def _consolidate_parse(wb, cfg: dict, con: dict) -> list[dict]:
+    """알리 전용 정제: AliExpress 대량등록 export(카테고리별 다중시트+다단헤더)를
+    매크로(ALI상품매크로V2: CopyDataFromAnotherWorkbook) 그대로 자동 통합.
+
+    - 보이는 시트만(숨김 *_hide·global_hide 자동 제외), con['skip_sheets'] 제외.
+    - con['header_row'] 행에서 라벨로 컬럼 위치 조회(시트마다 위치 달라도 안전).
+    - con['data_start']부터 con['labels'] {레코드필드: 헤더라벨} 4종 추출.
+    - require_numeric_id: 알리상품번호 비숫자(예시 '--' 행) 제외.
+    배송비·즉시할인·포인트·정가·바코드 컬럼 없음 → 상수/0 처리(식봄형).
+    """
+    labels = con["labels"]
+    hr, ds = con["header_row"], con["data_start"]
+    skip = set(con.get("skip_sheets", []))
+    req_num = con.get("require_numeric_id", False)
+    ship_const = cfg.get("ship_fee_const")
+    recs = []
+    for ws in wb.worksheets:
+        if ws.sheet_state != "visible":      # _hide·global_hide(숨김) 제외 — 매크로 xlSheetVisible 동치
+            continue
+        if ws.title in skip:
+            continue
+        hmap: dict[str, int] = {}
+        for c in range(1, ws.max_column + 1):
+            lbl = _nfc(ws.cell(hr, c).value)
+            if lbl and lbl not in hmap:
+                hmap[lbl] = c
+        if not all(lab in hmap for lab in labels.values()):   # 라벨 누락 시트 skip(빈/비대상)
+            continue
+        for r in range(ds, ws.max_row + 1):
+            raw_id = ws.cell(r, hmap[labels["상품번호"]]).value
+            if raw_id in (None, ""):
+                continue
+            pid = _pid(raw_id)
+            if req_num and not pid.isdigit():    # 예시행('--') 등 제외
+                continue
+            recs.append({
+                "상품번호": pid,
+                "코드": _nfc(ws.cell(r, hmap[labels["코드"]]).value),
+                "상품명": _nfc(ws.cell(r, hmap[labels["상품명"]]).value),
+                "판매가": _num(ws.cell(r, hmap[labels["판매가"]]).value),
+                "배송비": float(ship_const) if ship_const is not None else 0.0,
+                "즉시할인": 0.0, "포인트": 0.0, "정가": 0.0,
+                "바코드": None, "오퍼코드": "", "옵션코드": "",
+            })
+    return recs
+
+
 def parse_download(file, cfg: dict) -> list[dict]:
     """채널 상품관리 다운로드(.xlsx) → 레코드 리스트.
 
@@ -419,6 +493,9 @@ def parse_download(file, cfg: dict) -> list[dict]:
     """
     src = BytesIO(file) if isinstance(file, (bytes, bytearray)) else file
     wb = load_workbook(src, data_only=True)  # read_only 금지(pitfalls)
+    con = cfg.get("consolidate")
+    if con:                                   # 알리: 카테고리별 다중시트+다단헤더 → 정제 통합(매크로 대체)
+        return _consolidate_parse(wb, cfg, con)
     ws = _pick_ws(wb, cfg)
     col = cfg["cols"]
     ship_const = cfg.get("ship_fee_const")
