@@ -345,8 +345,9 @@ DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형"
            "매입가", "판매가", "배송비", "정산액", "마진율", "기준마진율", "탐지", "권장가/제한", "비고"]
 
 # ── 선택 — st.dataframe 다중행 선택(헤더 체크박스=전체선택 + 개별, 현재 필터/검색 기준) ──
-filter_sig = hash((tuple(sorted(pick)), only_under, only_zero, only_floor, only_miss, q))
 view_reset = view.reset_index(drop=True)
+# 키에 행 수 포함 → 데이터/필터로 행 수가 바뀌면 위젯 리셋(어긋난 선택 복원 방지)
+filter_sig = hash((tuple(sorted(pick)), only_under, only_zero, only_floor, only_miss, q, len(view_reset)))
 
 event = st.dataframe(
     view_reset[DISPLAY],
@@ -357,7 +358,9 @@ event = st.dataframe(
     key=f"cmm_df_{key}_{filter_sig}",
     column_config=_col_config(cfg),
 )
-sel_rows = event.selection.rows if event and getattr(event, "selection", None) else []
+_raw_sel = event.selection.rows if event and getattr(event, "selection", None) else []
+# 데이터 변동/rerun으로 범위를 벗어난 선택 인덱스 방어(IndexError: positional indexers out-of-bounds)
+sel_rows = [i for i in _raw_sel if 0 <= i < len(view_reset)]
 sel_pids = set(view_reset.iloc[sel_rows]["상품번호"].tolist()) if sel_rows else set()
 
 st.caption(f"표시 {len(view):,} / 전체 {len(df):,}건 · ✅ 선택 **{len(sel_pids):,}건** "
