@@ -5,7 +5,10 @@
 재고·매입가 = 상품관리(product_master). 키=상품코드, 우선순위=재고금액(박스재고×박스매입가).
 근거 = KB workflows/upload-monitor.md (ADR 0017).
 """
+import base64
+import json
 import sys
+import urllib.request
 from io import StringIO
 from pathlib import Path
 
@@ -17,6 +20,40 @@ import streamlit as st
 from core.workflows import upload_monitor as um
 
 _REF = Path(__file__).parent.parent.parent / "reference"
+_APP_REPO = "OURPROJECTDAO/work-automation-app"
+_SKIP_PATH = "reference/upload_skip.csv"
+
+
+def _pat():
+    return st.secrets.get("GITHUB_PAT", "")
+
+
+def _gh(path, method="GET", data=None, raw=False):
+    url = f"https://api.github.com/repos/{_APP_REPO}/contents/{path}"
+    req = urllib.request.Request(url, method=method)
+    if _pat():
+        req.add_header("Authorization", f"Bearer {_pat()}")
+    req.add_header("Accept", "application/vnd.github.raw" if raw else "application/vnd.github+json")
+    if data is not None:
+        req.data = json.dumps(data).encode()
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, (r.read().decode() if raw else json.load(r))
+    except urllib.error.HTTPError as e:
+        return e.code, (e.read().decode() if raw else json.loads(e.read().decode() or "{}"))
+
+
+def _commit_skip(new_text, msg):
+    if not _pat():
+        return False, "저장용 PAT(st.secrets GITHUB_PAT)가 없어 커밋할 수 없습니다."
+    code, meta = _gh(_SKIP_PATH)
+    sha = meta.get("sha") if code == 200 else None
+    body = {"message": msg, "content": base64.b64encode(new_text.encode()).decode("ascii")}
+    if sha:
+        body["sha"] = sha
+    code2, _ = _gh(_SKIP_PATH, "PUT", body)
+    return code2 in (200, 201), (None if code2 in (200, 201) else f"커밋 실패: {code2}")
 
 st.title("📦 업로드감시")
 st.caption(
@@ -27,12 +64,21 @@ st.caption(
 )
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _skip_text():
+    code, text = _gh(_SKIP_PATH, raw=True)
+    return text if code == 200 else ""
+
+
+skip_set = um.parse_skip_text(_skip_text())
+
+
 @st.cache_data(ttl=600, show_spinner="재고 · 채널 등록현황 대조 중...")
-def _load():
-    return um.build_gap_table(str(_REF))
+def _load(skip_key):
+    return um.build_gap_table(str(_REF), skip_pairs=set(skip_key))
 
 
-rows = _load()
+rows = _load(frozenset(skip_set))
 if not rows:
     st.warning("데이터가 없습니다. 상품관리(product_master)와 채널 listing 저장본을 확인하세요.")
     st.stop()
@@ -48,15 +94,16 @@ k1.metric("감시대상 상품", f"{len(df):,}")
 k2.metric("업로드필요", f"{need_any:,}", help="한 채널 이상에서 업로드필요")
 k3.metric("품절처리필요", f"{sold_any:,}", help="재고0인데 채널엔 등록·판매 중")
 
-st.markdown("**채널별 미업로드 / 품절처리 건수**")
-sdf = pd.DataFrame(um.channel_summary(rows))[["label", "업로드필요", "품절처리필요"]].rename(
-    columns={"label": "채널"})
+st.markdown("**채널별 미업로드 / 품절처리 / 업로드제외 건수**")
+sdf = pd.DataFrame(um.channel_summary(rows))[
+    ["label", "업로드필요", "품절처리필요", "업로드제외"]].rename(columns={"label": "채널"})
 st.dataframe(sdf, hide_index=True, use_container_width=True,
              column_config={"업로드필요": st.column_config.NumberColumn(format="localized"),
-                            "품절처리필요": st.column_config.NumberColumn(format="localized")})
+                            "품절처리필요": st.column_config.NumberColumn(format="localized"),
+                            "업로드제외": st.column_config.NumberColumn(format="localized")})
 
 # ── 채널 선택 (체크박스 + 전체 선택/해제) ────────────────────────────────────
-ALL_STATUS = ["(전체)", um.ST_NEED_UP, um.ST_OK, um.ST_NEED_SOLD, um.ST_SKIP]
+ALL_STATUS = ["(전체)", um.ST_NEED_UP, um.ST_OK, um.ST_NEED_SOLD, um.ST_SKIP_CH, um.ST_SKIP]
 
 
 def _toggle_all_channels():
@@ -82,11 +129,16 @@ if selected:
 else:
     st.caption("채널을 하나 이상 선택하면 해당 상태 컬럼과 컬럼 필터가 표시됩니다.")
 
-search = st.text_input("🔍 검색", placeholder="관리코드 · 상품코드 · 상품명 (부분일치)",
-                       label_visibility="collapsed")
+sc1, sc2 = st.columns([3, 2])
+search = sc1.text_input("🔍 검색", placeholder="관리코드 · 상품코드 · 상품명 (부분일치)",
+                        label_visibility="collapsed")
+show_excluded = sc2.checkbox("전채널 제외 상품 포함", value=False,
+                             help="모든 채널이 '업로드제외'인 상품(비대상)은 기본 숨김")
 
-# ── 행 필터 (선택 채널 상태 AND + 검색) ───────────────────────────────────────
+# ── 행 필터 (전채널제외 숨김 + 선택 채널 상태 AND + 검색) ─────────────────────
 view = df.copy()
+if not show_excluded:
+    view = view[~(view[KEYS] == um.ST_SKIP_CH).all(axis=1)]
 for k in selected:
     s = col_status.get(k, "(전체)")
     if s != "(전체)":
@@ -104,7 +156,7 @@ disp = view_reset[base_cols + selected].rename(columns=um.CHANNEL_LABEL)
 
 filter_sig = hash((tuple(selected),
                    tuple(col_status.get(k, "(전체)") for k in selected),
-                   um._nfc(search) if search else "", len(view_reset)))
+                   um._nfc(search) if search else "", show_excluded, len(view_reset)))
 event = st.dataframe(
     disp,
     use_container_width=True,
@@ -141,5 +193,43 @@ st.download_button("📥 CSV 다운로드 (선택 또는 현재 화면)",
                    buf.getvalue().encode("utf-8-sig"),
                    file_name=f"업로드감시_{tag}.csv", mime="text/csv")
 
-st.info("스마트스토어·ESM **등록폼 자동생성(L4)** 과 비판매 제외목록 편집은 다음 단계에서 추가됩니다. "
-        "지금은 채널별 갭을 CSV로 받아 활용할 수 있습니다.")
+st.divider()
+st.subheader("🚫 채널별 업로드제외 (등록 / 해제)")
+st.caption("표에서 상품을 선택하고 위 채널 체크박스로 대상 채널을 고른 뒤 등록/해제합니다. "
+           "업로드제외는 '업로드필요'보다 우선 표시되며, 모든 채널이 제외된 상품은 기본 숨김됩니다. "
+           "해제하면 다시 '업로드필요'로 돌아옵니다.")
+
+if not _pat():
+    st.warning("저장용 PAT(st.secrets GITHUB_PAT)가 없어 등록/해제를 커밋할 수 없습니다.")
+elif not sel_codes:
+    st.info("표에서 상품을 1개 이상 선택하세요.")
+elif not selected:
+    st.info("위 채널 체크박스에서 대상 채널을 1개 이상 선택하세요.")
+else:
+    pairs = [(sc, ch) for sc in sel_codes for ch in selected]
+    chips = " · ".join(um.CHANNEL_LABEL[c] for c in selected)
+    st.write(f"대상: **{len(sel_codes)}개 상품 × {len(selected)}채널 = {len(pairs)}쌍**  ({chips})")
+    with st.expander(f"대상 (상품코드 × 채널) 미리보기 — {len(pairs)}쌍"):
+        st.dataframe(pd.DataFrame([{"상품코드": sc, "채널": um.CHANNEL_LABEL[ch]} for sc, ch in pairs]),
+                     hide_index=True, use_container_width=True)
+    bcol1, bcol2 = st.columns(2)
+    if bcol1.button("🚫 업로드제외 등록", use_container_width=True, type="primary"):
+        ok, err = _commit_skip(um.build_skip_text(skip_set | set(pairs)),
+                               f"upload-monitor: 업로드제외 등록 {len(pairs)}쌍")
+        if ok:
+            _skip_text.clear(); _load.clear()
+            st.success(f"{len(pairs)}쌍 업로드제외 등록 완료.")
+            st.rerun()
+        else:
+            st.error(err)
+    if bcol2.button("↩️ 업로드제외 해제 (다시 업로드모드)", use_container_width=True):
+        ok, err = _commit_skip(um.build_skip_text(skip_set - set(pairs)),
+                               f"upload-monitor: 업로드제외 해제 {len(pairs)}쌍")
+        if ok:
+            _skip_text.clear(); _load.clear()
+            st.success(f"{len(pairs)}쌍 해제 완료 — 다시 업로드모드.")
+            st.rerun()
+        else:
+            st.error(err)
+
+st.info("스마트스토어·ESM 등록폼 자동생성(L4)은 다음 단계입니다. 지금은 채널별 갭을 CSV로 활용하세요.")
