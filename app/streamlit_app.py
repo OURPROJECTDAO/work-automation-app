@@ -29,6 +29,7 @@ pg = st.navigation({
     ],
     "연동데이터관리": [
         st.Page(_N / "1_상품관리.py", title="상품관리", icon="🔗"),
+        st.Page(_N / "2_데이터현황.py", title="데이터현황", icon="📚"),
     ],
     " ": [
         st.Page(_P / "3_대시보드.py", title="대시보드", icon="📊"),
