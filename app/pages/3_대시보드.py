@@ -23,6 +23,7 @@ import streamlit as st
 
 from core.dashboard import store
 from core.dashboard.sales_data import make_attr_lookup, make_box_lookup, make_classifier, parse_sales
+from core.intelligence import ship_alloc
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_REPO = "OURPROJECTDAO/work-automation-app"
@@ -84,6 +85,18 @@ def load_sales(pat: str, repo: str) -> pd.DataFrame:
     df["박스내품"] = df["관리코드"].map(boxq)
     df["연도"] = df["거래일자"].dt.year
     return df
+
+
+@st.cache_data(ttl=3600, show_spinner="송장 실배분 계산 중...")
+def load_ship_rate(pat: str, repo: str) -> dict:
+    """EA 송장그룹 → 택배강도(박스/낱개) + 00-12 정합 스케일. (P2 실측 마진)"""
+    from core.intelligence import orders as _orders
+    od = _orders.read_all(pat, repo)
+    if od.empty:
+        return {"rate": {}, "ch_rate": {}, "reconcile": {},
+                "stats": {"boxes": 0.0, "codes": 0, "months": [], "covered_pieces": 0.0}}
+    pm = pd.read_csv(_REF / "product_master.csv", dtype=str, encoding="utf-8-sig")
+    return ship_alloc.compute_ship_rate(od, load_sales(pat, repo), make_box_lookup(pm))
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -651,9 +664,9 @@ def _render_online_margin(pat: str, repo: str) -> None:
     if df.empty:
         st.info("적재된 매출 데이터가 없습니다. [➕ 데이터 추가] 탭에서 파일을 올려주세요.")
         return
-    st.caption("**'온라인' 그룹 거래처 한정 · 상품별 추정 마진율.** "
-               "택배비를 `실택배비 × 수량 ÷ (합포수량×내품수)`로 상품에 배분 추정하고, "
-               "채널 보정계수(실제송장÷추정송장)로 실제 택배비 총액에 맞춥니다. 절대값보단 상품 간 비교용. "
+    st.caption("**'온라인' 그룹 거래처 한정 · 상품별 마진율.** "
+               "택배비를 EasyAdmin **송장그룹(실제 박스)** 으로 상품에 실배분하고, "
+               "채널×월 총액을 ERP 00-12(실제 booked)에 정합시킵니다. EA 미경유 채널은 추정 fallback. "
                "(온라인 채널은 [👥 거래처 그룹] 탭에서 '온라인' 그룹으로 지정)")
 
     gmap = load_group_map(pat, repo)
@@ -677,7 +690,9 @@ def _render_online_margin(pat: str, repo: str) -> None:
     unit = 2500 if "2,500" in fee_label else 3000
     cca, ccb = st.columns(2)
     with cca:
-        corr = st.toggle("채널 보정계수 적용 (권장)", value=True, key="om_corr")
+        use_actual = st.toggle("실측 송장 사용 (EA, 권장)", value=True, key="om_actual",
+                               help="EasyAdmin 송장그룹으로 택배비 실배분 + 00-12 정합. "
+                                    "끄면 기존 추정(수량÷내품×보정계수).")
     with ccb:
         d2_label = st.selectbox("× 비교 (열, 선택)",
                                 ["(없음)"] + [x for x in ["거래처", "관리코드", "상품명", "세분류"]
@@ -729,20 +744,24 @@ def _render_online_margin(pat: str, repo: str) -> None:
 
     box = view["관리코드"].astype(str) == "00-12"
     prod = view[~box].copy()
+    # 기존 추정 (EA 미경유·실측 미사용 시 fallback): 수량÷(합포수량×내품) × 채널 보정계수 k
     hap = prod["합포수량"].fillna(1.0)
     hap = hap.where(hap > 0, 1.0)
     boxn = prod["박스내품"].where(prod["박스내품"] > 0, 1.0)
     prod["_송장"] = prod["수량"] / (hap * boxn)
-    추정송장 = prod["_송장"].sum()
-    실제송장 = view.loc[box, "수량"].sum()
-    if corr:
-        실제_s = view.loc[box].groupby("상호명", observed=True)["수량"].sum()
-        추정_s = prod.groupby("상호명", observed=True)["_송장"].sum()
-        k_s = (실제_s.reindex(추정_s.index).fillna(0.0) / 추정_s.where(추정_s != 0)).fillna(1.0)
-        prod["_k"] = prod["상호명"].map(k_s).fillna(1.0)
+    실제_s = view.loc[box].groupby("상호명", observed=True)["수량"].sum()
+    추정_s = prod.groupby("상호명", observed=True)["_송장"].sum()
+    k_s = (실제_s.reindex(추정_s.index).fillna(0.0) / 추정_s.where(추정_s != 0)).fillna(1.0)
+    prod["_k"] = prod["상호명"].map(k_s).fillna(1.0)
+    prod["_택배_추정"] = prod["_송장"] * unit * prod["_k"]
+    # 실측 (P2): EA 송장그룹 실배분 + 00-12 정합 (EA 미경유 채널/월은 NaN → 추정 fallback)
+    if use_actual:
+        ship = load_ship_rate(pat, repo)
+        prod["_택배_실측"] = ship_alloc.attach_actual_ship(prod, ship, float(unit), reconcile=True)
     else:
-        prod["_k"] = 1.0
-    prod["_택배"] = prod["_송장"] * unit * prod["_k"]
+        prod["_택배_실측"] = float("nan")
+    prod["_실측"] = prod["_택배_실측"].notna()
+    prod["_택배"] = prod["_택배_실측"].where(prod["_실측"], prod["_택배_추정"])
     prod["_매입"] = prod["판매금액"] - prod["판매이익"]
     prod["_순"] = prod["판매이익"] - prod["_택배"]
 
@@ -752,14 +771,19 @@ def _render_online_margin(pat: str, repo: str) -> None:
     t매입 = t매출 - t판이
     t순 = t판이 - t택배
     t률 = (t순 / t매입 * 100) if t매입 else 0.0
+    실측액 = prod.loc[prod["_실측"], "_택배"].sum()
+    cov = (실측액 / t택배 * 100) if t택배 else 0.0
+    tag = "실측" if use_actual else "추정"
     r = st.columns(4)
     r[0].metric("매출 (수수료 차감 후)", _won(t매출))
     r[1].metric("매입가", _won(t매입))
-    r[2].metric("순이익 (추정)", _won(t순))
-    r[3].metric("마진율 (추정)", f"{t률:.2f}%")
-    overall = (실제송장 / 추정송장) if 추정송장 else 0.0
-    st.caption(("**채널별 보정계수 적용** · " if corr else "**보정 미적용(낙관 추정)** · ")
-               + f"실제송장 {실제송장:,.0f} ÷ 추정송장 {추정송장:,.0f} = 전체 k {overall:.3f}")
+    r[2].metric(f"순이익 ({tag})", _won(t순))
+    r[3].metric(f"마진율 ({tag})", f"{t률:.2f}%")
+    if use_actual:
+        st.caption(f"**EA 송장 실측 + 00-12 정합** · 택배 {_won(t택배)} 중 실측 {cov:.0f}% "
+                   f"· 나머지 {100 - cov:.0f}%는 EA 미경유 채널 추정 fallback")
+    else:
+        st.caption("**기존 추정 모드(EA 미사용)** · 수량÷(합포수량×내품) × 채널 보정계수 k")
 
     # ── 교차탭 (행=집계기준 × 열=비교): 셀=마진율%, 합계=가중 재계산 ──
     if d2_label != "(없음)":
@@ -803,10 +827,10 @@ def _render_online_margin(pat: str, repo: str) -> None:
     g = (prod.assign(_d=prod[dim_col].astype(str))
          .groupby("_d", observed=True)
          .agg(매출=("판매금액", "sum"), 판매이익=("판매이익", "sum"),
-              추정택배=("_택배", "sum"), 수량=("수량", "sum"))
+              택배비=("_택배", "sum"), 수량=("수량", "sum"))
          .reset_index())
     g["매입가"] = g["매출"] - g["판매이익"]
-    g["순이익"] = g["판매이익"] - g["추정택배"]
+    g["순이익"] = g["판매이익"] - g["택배비"]
     _maeip = g["매입가"].astype("float64")
     g["마진율(%)"] = (g["순이익"] / _maeip.where(_maeip != 0) * 100).round(2)
     g = g.sort_values("매출", ascending=False)
@@ -815,11 +839,11 @@ def _render_online_margin(pat: str, repo: str) -> None:
         g = g.head(200)
         st.caption(f"매출 상위 200개 표시 (전체 {n}개)")
     out = g.rename(columns={"_d": dim_label})[
-        [dim_label, "매출", "매입가", "추정택배", "순이익", "마진율(%)", "수량"]].copy()
-    for c in ["매출", "매입가", "추정택배", "순이익"]:
+        [dim_label, "매출", "매입가", "택배비", "순이익", "마진율(%)", "수량"]].copy()
+    for c in ["매출", "매입가", "택배비", "순이익"]:
         out[c] = out[c].round().astype("int64")
     cfg = {c: st.column_config.NumberColumn(format="localized")
-           for c in ["매출", "매입가", "추정택배", "순이익", "수량"]}
+           for c in ["매출", "매입가", "택배비", "순이익", "수량"]}
     st.dataframe(out, use_container_width=True, hide_index=True, column_config=cfg,
                  height=min(620, 80 + 36 * min(len(out), 16)))
     st.download_button("표 CSV 내려받기", out.to_csv(index=False).encode("utf-8-sig"),
