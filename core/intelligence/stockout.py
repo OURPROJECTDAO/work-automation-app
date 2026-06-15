@@ -111,7 +111,7 @@ def forecast(pm: pd.DataFrame, depletion: dict, cadence: dict, now=None,
     exclude_midcat = {_nfc(c) for c in (exclude_midcat or set())}
     d = pm.copy()
     d.columns = [c.strip() for c in d.columns]
-    for c in ("박스내품", "최종재고", "박스", "낱개", "박스매입단가"):
+    for c in ("박스내품", "최종재고", "박스", "낱개", "박스매입단가", "매입단가"):
         if c in d.columns:
             d[c] = _num(d[c])
         else:
@@ -165,6 +165,8 @@ def forecast(pm: pd.DataFrame, depletion: dict, cadence: dict, now=None,
             reorder = False
 
         box_qty = float(r.get("박스내품", 0.0) or 0.0)
+        unit_buy = float(r.get("매입단가", 0.0) or 0.0)        # 낱개 매입단가
+        month_pieces = float(dinfo["월낱개"]) if dinfo else 0.0
         rows.append({
             "구간": band,
             "관리코드": r.get("관리코드", code),
@@ -175,7 +177,9 @@ def forecast(pm: pd.DataFrame, depletion: dict, cadence: dict, now=None,
             "박스내품": box_qty,
             "일소진(낱개)": round(daily, 2),
             "일소진(박스)": round(daily / box_qty, 3) if box_qty > 0 else round(daily, 3),
-            "월낱개": round(dinfo["월낱개"], 1) if dinfo else 0.0,
+            "일소진액(매입)": round(daily * unit_buy),       # 하루 매입가 기준 빠지는 금액
+            "월낱개": round(month_pieces, 1),
+            "월소진액(매입)": round(month_pieces * unit_buy),  # 월 매입가 기준 볼륨
             "소진예측일": (None if not np.isfinite(ttl) else round(ttl, 1)),
             "예상소진일자": (eta.date() if pd.notna(eta) else None),
             "리드타임": round(lead, 1),
@@ -187,7 +191,8 @@ def forecast(pm: pd.DataFrame, depletion: dict, cadence: dict, now=None,
         })
 
     cols = ["구간", "관리코드", "상품명", "규격", "현재고(낱개)", "박스재고", "박스내품",
-            "일소진(낱개)", "일소진(박스)", "월낱개", "소진예측일", "예상소진일자", "리드타임", "리드출처",
+            "일소진(낱개)", "일소진(박스)", "일소진액(매입)", "월낱개", "월소진액(매입)",
+            "소진예측일", "예상소진일자", "리드타임", "리드출처",
             "최근입고일", "입고횟수", "재고금액", "재발주필요"]
     df = pd.DataFrame(rows, columns=cols)
     if df.empty:
