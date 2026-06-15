@@ -108,6 +108,16 @@ def _master_lookup():
     return box, price, name
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _pc_lookup():
+    """상품코드(NFC) → 관리코드 — 송장 PC낱개 해소용."""
+    code, text = _gh_raw("reference/product_master.csv")
+    if code != 200:
+        return {}
+    df = pd.read_csv(io.BytesIO(text), dtype=str)
+    return {_nfc(sc): _nfc(mg) for sc, mg in zip(df["상품코드"], df["관리코드"]) if _nfc(sc)}
+
+
 @st.cache_data(ttl=600, show_spinner="가격이력 불러오는 중...")
 def _price_changes() -> pd.DataFrame:
     pat, repo = _data_secret()
@@ -351,15 +361,15 @@ with tabD:
         st.warning("product_master를 불러올 수 없습니다.")
     else:
         try:
-            _boxes = dm.parse_invoice_boxes(f_inv)
+            _alloc, _chb = dm.parse_invoice_shipping(f_inv, box_lookup, _pc_lookup())
             _sdf = dm.parse_cheonnyeon_sales(f_chun, box_lookup)
         except Exception as e:
             st.error(f"파싱 오류: {e}")
-            _boxes, _sdf = {}, pd.DataFrame()
+            _alloc, _chb, _sdf = {}, {}, pd.DataFrame()
         if _sdf.empty:
             st.warning("천년경영 output에서 대상 채널 데이터를 찾지 못했습니다 (시트명·형식 확인).")
         else:
-            ddf = dm.compute_daily_margin(_sdf, _boxes, master_price, name_lookup,
+            ddf = dm.compute_daily_margin(_sdf, _alloc, master_price, name_lookup,
                                           _baseline_dict(), flat_by_channel=flat_by_channel,
                                           buffer=float(buffer))
             anom = ddf[ddf["역마진"] | ddf["미달"]].reset_index(drop=True)
@@ -369,8 +379,8 @@ with tabD:
             c[1].metric("당일 마진", f"{_mar:,.0f} 원", f"{100 * _mar / _rev:.1f}%" if _rev else None)
             c[2].metric("이상 건", f"{len(anom)} 건")
             c[3].metric("역마진", f"{int(ddf['역마진'].sum())} 건")
-            _bx = " · ".join(f"{ch} {n}" for ch, n in sorted(_boxes.items(), key=lambda x: -x[1]))
-            st.caption(f"실제 박스(송장)수 — {_bx} · 합계 {sum(_boxes.values())}")
+            _bx = " · ".join(f"{ch} {n}" for ch, n in sorted(_chb.items(), key=lambda x: -x[1]))
+            st.caption(f"실제 박스(송장)수 — {_bx} · 합계 {sum(_chb.values())} · 택배는 송장 단위 배분(합포는 물류량 분할)")
             _view = st.radio("보기", ["이상치만", "전체"], horizontal=True, key="d_view")
             _show = anom if _view == "이상치만" else ddf
             if _show.empty:
@@ -383,6 +393,7 @@ with tabD:
                              column_config={
                                  "매출": st.column_config.NumberColumn("매출(net)", format="%d"),
                                  "낱개수량": st.column_config.NumberColumn("낱개", format="%d"),
+                                 "박스": st.column_config.NumberColumn("박스(송장배분)", format="%.1f"),
                                  "원가": st.column_config.NumberColumn(format="%d"),
                                  "택배": st.column_config.NumberColumn(format="%d"),
                                  "마진": st.column_config.NumberColumn(format="%d"),
