@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from core.workflows.logistics_order import get_product_master_updated
+from core.intelligence import stock_history
 
 _GITHUB_API = "https://api.github.com/repos/OURPROJECTDAO/work-automation-app/contents"
 _REF_PATH   = "reference"
@@ -17,6 +18,16 @@ _REF_PATH   = "reference"
 
 def _get_pat() -> str:
     return st.secrets.get("GITHUB_PAT", "")
+
+
+def _data_secret() -> tuple[str, str]:
+    """(pat, repo) — private data repo(이력 엔진). secrets [data] 우선, 없으면 GITHUB_PAT 폴백."""
+    repo = "OURPROJECTDAO/work-automation-data"
+    try:
+        d = st.secrets["data"]
+        return d["pat"], d.get("repo", repo)
+    except Exception:
+        return st.secrets.get("GITHUB_PAT", ""), repo
 
 
 def _github_get_sha(token: str, path: str) -> str | None:
@@ -55,6 +66,23 @@ def _save_to_github(token: str, filename: str, content_bytes: bytes, commit_msg:
     sha = _github_get_sha(token, f"{_REF_PATH}/{filename}")
     b64 = base64.b64encode(content_bytes).decode()
     _github_put(token, f"{_REF_PATH}/{filename}", b64, sha, commit_msg)
+
+
+def _accumulate_snapshot(df: pd.DataFrame, filename: str) -> None:
+    """상품관리 업로드 df를 날짜본으로 private data repo에 적립(이력 엔진 1b). 비차단·best-effort.
+
+    스냅샷일자 = 파일명 Exp{YYMMDD} 추출일(없으면 당일). master 저장과 독립 — 실패해도 저장은 유효.
+    """
+    pat, repo = _data_secret()
+    if not pat:
+        return  # data repo 미설정 — 조용히 건너뜀(이력 비활성)
+    try:
+        snap_date = stock_history.parse_snapshot_date(filename) or datetime.now().date()
+        snap = stock_history.snapshot_from_master(df, snap_date)
+        res = stock_history.ingest_snapshot(snap, pat, repo)
+        st.toast(f"📚 재고 스냅샷 적립 {snap_date} · {res['added']}행", icon="📚")
+    except Exception as e:  # 적립 실패가 상품관리 저장을 막지 않게
+        st.toast(f"⚠️ 스냅샷 적립 실패(상품관리 저장은 완료): {e}", icon="⚠️")
 
 
 # ─────────────────────────────────────────────────────────
@@ -102,6 +130,8 @@ if uploaded:
                     ts_bytes = now_str.encode("utf-8")
                     _save_to_github(token, "product_master_updated.txt", ts_bytes,
                                     "data: 상품관리 업데이트 시각 기록")
+                    # ── 이력 엔진(1b): 덮어쓰기와 같은 시점에 날짜본 적립(비차단) ──
+                    _accumulate_snapshot(df, uploaded.name)
                 st.success(f"✅ 저장 완료! ({now_str})")
                 st.rerun()
     except Exception as e:
