@@ -133,3 +133,26 @@ def as_of_value(hist, 상품코드, 수정항목, when, current=None):
     if not le.empty:
         return float(le.iloc[-1]["수정후"])
     return float(h.iloc[0]["수정전"])
+
+
+# ---- product_master 앵커 (역재생 현재값) ----
+# 수정로그 '매입단가' 축 = product_master 낱개 매입단가(컬럼 8).
+# 실데이터 확정 2026-06-15: 상품코드별 최신 '수정후' vs 낱개 일치 95.4%(880/922).
+# 불일치는 로그 종료(2026-05-29)~현재 사이 변경분(예: 미수신 6월). 박스매입단가 = 낱개 × 박스내품(917/917).
+PM_CODE_COL, PM_PURCHASE_COL = 3, 8
+
+
+def _code6(v):
+    c = _nfc(v).split(".")[0]
+    return c.zfill(6) if c.isdigit() else _nfc(v)
+
+
+def current_purchase_price(pm_df):
+    """product_master DataFrame → {상품코드(6자리): 현재 매입단가(낱개)}. 수정로그 '매입단가'와 동일 축."""
+    out = {}
+    for code, val in zip(pm_df.iloc[:, PM_CODE_COL], pm_df.iloc[:, PM_PURCHASE_COL]):
+        c = _code6(code)
+        v = _num(val)
+        if c and v is not None:
+            out[c] = v
+    return out
