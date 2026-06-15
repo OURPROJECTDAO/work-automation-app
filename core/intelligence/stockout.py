@@ -164,6 +164,7 @@ def forecast(pm: pd.DataFrame, depletion: dict, cadence: dict, now=None,
             band = B_OK
             reorder = False
 
+        box_qty = float(r.get("박스내품", 0.0) or 0.0)
         rows.append({
             "구간": band,
             "관리코드": r.get("관리코드", code),
@@ -171,8 +172,9 @@ def forecast(pm: pd.DataFrame, depletion: dict, cadence: dict, now=None,
             "규격": r.get("규격", ""),
             "현재고(낱개)": stock_pieces,
             "박스재고": box_stock,
-            "박스내품": float(r.get("박스내품", 0.0) or 0.0),
+            "박스내품": box_qty,
             "일소진(낱개)": round(daily, 2),
+            "일소진(박스)": round(daily / box_qty, 3) if box_qty > 0 else round(daily, 3),
             "월낱개": round(dinfo["월낱개"], 1) if dinfo else 0.0,
             "소진예측일": (None if not np.isfinite(ttl) else round(ttl, 1)),
             "예상소진일자": (eta.date() if pd.notna(eta) else None),
@@ -185,7 +187,7 @@ def forecast(pm: pd.DataFrame, depletion: dict, cadence: dict, now=None,
         })
 
     cols = ["구간", "관리코드", "상품명", "규격", "현재고(낱개)", "박스재고", "박스내품",
-            "일소진(낱개)", "월낱개", "소진예측일", "예상소진일자", "리드타임", "리드출처",
+            "일소진(낱개)", "일소진(박스)", "월낱개", "소진예측일", "예상소진일자", "리드타임", "리드출처",
             "최근입고일", "입고횟수", "재고금액", "재발주필요"]
     df = pd.DataFrame(rows, columns=cols)
     if df.empty:
