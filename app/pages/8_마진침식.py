@@ -25,6 +25,7 @@ from core.intelligence import margin_erosion as me
 from core.intelligence import price_history
 from core.intelligence import orders as od_mod
 from core.intelligence import purchases as buy_mod
+from core.intelligence import daily_margin as dm
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_API = "https://api.github.com/repos/OURPROJECTDAO/work-automation-app/contents"
@@ -200,7 +201,7 @@ vel = me.channel_velocity(_orders_recent(int(vel_months)), box_lookup, months=in
     if box_lookup else {"by_code_ch": {}, "by_code": {}}
 by_ch, by_code = vel["by_code_ch"], vel["by_code"]
 
-tabA, tabB, tabC = st.tabs(["🩸 이미 침식", "⏳ 곧 침식 (2C)", "📉 실판매 이상"])
+tabA, tabB, tabC, tabD = st.tabs(["🩸 이미 침식", "⏳ 곧 침식 (2C)", "📉 실판매 이상", "📅 당일 점검"])
 
 # ── 탭 A: 이미 침식 (기존 v1 + velocity 손실액) ──
 with tabA:
@@ -327,3 +328,68 @@ with tabC:
                              "역마진": st.column_config.CheckboxColumn("역마진"),
                          })
             st.download_button("📥 XLSX", _to_xlsx(cdf, "실판매이상"), "마진침식_실판매.xlsx", key="c_dl")
+
+
+# ── 탭 D: 당일 점검 (3파일 즉시 마진) ──
+with tabD:
+    st.caption("오늘 **발주·천년경영업로드·송장출력** 3파일로 당일 대략 실현마진을 즉시 점검 — *오늘 판 것 중 마진 이상한 것*. "
+               "매출=천년경영 실제기입단가(net·수수료적용) · 원가=master 매입가 · 택배=채널 flat×실제 송장수×물류량 배분. "
+               "정산 진실은 매출자료 월정산(탭C); 여긴 **당일 조기 신호**입니다.")
+    _cu = st.columns(2)
+    f_chun = _cu[0].file_uploader("천년경영업로드 output (YYMMDD.xlsx)", type=["xlsx"], key="d_chun")
+    f_inv = _cu[1].file_uploader("송장출력 (__송장MMDD.xlsx)", type=["xlsx"], key="d_inv")
+
+    _DCH = sorted(set(dm.SHEET_TO_CMM.values()))
+    with st.expander("🚚 채널 flat 택배단가 (원/박스 — 필요 시 조정)", expanded=False):
+        _fc = st.columns(4)
+        flat_by_channel = {ch: _fc[i % 4].number_input(ch, 0, 10000, dm.DEFAULT_FLAT, 100, key=f"d_flat_{ch}")
+                           for i, ch in enumerate(_DCH)}
+
+    if not (f_chun and f_inv):
+        st.info("천년경영 output·송장출력 두 파일을 올리면 당일 마진 이상치를 계산합니다. (물류팀발주서는 선택 — 재고는 두뇌②에서)")
+    elif not box_lookup:
+        st.warning("product_master를 불러올 수 없습니다.")
+    else:
+        try:
+            _boxes = dm.parse_invoice_boxes(f_inv)
+            _sdf = dm.parse_cheonnyeon_sales(f_chun, box_lookup)
+        except Exception as e:
+            st.error(f"파싱 오류: {e}")
+            _boxes, _sdf = {}, pd.DataFrame()
+        if _sdf.empty:
+            st.warning("천년경영 output에서 대상 채널 데이터를 찾지 못했습니다 (시트명·형식 확인).")
+        else:
+            ddf = dm.compute_daily_margin(_sdf, _boxes, master_price, name_lookup,
+                                          _baseline_dict(), flat_by_channel=flat_by_channel,
+                                          buffer=float(buffer))
+            anom = ddf[ddf["역마진"] | ddf["미달"]].reset_index(drop=True)
+            _rev, _mar = ddf["매출"].sum(), ddf["마진"].sum()
+            c = st.columns(4)
+            c[0].metric("당일 매출(net)", f"{_rev:,.0f} 원")
+            c[1].metric("당일 마진", f"{_mar:,.0f} 원", f"{100 * _mar / _rev:.1f}%" if _rev else None)
+            c[2].metric("이상 건", f"{len(anom)} 건")
+            c[3].metric("역마진", f"{int(ddf['역마진'].sum())} 건")
+            _bx = " · ".join(f"{ch} {n}" for ch, n in sorted(_boxes.items(), key=lambda x: -x[1]))
+            st.caption(f"실제 박스(송장)수 — {_bx} · 합계 {sum(_boxes.values())}")
+            _view = st.radio("보기", ["이상치만", "전체"], horizontal=True, key="d_view")
+            _show = anom if _view == "이상치만" else ddf
+            if _show.empty:
+                st.success("✅ 당일 역마진·기준 미달 상품이 없습니다.")
+            else:
+                _d = _show.copy()
+                for col in ("마진율", "기준마진"):
+                    _d[col] = (_d[col].astype(float) * 100).round(1)
+                st.dataframe(_d, hide_index=True, use_container_width=True, height=460,
+                             column_config={
+                                 "매출": st.column_config.NumberColumn("매출(net)", format="%d"),
+                                 "낱개수량": st.column_config.NumberColumn("낱개", format="%d"),
+                                 "원가": st.column_config.NumberColumn(format="%d"),
+                                 "택배": st.column_config.NumberColumn(format="%d"),
+                                 "마진": st.column_config.NumberColumn(format="%d"),
+                                 "마진율": st.column_config.NumberColumn("마진%", format="%.1f"),
+                                 "기준마진": st.column_config.NumberColumn("기준%", format="%.1f"),
+                                 "역마진": st.column_config.CheckboxColumn("역마진"),
+                                 "미달": st.column_config.CheckboxColumn("미달"),
+                             })
+                st.download_button("📥 XLSX", _to_xlsx(anom, "당일마진이상"),
+                                   "당일마진_이상.xlsx", key="d_dl")
