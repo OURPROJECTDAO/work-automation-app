@@ -204,13 +204,14 @@ def _show(table: pd.DataFrame, key: str, show_dead_cols=False):
         st.info("해당 조건 상품이 없습니다.")
         return
     cols = ["구간", "관리코드", "상품명", "규격", "현재고(낱개)", "박스재고", "일소진(낱개)",
-            "월낱개", "소진예측일", "예상소진일자", "리드타임", "리드출처", "최근입고일", "입고횟수",
-            "재고금액", "재발주필요"]
+            "일소진(박스)", "월낱개", "소진예측일", "예상소진일자", "리드타임", "리드출처", "최근입고일",
+            "입고횟수", "재고금액", "재발주필요"]
     view = table[cols].copy()
     st.dataframe(view, use_container_width=True, hide_index=True,
                  column_config={
                      "재고금액": st.column_config.NumberColumn(format="%d"),
                      "소진예측일": st.column_config.NumberColumn(format="%.1f"),
+                     "일소진(박스)": st.column_config.NumberColumn(format="%.2f"),
                      "재발주필요": st.column_config.CheckboxColumn(),
                  })
     st.download_button("📥 XLSX 다운로드", _to_xlsx(view),
