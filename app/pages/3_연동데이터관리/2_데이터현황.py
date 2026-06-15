@@ -60,7 +60,7 @@ if ok:
 
 rows = []
 for r in cov:
-    if r["kind"] == "monthly" and r["first"]:
+    if r["first"]:
         rows.append({"데이터": r["label"], "start": pd.Timestamp(r["first"] + "-01"),
                      "end": pd.Timestamp(cov_mod.next_month(r["last"]) + "-01"), "구분": "적재됨"})
         for g in r["gaps"]:
@@ -69,12 +69,12 @@ for r in cov:
 if rows:
     import plotly.express as px
     tdf = pd.DataFrame(rows)
-    order = [r["label"] for r in cov if r["kind"] == "monthly"]
+    order = [r["label"] for r in cov if r["first"]]
     fig = px.timeline(tdf, x_start="start", x_end="end", y="데이터", color="구분",
                       color_discrete_map={"적재됨": "#378ADD", "갭(누락)": "#E24B4A"},
                       category_orders={"데이터": order})
     fig.update_yaxes(autorange="reversed", title=None)
-    fig.update_xaxes(title=None)
+    fig.update_xaxes(title=None, tickformat="%Y-%m")
     fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
                       legend_title_text="", legend=dict(orientation="h", y=1.12))
     st.plotly_chart(fig, use_container_width=True)
