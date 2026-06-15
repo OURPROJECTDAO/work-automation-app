@@ -204,12 +204,14 @@ def _show(table: pd.DataFrame, key: str, show_dead_cols=False):
         st.info("해당 조건 상품이 없습니다.")
         return
     cols = ["구간", "관리코드", "상품명", "규격", "현재고(낱개)", "박스재고", "일소진(낱개)",
-            "일소진(박스)", "월낱개", "소진예측일", "예상소진일자", "리드타임", "리드출처", "최근입고일",
-            "입고횟수", "재고금액", "재발주필요"]
+            "일소진(박스)", "일소진액(매입)", "월낱개", "월소진액(매입)", "소진예측일", "예상소진일자",
+            "리드타임", "리드출처", "최근입고일", "입고횟수", "재고금액", "재발주필요"]
     view = table[cols].copy()
     st.dataframe(view, use_container_width=True, hide_index=True,
                  column_config={
                      "재고금액": st.column_config.NumberColumn(format="%d"),
+                     "일소진액(매입)": st.column_config.NumberColumn(format="%d"),
+                     "월소진액(매입)": st.column_config.NumberColumn(format="%d"),
                      "소진예측일": st.column_config.NumberColumn(format="%.1f"),
                      "일소진(박스)": st.column_config.NumberColumn(format="%.2f"),
                      "재발주필요": st.column_config.CheckboxColumn(),
@@ -222,15 +224,19 @@ def _show(table: pd.DataFrame, key: str, show_dead_cols=False):
 
 with tab1:
     reorder = df[df["구간"].isin([so.B_IMMINENT, so.B_SOON])].copy()
-    cc1, cc2, cc3 = st.columns(3)
-    fwd_only = cc1.toggle("현재고>0만 (곧 소진·이미소진 제외)", value=False,
+    cc1, cc2, cc3, cc4 = st.columns(4)
+    fwd_only = cc1.toggle("현재고>0만", value=False,
                           help="끄면 현재고 0/마이너스(이미 소진·오버셀)도 포함")
-    min_month = cc2.number_input("월 판매(낱개) ≥", 0, 100000, 0, step=50)
-    min_value = cc3.number_input("재고금액 ≥", 0, 100000000, 0, step=100000)
+    min_flow = cc2.number_input("월소진액(매입) ≥", 0, 100000000, 0, step=100000,
+                                help="매입가 기준 월 빠지는 금액 — 상품 간 볼륨 비교")
+    min_month = cc3.number_input("월 판매(낱개) ≥", 0, 100000, 0, step=50)
+    min_value = cc4.number_input("재고금액 ≥", 0, 100000000, 0, step=100000)
     q = st.text_input("🔎 상품명·관리코드 검색", "")
     f = reorder
     if fwd_only:
         f = f[f["현재고(낱개)"] > 0]
+    if min_flow:
+        f = f[f["월소진액(매입)"] >= min_flow]
     if min_month:
         f = f[f["월낱개"] >= min_month]
     if min_value:
@@ -256,6 +262,7 @@ with tab3:
 
 st.caption(
     "ⓘ 현재고=최종재고(낱개, =박스×박스내품+낱개). 소진=매출자료 전채널 낱개(정산 진실·이미 낱개 분해). "
+    "**소진액(매입)=소진 낱개×낱개 매입단가** — 박스 수량은 상품마다 가치가 달라, 매입원가로 환산해 볼륨을 비교(매입가 미기재 상품은 0). "
     "리드타임=매입현황 중앙 입고간격(발주→입고 실리드타임은 발주자료 적재 후 정밀화). "
     "박스재고는 흐름누적 오차가 있어 상품관리 앵커값 사용·음수는 0 처리(즉시 품절)."
 )
