@@ -36,6 +36,7 @@ pg = st.navigation({
         st.Page(_P / "6_채널마진모니터.py", title="채널마진모니터", icon="💹"),
         st.Page(_P / "7_업로드감시.py", title="업로드감시", icon="📦"),
         st.Page(_P / "8_마진침식.py", title="마진침식", icon="🩸"),
+        st.Page(_P / "9_재고지능.py", title="재고지능", icon="🔮"),
     ],
 })
 pg.run()
