@@ -562,8 +562,8 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
     # ── 품절목록 시트 ─────────────────────────────
     ws2 = wb.create_sheet("품절목록")
     cadence = cadence or {}
-    ws2.append(["관리코드", "상품명", "발주수량", "현재고", "최근 입고일", "평균매입주기(일)"])
-    for c in range(1, 7):
+    ws2.append(["관리코드", "상품명", "발주수량", "현재고", "최근 입고일", "평균매입주기(일)", "입고횟수(1년)"])
+    for c in range(1, 8):
         cell = ws2.cell(row=1, column=c)
         cell.fill = _SEC_FILL
         cell.font = _SEC_FONT
@@ -577,7 +577,9 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
         _last_s = _last.strftime("%Y-%m-%d") if (_last is not None and pd.notna(_last)) else ""
         _avg = _info.get("평균주기")
         _avg_v = round(_avg) if _avg is not None else ""
-        ws2.append([r["관리코드"], r["상품명"], r["발주수량"], int(r["현재고"]), _last_s, _avg_v])
+        _cnt = _info.get("입고횟수")
+        _cnt_v = int(_cnt) if _cnt else ""
+        ws2.append([r["관리코드"], r["상품명"], r["발주수량"], int(r["현재고"]), _last_s, _avg_v, _cnt_v])
         cf = ws2.cell(row=r_idx, column=4)
         cf.font = _OUT_FONT
         cf.fill = _OUT_FILL
@@ -585,15 +587,17 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
         ws2.cell(row=r_idx, column=3).alignment = _CENTER
         ws2.cell(row=r_idx, column=5).alignment = _CENTER
         ws2.cell(row=r_idx, column=6).alignment = _CENTER
+        ws2.cell(row=r_idx, column=7).alignment = _CENTER
         r_idx += 1
 
-    _write_border(ws2, 1, ws2.max_row, 1, 6)
+    _write_border(ws2, 1, ws2.max_row, 1, 7)
     ws2.column_dimensions["A"].width = 12
     ws2.column_dimensions["B"].width = 38
     ws2.column_dimensions["C"].width = 10
     ws2.column_dimensions["D"].width = 10
     ws2.column_dimensions["E"].width = 13
     ws2.column_dimensions["F"].width = 14
+    ws2.column_dimensions["G"].width = 11
 
     buf = io.BytesIO()
     wb.save(buf)
