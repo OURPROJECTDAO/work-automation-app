@@ -13,6 +13,7 @@ import core.workflows.onnuri_order      # noqa: F401  ← @register 트리거
 from core.workflows.registry import list_workflows, get_workflow
 import core.workflows.logistics_order as lo
 import core.workflows.cheonnyeon_upload as cy
+import core.intelligence.daily_inbox as _inbox
 
 st.title("📂 파일 처리")
 
@@ -68,6 +69,10 @@ with tab_basic:
                         "mmdd": datetime.now(_KST).strftime("%m%d"),
                         "stats": {labels.get(s, s): len(df) for s, df in sheets.items()},
                     }
+                    if invoice_bytes:   # 데일리 대시보드 자동 인계(송장출력)
+                        _inbox.push(st.session_state, _inbox.SLOT_INVOICE, invoice_bytes,
+                                    f"★★송장{datetime.now(_KST).strftime('%m%d')}.xlsx",
+                                    datetime.now(_KST).strftime("%m-%d %H:%M"))
                 except Exception as e:
                     st.session_state.pop("basic_result", None)
                     st.error(f"오류: {e}")
@@ -125,6 +130,9 @@ with tab_cy:
                         "anomalies": cy.detect_box_anomalies(sheets),
                         "name": datetime.now(_KST).strftime("%y%m%d") + ".xlsx",
                     }
+                    _inbox.push(st.session_state, _inbox.SLOT_CHEONNYEON, out,   # 데일리 대시보드 자동 인계
+                                datetime.now(_KST).strftime("%y%m%d") + ".xlsx",
+                                datetime.now(_KST).strftime("%m-%d %H:%M"))
                 except Exception as e:
                     st.session_state.pop("cy_result", None)
                     st.error(f"오류: {e}")
