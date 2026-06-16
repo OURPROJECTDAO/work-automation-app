@@ -14,6 +14,23 @@ from core.workflows.registry import list_workflows, get_workflow
 import core.workflows.logistics_order as lo
 import core.workflows.cheonnyeon_upload as cy
 import core.intelligence.daily_inbox as _inbox
+import core.intelligence.stockout_board as _sb
+
+def _seed_stockout_board(so_df):
+    """발주 품절목록 → 품절 알림판 자동 등록(데일리 대시보드·data repo 영속). 실패는 발주 흐름 비차단."""
+    try:
+        if so_df is None or len(so_df) == 0:
+            return
+        d = st.secrets["data"]
+        pat = d["pat"]; repo = d.get("repo", "OURPROJECTDAO/work-automation-data")
+        today = datetime.now(_KST).strftime("%Y-%m-%d")
+        bd = _sb.read_board(pat, repo)
+        bd, added = _sb.seed_from_stockout(bd, so_df, today)
+        if added:
+            _sb.write_board(pat, repo, bd, f"board: 발주 품절 {len(added)}건 등록 ({today})")
+    except Exception:
+        pass
+
 
 st.title("📂 파일 처리")
 
@@ -349,6 +366,7 @@ with tab_order:
                 else:
                     st.session_state["order_phase2_df"]   = result2
                     st.session_state["order_stockout_df"] = combined
+                    _seed_stockout_board(combined)
                     st.session_state.pop("order_unmatched_units", None)
                     st.session_state.pop("order_combined_df", None)
             except Exception as e:
@@ -375,6 +393,7 @@ with tab_order:
                 else:
                     st.session_state["order_phase2_df"]   = result2
                     st.session_state["order_stockout_df"] = combined2
+                    _seed_stockout_board(combined2)
                     st.session_state.pop("order_unmatched_units", None)
                     st.rerun()
 
