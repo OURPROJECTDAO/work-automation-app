@@ -224,3 +224,34 @@ def ingest(df: pd.DataFrame, pat, repo) -> dict:
                          "data: buyin %s 적재 (%d→%d행)" % (ym, before, len(merged)))
         summary.append({"ym": ym, "before": before, "rows_in": len(new), "after": len(merged)})
     return {"rows": len(df), "months": summary}
+
+
+def cadence_by_code(buyin) -> dict:
+    """관리코드별 최근입고일 + 평균 입고주기(일) — 품절목록 E/F·재고 cadence.
+
+    실입고(합계액>0 & 수량>0)·입고일 distinct 기준. 평균주기 = 연속 입고일 간격 평균(일, 입고 1회면 None).
+    return {관리코드(NFC): {"최근입고일": Timestamp, "평균주기": float|None, "입고횟수": int}}.
+    """
+    if buyin is None or buyin.empty:
+        return {}
+    b = buyin.copy()
+    b["_d"] = pd.to_datetime(b["기준일"], errors="coerce")
+    q = pd.to_numeric(b["수량"], errors="coerce").fillna(0.0)
+    t = pd.to_numeric(b["합계액"], errors="coerce").fillna(0.0)
+    b = b[b["_d"].notna() & (q > 0) & (t > 0)].copy()
+    if b.empty:
+        return {}
+    b["_code"] = b["관리코드"].map(_nfc)
+    out = {}
+    for code, g in b.groupby("_code"):
+        if not code:
+            continue
+        days = sorted(set(g["_d"].dt.normalize()))
+        last = days[-1]
+        if len(days) >= 2:
+            gaps = [(days[i] - days[i - 1]).days for i in range(1, len(days))]
+            avg = float(sum(gaps) / len(gaps))
+        else:
+            avg = None
+        out[code] = {"최근입고일": last, "평균주기": avg, "입고횟수": len(days)}
+    return out
