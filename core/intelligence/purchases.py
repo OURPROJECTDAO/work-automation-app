@@ -226,19 +226,22 @@ def ingest(df: pd.DataFrame, pat, repo) -> dict:
     return {"rows": len(df), "months": summary}
 
 
-def cadence_by_code(buyin) -> dict:
-    """관리코드별 최근입고일 + 평균 입고주기(일) — 품절목록 E/F·재고 cadence.
+def cadence_by_code(buyin, months: int = 12, now=None) -> dict:
+    """관리코드별 최근입고일 + 평균 입고주기(일) + 입고횟수 — 품절목록 E/F/G.
 
+    ★ 발주 날짜(now) 기준 최근 `months`개월(기본 12 = 1년) 윈도우 내 실입고만(사용자 2026-06-16).
     실입고(합계액>0 & 수량>0)·입고일 distinct 기준. 평균주기 = 연속 입고일 간격 평균(일, 입고 1회면 None).
-    return {관리코드(NFC): {"최근입고일": Timestamp, "평균주기": float|None, "입고횟수": int}}.
+    return {관리코드(NFC): {"최근입고일": Timestamp, "평균주기": float|None, "입고횟수": int}} (윈도우 내).
     """
     if buyin is None or buyin.empty:
         return {}
+    now = pd.Timestamp(now) if now is not None else pd.Timestamp.now()
+    cutoff = now - pd.DateOffset(months=months)
     b = buyin.copy()
     b["_d"] = pd.to_datetime(b["기준일"], errors="coerce")
     q = pd.to_numeric(b["수량"], errors="coerce").fillna(0.0)
     t = pd.to_numeric(b["합계액"], errors="coerce").fillna(0.0)
-    b = b[b["_d"].notna() & (q > 0) & (t > 0)].copy()
+    b = b[b["_d"].notna() & (b["_d"] >= cutoff) & (b["_d"] <= now) & (q > 0) & (t > 0)].copy()
     if b.empty:
         return {}
     b["_code"] = b["관리코드"].map(_nfc)
