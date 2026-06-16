@@ -209,3 +209,47 @@ def detect_transitions(snaps: pd.DataFrame, in_stock_threshold: float = 0.0) -> 
                             "_prev재고": "전일재고", "박스재고": "금일재고"})
     return (ev[["상품코드", "관리코드", "전일", "금일", "전일재고", "금일재고", "전이"]]
             .sort_values(["금일", "상품코드"]).reset_index(drop=True))
+
+
+PRICE_FIELDS = {"매입단가": "매입가", "매출단가": "판매가"}
+
+
+def detect_price_changes(snaps: pd.DataFrame, threshold: float = 0.02,
+                         fields=("매입단가", "매출단가")) -> pd.DataFrame:
+    """상품코드별 연속 스냅샷 가격 비교 → |변동률| >= threshold 변동 이벤트.
+
+    매입단가/매출단가 각각 직전 스냅샷 대비 변동률 산출. detect_transitions(재고) 자매 함수.
+    반환: 상품코드·관리코드·구분(매입가/판매가)·전일·금일·전일가·금일가·변동률(%)·방향(인상/인하).
+    ★ 직전값 결측(신규 등재)·직전값 0 이하 제외. forward 적립이라 스냅샷 시작일(2026-06-15) 이후만.
+    """
+    cols = ["상품코드", "관리코드", "구분", "전일", "금일",
+            "전일가", "금일가", "변동률", "방향"]
+    if snaps is None or snaps.empty:
+        return pd.DataFrame(columns=cols)
+    s = snaps.sort_values(["상품코드", "스냅샷일자"]).copy()
+    s["스냅샷일자"] = pd.to_datetime(s["스냅샷일자"])
+    parts = []
+    for field in fields:
+        if field not in s.columns:
+            continue
+        v = pd.to_numeric(s[field], errors="coerce")
+        prev_v = v.groupby(s["상품코드"]).shift(1)
+        prev_d = s["스냅샷일자"].groupby(s["상품코드"]).shift(1)
+        rate = (v - prev_v) / prev_v
+        mask = prev_v.notna() & v.notna() & (prev_v > 0) & (rate.abs() >= threshold)
+        if not mask.any():
+            continue
+        part = pd.DataFrame({
+            "상품코드": s["상품코드"], "관리코드": s["관리코드"],
+            "구분": PRICE_FIELDS.get(field, field),
+            "전일": prev_d, "금일": s["스냅샷일자"],
+            "전일가": prev_v, "금일가": v, "변동률": rate,
+        })[mask]
+        parts.append(part)
+    if not parts:
+        return pd.DataFrame(columns=cols)
+    res = pd.concat(parts, ignore_index=True)
+    res["방향"] = res["변동률"].map(lambda x: "인상" if x > 0 else "인하")
+    res["변동률"] = (res["변동률"] * 100).round(2)
+    return (res[cols].sort_values(["금일", "상품코드"], ascending=[False, True])
+            .reset_index(drop=True))
