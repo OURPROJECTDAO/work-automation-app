@@ -26,6 +26,7 @@ import streamlit as st
 
 from core.intelligence import daily_margin as dm
 from core.intelligence import daily_inbox as inbox
+from core.intelligence import stockout_board as sb
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_API = "https://api.github.com/repos/OURPROJECTDAO/work-automation-app/contents"
@@ -72,6 +73,17 @@ def _master_lookup():
     price = {k: float(v) for k, v in zip(df["k"], pd.to_numeric(df["매입단가"], errors="coerce")) if pd.notna(v)}
     name = {k: n for k, n in zip(df["k"], df["상품명"].fillna(""))}
     return box, price, name
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _box_stock_lookup():
+    """관리코드(NFC) → 박스재고(product_master '박스' 컬럼). 품절 알림판 재입고 판정용."""
+    code, text = _gh_raw("reference/product_master.csv")
+    if code != 200:
+        return {}
+    df = pd.read_csv(io.BytesIO(text), dtype=str)
+    return {_nfc(k): float(v) for k, v in
+            zip(df["관리코드"], pd.to_numeric(df["박스"], errors="coerce").fillna(0.0))}
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -158,6 +170,54 @@ st.caption("매일 반복 업무 산출물로 **오늘의 마진을 즉시 점�
            "파일처리에서 **오픈마켓(송장출력)·천년경영(output)**을 실행하면 이 세션에서 자동 인계돼 "
            "재업로드가 필요 없습니다. (상품관리는 reference 라이브 — 항상 최신)")
 
+# ── 🚨 품절 알림판 (발주 품절목록 → 재입고 박스재고>0 자동해제 + 수동삭제) ──
+st.subheader("🚨 품절 알림판")
+_pat_d, _repo_d = _data_secret()
+if not _pat_d:
+    st.info("data repo 시크릿([data] pat)이 없어 품절 알림판을 쓸 수 없습니다.")
+else:
+    if st.button("🔄 상품관리 다시 읽기(재입고 반영)", key="sb_refresh"):
+        st.cache_data.clear(); st.rerun()
+    _box_stock = _box_stock_lookup()
+    _today = datetime.now(_KST).strftime("%Y-%m-%d")
+    _board = sb.read_board(_pat_d, _repo_d)
+    if _board and _box_stock:   # 재입고 reconcile(박스재고>0) → 입고로그 + 자동삭제
+        _board2, _restocked = sb.reconcile(_board, _box_stock, _today)
+        if _restocked:
+            sb.append_log(_pat_d, _repo_d, _restocked, f"restock +{len(_restocked)} ({_today})")
+            sb.write_board(_pat_d, _repo_d, _board2, f"board: 재입고 {len(_restocked)}건 자동삭제 ({_today})")
+            _board = _board2
+            st.success("✅ 재입고 자동처리 " + str(len(_restocked)) + "건 — 입고로그 기록·알림판 제거: "
+                       + ", ".join(f"{r['관리코드']}({r['품절일수']}일)" for r in _restocked))
+    _bdf = sb.board_to_frame(_board, _box_stock, _today)
+    if _bdf.empty:
+        st.success("현재 품절(미입고) 상품이 없습니다. 발주 품절목록에 뜨면 여기 자동 등록됩니다.")
+    else:
+        st.caption(f"품절 {len(_bdf)}건 — 발주 품절목록 자동 등록 · 박스재고>0 들어오면 자동 입고처리. 🗑=수동 제거(로그 없음)")
+        _h = st.columns([2, 5, 3, 2, 1])
+        for _col, _t in zip(_h, ["관리코드", "상품명", "품절", "현재박스", ""]):
+            _col.markdown(f"**{_t}**")
+        for _r in _bdf.to_dict("records"):
+            _cc = st.columns([2, 5, 3, 2, 1])
+            _cc[0].write(_r["관리코드"])
+            _cc[1].write(_r["상품명"])
+            _since, _n = _r["품절시작일"], _r["N일째"]
+            _cc[2].write(f"{pd.Timestamp(_since).strftime('%m월%d일')}부터 {_n}일째" if _since else "")
+            _bs = _r["현재박스재고"]
+            _cc[3].write("—" if _bs is None else f"{_bs:g}")
+            if _cc[4].button("🗑", key=f"sb_rm_{_r['관리코드']}", help="수동 제거(로그 없음)"):
+                sb.write_board(_pat_d, _repo_d, sb.manual_remove(_board, _r["관리코드"]),
+                               f"board: 수동 제거 {_r['관리코드']} ({_today})")
+                st.rerun()
+    with st.expander("📥 최근 입고 로그"):
+        _log = sb.read_log(_pat_d, _repo_d)
+        if _log.empty:
+            st.caption("입고 로그가 아직 없습니다.")
+        else:
+            st.dataframe(_log.tail(50).iloc[::-1], hide_index=True, use_container_width=True)
+
+st.divider()
+st.subheader("📊 당일 마진 점검")
 box_lookup, master_price, name_lookup = _master_lookup()
 
 st.subheader("오늘 파일")
