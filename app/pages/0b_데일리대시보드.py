@@ -28,6 +28,7 @@ from core.intelligence import daily_margin as dm
 from core.intelligence import daily_inbox as inbox
 from core.intelligence import stockout_board as sb
 from core.intelligence import purchases as _buy
+from core.intelligence import stock_history as shh
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_API = "https://api.github.com/repos/OURPROJECTDAO/work-automation-app/contents"
@@ -99,6 +100,25 @@ def _buyin_cadence():
         return _buy.cadence_by_code(b, months=12, now=datetime.now(_KST).replace(tzinfo=None))
     except Exception:
         return {}
+
+
+@st.cache_data(ttl=1800, show_spinner="가격 변동 감지 중...")
+def _price_changes(days: int, threshold: float):
+    """최근 days일 내 ±threshold 이상 가격 변동(매입가·판매가). 1b 스냅샷 연속 비교."""
+    pat, repo = _data_secret()
+    if not pat:
+        return pd.DataFrame()
+    try:
+        mons = shh.list_snapshot_months(pat, repo)[-3:]
+        parts = [shh.read_snapshots(pat, repo, m) for m in mons]
+        snaps = pd.concat([p for p in parts if len(p)], ignore_index=True) if parts else pd.DataFrame()
+        chg = shh.detect_price_changes(snaps, threshold=threshold)
+        if chg.empty:
+            return chg
+        cutoff = pd.Timestamp(datetime.now(_KST).date()) - pd.Timedelta(days=days)
+        return chg[pd.to_datetime(chg["금일"]) >= cutoff].reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -238,6 +258,50 @@ else:
             st.dataframe(_log.tail(50).iloc[::-1], hide_index=True, use_container_width=True)
 
 st.divider()
+st.subheader("💲 가격 변동 알림")
+if not _pat_d:
+    st.info("data repo 시크릿([data] pat)이 없어 가격 변동 알림을 쓸 수 없습니다.")
+else:
+    _p1, _p2, _p3 = st.columns([2, 2, 1])
+    _days = _p1.slider("최근 며칠", 1, 30, 7, key="pc_days")
+    _thr = _p2.slider("변동 임계값(%)", 1, 20, 2, key="pc_thr") / 100.0
+    _p3.write("")
+    if _p3.button("🔄 다시 읽기", key="pc_refresh"):
+        st.cache_data.clear(); st.rerun()
+    _chg = _price_changes(int(_days), float(_thr))
+    if _chg is None or _chg.empty:
+        st.success(f"최근 {_days}일 내 ±{_thr * 100:g}% 이상 가격 변동이 없습니다. "
+                   "(스냅샷은 상품관리 업로드일마다 적립 — 2026-06-15부터 누적)")
+    else:
+        _, _, _nm = _master_lookup()
+        _chg = _chg.copy()
+        _chg["상품명"] = _chg["관리코드"].map(lambda x: _nm.get(_nfc(x), ""))
+        _kinds = st.multiselect("구분", ["판매가", "매입가"], default=["판매가", "매입가"],
+                                key="pc_kind")
+        _chg = _chg[_chg["구분"].isin(_kinds)].reset_index(drop=True)
+        _up = int((_chg["방향"] == "인상").sum())
+        _dn = int((_chg["방향"] == "인하").sum())
+        _m = st.columns(3)
+        _m[0].metric("변동 상품", f"{len(_chg)} 건")
+        _m[1].metric("🔺 인상", f"{_up} 건")
+        _m[2].metric("🔻 인하", f"{_dn} 건")
+        if _chg.empty:
+            st.caption("선택한 구분에 해당하는 변동이 없습니다.")
+        else:
+            _disp = _chg.copy()
+            _disp["방향"] = _disp["방향"].map({"인상": "🔺 인상", "인하": "🔻 인하"})
+            _disp["변동일"] = pd.to_datetime(_disp["금일"]).dt.strftime("%m-%d")
+            _disp = _disp[["관리코드", "상품명", "구분", "방향", "전일가", "금일가", "변동률", "변동일"]]
+            st.dataframe(_disp, hide_index=True, use_container_width=True, height=360,
+                         column_config={
+                             "전일가": st.column_config.NumberColumn(format="%d"),
+                             "금일가": st.column_config.NumberColumn(format="%d"),
+                             "변동률": st.column_config.NumberColumn("변동률%", format="%.2f"),
+                         })
+            st.download_button("📥 XLSX", _to_xlsx(_chg, "가격변동"),
+                               "가격변동알림.xlsx", key="pc_dl")
+
+st.divider()
 st.subheader("📊 당일 마진 점검")
 box_lookup, master_price, name_lookup = _master_lookup()
 
@@ -284,6 +348,22 @@ else:
         _bx = " · ".join(f"{ch} {n}" for ch, n in sorted(_chb.items(), key=lambda x: -x[1]))
         st.caption(f"실제 박스(택배)수 — {_bx} · 합계 {sum(_chb.values())} · "
                    f"택배=물리 박스 배분(250/355 자동합포 + 175~200ml 30개입 수령자 ceil(팩/3))")
+        _g = (ddf.groupby("채널", as_index=False)
+              .agg(매출=("매출", "sum"), 원가=("원가", "sum"), 택배=("택배", "sum"),
+                   마진=("마진", "sum"), 품목수=("관리코드", "nunique")))
+        _g["마진율"] = (_g["마진"] / _g["매출"].where(_g["매출"] > 0) * 100).round(1)
+        _g = _g.sort_values("매출", ascending=False).reset_index(drop=True)
+        st.markdown("**채널별 요약 (당일 매출·마진율)**")
+        st.dataframe(_g[["채널", "매출", "원가", "택배", "마진", "마진율", "품목수"]],
+                     hide_index=True, use_container_width=True,
+                     column_config={
+                         "매출": st.column_config.NumberColumn("매출(net)", format="%d"),
+                         "원가": st.column_config.NumberColumn(format="%d"),
+                         "택배": st.column_config.NumberColumn(format="%d"),
+                         "마진": st.column_config.NumberColumn(format="%d"),
+                         "마진율": st.column_config.NumberColumn("마진%", format="%.1f"),
+                         "품목수": st.column_config.NumberColumn(format="%d"),
+                     })
         _view = st.radio("보기", ["이상치만", "전체"], horizontal=True, key="d_view")
         _show = anom if _view == "이상치만" else ddf
         if _show.empty:
