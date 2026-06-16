@@ -15,6 +15,7 @@ import core.workflows.logistics_order as lo
 import core.workflows.cheonnyeon_upload as cy
 import core.intelligence.daily_inbox as _inbox
 import core.intelligence.stockout_board as _sb
+import core.intelligence.purchases as _buy
 
 def _seed_stockout_board(so_df):
     """발주 품절목록 → 품절 알림판 자동 등록(데일리 대시보드·data repo 영속). 실패는 발주 흐름 비차단."""
@@ -30,6 +31,19 @@ def _seed_stockout_board(so_df):
             _sb.write_board(pat, repo, bd, f"board: 발주 품절 {len(added)}건 등록 ({today})")
     except Exception:
         pass
+
+
+@st.cache_data(ttl=1800, show_spinner="매입현황(최근입고·평균주기) 불러오는 중...")
+def _buyin_cadence():
+    """매입현황(buyin) → 관리코드별 최근입고일·평균매입주기 (품절목록 E/F). 실패/시크릿 없으면 빈 dict."""
+    try:
+        d = st.secrets["data"]
+        pat = d["pat"]; repo = d.get("repo", "OURPROJECTDAO/work-automation-data")
+        if not pat:
+            return {}
+        return _buy.cadence_by_code(_buy.read_all(pat, repo))
+    except Exception:
+        return {}
 
 
 st.title("📂 파일 처리")
@@ -407,7 +421,7 @@ with tab_order:
         c2.metric("품절 품목", len(so_df))
         st.success("✅ Phase 2 완료")
 
-        result_bytes = lo.generate_result_xlsx(p2_df, so_df)
+        result_bytes = lo.generate_result_xlsx(p2_df, so_df, cadence=_buyin_cadence())
         today = datetime.now(_KST).strftime("%m%d")
         st.download_button(
             "📥 최종결과물 다운로드 (물류팀 + 품절목록)",
