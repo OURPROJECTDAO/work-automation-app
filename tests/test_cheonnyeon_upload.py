@@ -104,3 +104,32 @@ def test_unit_split_formula(result):
     for r in units["스마트스토어낱개"]:
         assert abs(r["J"] - r["D"] * r["I"]) <= 1e-6
         assert abs(r["K"] - r["H"] * r["D"] / r["J"]) <= 0.5
+
+
+def test_detect_box_anomalies_synthetic():
+    """박스코드 이상 탐지: 영문코드/낱개태그만 잡고 정상 박스(트레일링점 포함)는 무탐지."""
+    sheets = {n: [] for n in cy.ALL_SHEETS}
+    sheets["쿠팡전체"] = [
+        {"B": "21-103", "C": "정상 박스상품"},                # 무탐지
+        {"B": "29-30.", "C": "트레일링점 박스 24개입"},        # 무탐지(잡티, 영문 아님)
+        {"B": "PC005875", "C": "[낱개1개][명가 메밀칩]"},      # 코드영문+상품명 → 높음
+        {"B": "TU85G12EA-15-06-04", "C": "소분 참치"},        # 코드영문만 → 검토
+        {"B": "99-99", "C": "[낱개]가짜 낱개태그"},           # 상품명만 → 검토
+    ]
+    anom = cy.detect_box_anomalies(sheets)
+    by = {a["관리코드"]: a for a in anom}
+    assert set(by) == {"PC005875", "TU85G12EA-15-06-04", "99-99"}
+    assert by["PC005875"]["확신"] == "높음"
+    assert by["TU85G12EA-15-06-04"]["확신"] == "검토"
+    assert by["TU85G12EA-15-06-04"]["신호"] == "코드영문"
+    assert by["99-99"]["신호"] == "상품명낱개태그"
+
+
+def test_detect_box_anomalies_structure(result):
+    """실 파이프라인 결과에 대해 list[dict] 스키마 보장(스모크)."""
+    sheets, _ = result
+    anom = cy.detect_box_anomalies(sheets)
+    assert isinstance(anom, list)
+    for a in anom:
+        assert set(a) == {"시트", "관리코드", "상품명", "신호", "확신"}
+        assert a["시트"] in cy.ALL_SHEETS
