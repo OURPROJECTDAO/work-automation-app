@@ -175,6 +175,7 @@ TEMPLATE = r'''<!DOCTYPE html>
   .d-rm{margin-top:14px;display:grid;gap:7px}
   .d-rm .rm-i{border-left:2.5px solid var(--line);padding:2px 0 2px 10px}
   .d-rm .rm-i.t-next{border-color:var(--design)} .d-rm .rm-i.t-planned{border-color:var(--petrol)} .d-rm .rm-i.t-later{border-color:var(--concept)}
+  .d-rm .rm-i.t-done{border-color:var(--live)}
   .d-rm .rm-t{font-size:12.5px;font-weight:700;display:flex;align-items:center;gap:7px}
   .d-rm .ph{font-family:var(--mono);font-size:9px;font-weight:700;color:var(--faint);background:#EEECE5;border-radius:4px;padding:1px 5px}
   .d-rm .rm-d{font-size:11.5px;color:var(--soft);line-height:1.4;margin-top:2px}
@@ -189,6 +190,13 @@ TEMPLATE = r'''<!DOCTYPE html>
   .rmcol-h{padding:14px 14px 12px;display:flex;align-items:center;gap:9px;border-bottom:1px solid var(--line);margin-bottom:8px}
   .rmcol-h .bar{width:4px;height:18px;border-radius:3px;flex:none}
   .rmcol.next .bar{background:var(--design)} .rmcol.planned .bar{background:var(--petrol)} .rmcol.later .bar{background:var(--concept)}
+  .rmcol.done .bar{background:var(--live)}
+  .rmdone{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:6px 6px 10px;margin-top:14px}
+  .rmdone .bar{background:var(--live)}
+  .rmdone .rmcards{grid-template-columns:1fr}
+  @media (min-width:780px){.rmdone .rmcards{grid-template-columns:repeat(2,1fr)}}
+  .rmdone .rmcard{opacity:.72}
+  .rmdone .rmcard h4::before{content:'✓ ';color:var(--live);font-weight:800}
   .rmcol-h h3{font-size:15px;font-weight:800;letter-spacing:-.01em}
   .rmcol-h .c{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--faint);margin-left:auto}
   .rmcards{display:grid;gap:9px;padding:0 8px}
@@ -234,6 +242,10 @@ TEMPLATE = r'''<!DOCTYPE html>
       <span class="lg"><span class="dot live"></span>운영 중</span>
       <span class="lg"><span class="dot concept"></span>공통 개념</span>
     </div>
+    <section class="rmdone" id="sec-done">
+      <div class="rmcol-h"><span class="bar"></span><h3>✓ 최근 완료</h3><span class="c" id="c-done"></span></div>
+      <div class="rmcards" id="rm-done"></div>
+    </section>
     <div class="rmcols">
       <section class="rmcol next">
         <div class="rmcol-h"><span class="bar"></span><h3>★ 지금 만들 것</h3><span class="c" id="c-next"></span></div>
@@ -296,8 +308,8 @@ const onnuri={id:"onnuri-order",status:"live",label:"온누리 발주서"}; // b
 
 /* ---- ROADMAP board ---- */
 let rmCount=0;
-const tiers={next:[],planned:[],later:[]};
-MAP.nodes.forEach(n=>(n.roadmap||[]).forEach(r=>{tiers[r.tier].push({...r, node:n.id, status:n.status}); rmCount++;}));
+const tiers={next:[],planned:[],later:[],done:[]};
+MAP.nodes.forEach(n=>(n.roadmap||[]).forEach(r=>{(tiers[r.tier]||tiers.later).push({...r, node:n.id, status:n.status}); rmCount++;}));
 function rmCardHTML(r){
   const node=nodeById[r.node]||onnuri;
   const ph=r.phase?`<span class="ph2">${r.phase}</span>`:"";
@@ -308,6 +320,7 @@ function rmCardHTML(r){
 $("#rm-next").innerHTML=tiers.next.map(rmCardHTML).join("");
 $("#rm-planned").innerHTML=tiers.planned.map(rmCardHTML).join("");
 $("#rm-later").innerHTML=tiers.later.map(rmCardHTML).join("");
+$("#rm-done").innerHTML=tiers.done.map(rmCardHTML).join("");
 $("#rm-backlog").innerHTML=MAP.backlog.map(b=>{
   const node=b.node?(nodeById[b.node]||onnuri):null;
   const chip=node?`<button class="chip ${node.status}" data-jump="${b.node}">${b.node}</button>`:`<span class="chip sys">시스템</span>`;
@@ -316,6 +329,8 @@ $("#rm-backlog").innerHTML=MAP.backlog.map(b=>{
 $("#c-next").textContent=tiers.next.length;
 $("#c-planned").textContent=tiers.planned.length;
 $("#c-later").textContent=tiers.later.length+MAP.backlog.length;
+$("#c-done").textContent=tiers.done.length;
+if(!tiers.done.length){const _sd=$("#sec-done"); if(_sd)_sd.style.display="none";}
 $("#rm-count").textContent=rmCount+MAP.backlog.length;
 
 /* ---- MAP: backbone ---- */
