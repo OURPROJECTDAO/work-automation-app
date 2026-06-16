@@ -146,7 +146,8 @@ def manual_remove(board: dict, code: str) -> dict:
     return {k: v for k, v in board.items() if _nfc(k) != _nfc(code)}
 
 
-def board_to_frame(board: dict, box_stock: dict, today: str) -> pd.DataFrame:
+def board_to_frame(board: dict, box_stock: dict, today: str, cadence: dict = None) -> pd.DataFrame:
+    cadence = cadence or {}
     td = pd.Timestamp(today)
     rows = []
     for code, info in board.items():
@@ -155,11 +156,19 @@ def board_to_frame(board: dict, box_stock: dict, today: str) -> pd.DataFrame:
             days = (td - pd.Timestamp(since)).days
         except Exception:
             days = None
+        ci = cadence.get(_nfc(code), {})
+        last = ci.get("최근입고일")
+        avg = ci.get("평균주기")
+        cnt = ci.get("입고횟수")
         rows.append({"관리코드": code, "상품명": info.get("상품명", ""),
                      "품절시작일": since, "N일째": days,
                      "현재박스재고": box_stock.get(_nfc(code)),
-                     "발주수량": info.get("발주수량")})
-    df = pd.DataFrame(rows, columns=["관리코드", "상품명", "품절시작일", "N일째", "현재박스재고", "발주수량"])
+                     "발주수량": info.get("발주수량"),
+                     "최근입고일": (last.strftime("%Y-%m-%d") if (last is not None and pd.notna(last)) else ""),
+                     "평균매입주기": (round(avg) if avg is not None else None),
+                     "입고횟수(1년)": (int(cnt) if cnt else None)})
+    df = pd.DataFrame(rows, columns=["관리코드", "상품명", "품절시작일", "N일째", "현재박스재고",
+                                     "발주수량", "최근입고일", "평균매입주기", "입고횟수(1년)"])
     if not df.empty:
         df = df.sort_values("품절시작일").reset_index(drop=True)
     return df
