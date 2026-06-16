@@ -20,8 +20,10 @@ EasyAdmin 주문(orders/easyadmin_YYYY-MM.parquet)의 **송장그룹(=박스)** 
 """
 from __future__ import annotations
 
+import re
 import unicodedata
 
+import numpy as np
 import pandas as pd
 
 # 상호명(매출자료) → EA 판매처(들). 사용자 확정 2026-06-15.
@@ -84,42 +86,63 @@ def allocate_boxes(orders: pd.DataFrame, box_lookup) -> pd.DataFrame:
     return df
 
 
-def compute_box_counts(orders: pd.DataFrame, box_lookup):
-    """(상호명,관리코드,월)·(상호명,월) **실제 박스수**(송장그룹 배분 합) + alloc df.
+def compute_box_counts(orders: pd.DataFrame, box_lookup, hapo_codes=None):
+    """(상호명,관리코드,월)·(상호명,월) **실제 박스수**(박스 credit 합) + alloc df.
 
     return code_box{(상호명,code,ym): boxes}, ch_box{(상호명,ym): boxes}, alloc_df
     매핑 안 되는 EA 판매처(자사몰 등) 라인 제외.
+
+    hapo_codes(=reference/hapo_175_190.csv 관리코드 set) 주면 **175~200 30개입 물리합포** 교정:
+    합포 가능 품목을 **합포박스키(같은 수령자·주소·발주일) 그룹**으로 묶어 ceil(팩/3) 물리박스로
+    환산(송장 분리돼도 한 박스에 최대 3팩) → credit = 팩비중 × ceil(팩/3). 비합포·박스키없음은
+    송장그룹 지분 그대로(기존 동작). hapo_codes 없으면 전부 송장그룹(BEFORE).
+    ★ 블랭킷 합포박스키 swap은 B2B 동일주소 다회주문을 1박스로 과대병합(-27%)하므로 금지 —
+       합포 가능 품목에만 제한(logs/2026-06-16-ship-alloc-hapo).
     """
     alloc = allocate_boxes(orders, box_lookup)
+    alloc["_credit"] = alloc["_박스지분"]                       # 기본=송장그룹 지분
+    if hapo_codes and "합포박스키" in alloc.columns:
+        hc = {re.sub(r"[.\-]+$", "", _nfc(c)) for c in hapo_codes}
+        is_h = alloc["_code"].map(lambda c: re.sub(r"[.\-]+$", "", c) in hc)
+        bk = alloc["합포박스키"].map(_nfc)
+        h = alloc[is_h & (bk != "")].copy()
+        if not h.empty:
+            h["_bk"] = bk[h.index]
+            h["_packs"] = pd.to_numeric(h["상품수량"], errors="coerce").fillna(0.0)
+            tot = h.groupby("_bk")["_packs"].transform("sum")
+            pboxes = np.ceil(tot / 3.0)                          # ceil(팩/3) 물리박스
+            cr = (h["_packs"] / tot.where(tot != 0) * pboxes)
+            alloc.loc[h.index, "_credit"] = cr.fillna(alloc.loc[h.index, "_박스지분"])
     rev = ea_to_sangho()
     alloc["_상호명"] = alloc["판매처"].map(_nfc).map(rev)        # 매핑 외(자사몰) → NaN
     alloc = alloc[alloc["_상호명"].notna()].copy()
     if alloc.empty:
         return {}, {}, alloc
     alloc["_ym"] = pd.to_datetime(alloc["기준일"]).dt.strftime("%Y-%m")
-    code = (alloc.groupby(["_상호명", "_code", "_ym"], observed=True)["_박스지분"]
+    code = (alloc.groupby(["_상호명", "_code", "_ym"], observed=True)["_credit"]
                  .sum().reset_index())
-    code_box = {(r["_상호명"], r["_code"], r["_ym"]): r["_박스지분"]
+    code_box = {(r["_상호명"], r["_code"], r["_ym"]): r["_credit"]
                 for r in code.to_dict("records")}
-    ch = (alloc.groupby(["_상호명", "_ym"], observed=True)["_박스지분"]
+    ch = (alloc.groupby(["_상호명", "_ym"], observed=True)["_credit"]
                .sum().reset_index())
-    ch_box = {(r["_상호명"], r["_ym"]): r["_박스지분"] for r in ch.to_dict("records")}
+    ch_box = {(r["_상호명"], r["_ym"]): r["_credit"] for r in ch.to_dict("records")}
     return code_box, ch_box, alloc
 
 
-def compute_ship_rate(orders: pd.DataFrame, sales: pd.DataFrame, box_lookup,
+def compute_ship_rate(orders: pd.DataFrame, sales: pd.DataFrame, box_lookup, hapo_codes=None,
                       sangho_col: str = "상호명", code_col: str = "관리코드",
                       date_col: str = "거래일자", qty_col: str = "수량") -> dict:
     """택배강도(박스/낱개) = EA 실제박스 ÷ 매출 낱개수. (상호명,code,월)·(상호명,월).
 
     sales = 매출 master(전체). 분모=매출 낱개수(00-12 제외, 매핑 상호명만). rate 상한 1.0.
+    hapo_codes 주면 175~200 물리합포 ceil(팩/3) 교정(compute_box_counts 참조).
     return {"rate": {(상호명,code,ym): bpp}, "ch_rate": {(상호명,ym): bpp}, "stats": {...}}
     """
     empty = {"rate": {}, "ch_rate": {}, "reconcile": {},
              "stats": {"boxes": 0.0, "codes": 0, "months": [], "covered_pieces": 0.0}}
     if orders is None or orders.empty or sales is None or sales.empty:
         return empty
-    code_box, ch_box, alloc = compute_box_counts(orders, box_lookup)
+    code_box, ch_box, alloc = compute_box_counts(orders, box_lookup, hapo_codes)
     if not code_box:
         return empty
 
