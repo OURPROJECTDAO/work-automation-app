@@ -118,10 +118,11 @@ with tab_cy:
         if st.button("▶ 실행", type="primary", use_container_width=True, key="cy_run"):
             with st.spinner("처리 중..."):
                 try:
-                    out, stats, _, _ = cy.run(
+                    out, stats, sheets, _ = cy.run(
                         f_baeju.getvalue(), f_baemin.getvalue(), f_sss.getvalue())
                     st.session_state["cy_result"] = {
                         "bytes": out, "stats": stats,
+                        "anomalies": cy.detect_box_anomalies(sheets),
                         "name": datetime.now(_KST).strftime("%y%m%d") + ".xlsx",
                     }
                 except Exception as e:
@@ -139,6 +140,24 @@ with tab_cy:
             cols = st.columns(6)
             for col, (label, n) in zip(cols, items[i:i + 6]):
                 col.metric(label, f"{n}건")
+
+        anomalies = res.get("anomalies") or []
+        if anomalies:
+            st.error(
+                f"⚠️ 전체(박스) 시트에 **박스 코드가 아닌 상품 {len(anomalies)}건**이 "
+                "있습니다. **소분목록 누락**이 의심됩니다 — 업로드 전 확인하세요.",
+                icon="🚨",
+            )
+            st.dataframe(
+                pd.DataFrame(anomalies)[["시트", "관리코드", "상품명", "신호", "확신"]],
+                use_container_width=True, hide_index=True,
+            )
+            st.caption(
+                "낱개로 파는 상품인데 소분목록(낱개코드→원코드)에 없으면 전체 시트에 "
+                "그대로 남습니다(박스로 잘못 업로드). 👉 **기준데이터관리 → 천년경영업로드**에서 "
+                "해당 코드를 소분목록에 추가한 뒤 다시 실행하세요."
+            )
+
         st.download_button(
             label="📥 결과 파일 다운로드",
             data=res["bytes"],
