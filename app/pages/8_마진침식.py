@@ -118,6 +118,16 @@ def _pc_lookup():
     return {_nfc(sc): _nfc(mg) for sc, mg in zip(df["상품코드"], df["관리코드"]) if _nfc(sc)}
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _hapo_codes():
+    """175~200ml 30개입 합포가능 관리코드 set — 탭D 택배 합포 배분(시나리오2)."""
+    code, text = _gh_raw("reference/hapo_175_190.csv")
+    if code != 200:
+        return set()
+    lines = text.decode("utf-8-sig").splitlines()
+    return {_nfc(row["관리코드"]) for row in csv.DictReader(lines) if _nfc(row.get("관리코드", ""))}
+
+
 @st.cache_data(ttl=600, show_spinner="가격이력 불러오는 중...")
 def _price_changes() -> pd.DataFrame:
     pat, repo = _data_secret()
@@ -361,7 +371,7 @@ with tabD:
         st.warning("product_master를 불러올 수 없습니다.")
     else:
         try:
-            _alloc, _chb = dm.parse_invoice_shipping(f_inv, box_lookup, _pc_lookup())
+            _alloc, _chb = dm.parse_invoice_shipping(f_inv, box_lookup, _pc_lookup(), _hapo_codes())
             _sdf = dm.parse_cheonnyeon_sales(f_chun, box_lookup)
         except Exception as e:
             st.error(f"파싱 오류: {e}")
@@ -380,7 +390,8 @@ with tabD:
             c[2].metric("이상 건", f"{len(anom)} 건")
             c[3].metric("역마진", f"{int(ddf['역마진'].sum())} 건")
             _bx = " · ".join(f"{ch} {n}" for ch, n in sorted(_chb.items(), key=lambda x: -x[1]))
-            st.caption(f"실제 박스(송장)수 — {_bx} · 합계 {sum(_chb.values())} · 택배는 송장 단위 배분(합포는 물류량 분할)")
+            st.caption(f"실제 박스(택배)수 — {_bx} · 합계 {sum(_chb.values())} · "
+                       f"택배=물리 박스 배분(250/355 자동합포 + 175~200ml 30개입 수령자 합포 ceil(팩/3))")
             _view = st.radio("보기", ["이상치만", "전체"], horizontal=True, key="d_view")
             _show = anom if _view == "이상치만" else ddf
             if _show.empty:
