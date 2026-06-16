@@ -27,6 +27,7 @@ import streamlit as st
 from core.intelligence import daily_margin as dm
 from core.intelligence import daily_inbox as inbox
 from core.intelligence import stockout_board as sb
+from core.intelligence import purchases as _buy
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_API = "https://api.github.com/repos/OURPROJECTDAO/work-automation-app/contents"
@@ -84,6 +85,20 @@ def _box_stock_lookup():
     df = pd.read_csv(io.BytesIO(text), dtype=str)
     return {_nfc(k): float(v) for k, v in
             zip(df["관리코드"], pd.to_numeric(df["박스"], errors="coerce").fillna(0.0))}
+
+@st.cache_data(ttl=1800, show_spinner="매입현황(최근입고·평균주기) 불러오는 중...")
+def _buyin_cadence():
+    """관리코드(NFC) → {최근입고일·평균주기·입고횟수} (발주일 기준 1년·최근 13개월 파티션). 품절 알림판 표시용."""
+    pat, repo = _data_secret()
+    if not pat:
+        return {}
+    try:
+        mons = _buy.list_months(pat, repo)[-13:]
+        parts = [_buy.read_partition(pat, repo, m) for m in mons]
+        b = pd.concat(parts, ignore_index=True) if parts else None
+        return _buy.cadence_by_code(b, months=12, now=datetime.now(_KST).replace(tzinfo=None))
+    except Exception:
+        return {}
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -189,23 +204,29 @@ else:
             _board = _board2
             st.success("✅ 재입고 자동처리 " + str(len(_restocked)) + "건 — 입고로그 기록·알림판 제거: "
                        + ", ".join(f"{r['관리코드']}({r['품절일수']}일)" for r in _restocked))
-    _bdf = sb.board_to_frame(_board, _box_stock, _today)
+    _bdf = sb.board_to_frame(_board, _box_stock, _today, cadence=_buyin_cadence())
     if _bdf.empty:
         st.success("현재 품절(미입고) 상품이 없습니다. 발주 품절목록에 뜨면 여기 자동 등록됩니다.")
     else:
-        st.caption(f"품절 {len(_bdf)}건 — 발주 품절목록 자동 등록 · 박스재고>0 들어오면 자동 입고처리. 🗑=수동 제거(로그 없음)")
-        _h = st.columns([2, 5, 3, 2, 1])
-        for _col, _t in zip(_h, ["관리코드", "상품명", "품절", "현재박스", ""]):
+        st.caption(f"품절 {len(_bdf)}건 — 발주 품절목록 자동 등록 · 박스재고>0 들어오면 자동 입고처리. 최근입고·평균주기·입고횟수=최근 1년 매입현황. 🗑=수동 제거(로그 없음)")
+        _w = [2, 4, 3, 1.4, 2, 1.4, 1.4, 1]
+        _h = st.columns(_w)
+        for _col, _t in zip(_h, ["관리코드", "상품명", "품절", "현재박스", "최근입고", "평균주기", "입고(1년)", ""]):
             _col.markdown(f"**{_t}**")
         for _r in _bdf.to_dict("records"):
-            _cc = st.columns([2, 5, 3, 2, 1])
+            _cc = st.columns(_w)
             _cc[0].write(_r["관리코드"])
             _cc[1].write(_r["상품명"])
             _since, _n = _r["품절시작일"], _r["N일째"]
             _cc[2].write(f"{pd.Timestamp(_since).strftime('%m월%d일')}부터 {_n}일째" if _since else "")
             _bs = _r["현재박스재고"]
             _cc[3].write("—" if _bs is None else f"{_bs:g}")
-            if _cc[4].button("🗑", key=f"sb_rm_{_r['관리코드']}", help="수동 제거(로그 없음)"):
+            _cc[4].write(_r.get("최근입고일") or "—")
+            _avg = _r.get("평균매입주기")
+            _cc[5].write("—" if _avg is None else f"{_avg:g}일")
+            _cnt = _r.get("입고횟수(1년)")
+            _cc[6].write("—" if _cnt is None else f"{_cnt:g}회")
+            if _cc[7].button("🗑", key=f"sb_rm_{_r['관리코드']}", help="수동 제거(로그 없음)"):
                 sb.write_board(_pat_d, _repo_d, sb.manual_remove(_board, _r["관리코드"]),
                                f"board: 수동 제거 {_r['관리코드']} ({_today})")
                 st.rerun()
