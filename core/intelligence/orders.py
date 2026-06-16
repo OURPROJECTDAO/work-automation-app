@@ -35,10 +35,14 @@ _KEEP = {0: "erp관리코드", 3: "상품명", 4: "옵션명", 6: "판매처", 8
          30: "판매가", 31: "정산금액raw", 32: "수수료", 33: "주문일", 34: "발주일",
          39: "판매처그룹", 40: "옵션추가항목1"}
 _INVOICE_COL = 10
+# 개별 .xls(HTML) PII 위치(키 생성용·저장 안 함). 통파일(.xlsx)은 Source.Name +1 시프트 → 헤더명 매핑 별도.
+_PII = {"이름": 12, "휴대폰": 14, "전화": 17, "주소": 18}
+_KEEP_CH = 6      # 판매처(채널 prefix)
+_KEEP_BALJU = 34  # 발주일(합포박스키 일자)
 _STR_COLS = ("erp관리코드", "상품명", "옵션명", "판매처", "상태", "판매처상품코드", "택배사",
              "상품코드", "카테고리", "판매처그룹", "옵션추가항목1")
 _NUM_COLS = ("상품수량", "주문수량", "판매가", "정산금액raw", "수수료")
-COLS = (["기준일"] + list(_KEEP.values()) + ["송장그룹"])
+COLS = (["기준일"] + list(_KEEP.values()) + ["송장그룹", "고객키", "합포박스키"])
 
 
 def _nfc(v):
@@ -62,14 +66,93 @@ def _hash_invoice(v):
     return hashlib.sha1(s.encode()).hexdigest()[:12] if s and s.lower() != "nan" else ""
 
 
-def parse_orders(file) -> pd.DataFrame:
-    """확장주문검색 .xls(경로/bytes/파일객체) → 비-PII 주문 DataFrame(기준일·송장그룹 포함)."""
+# ===== 채널 내 고객키 / 합포박스키 (ADR 0021) =====
+# robust 키 = 보이는 최소공통분모(마스킹/풀 무관 시간 일관). 솔트=st.secrets[data].customer_key_salt.
+# - 이름: 끝1자 제외(마스킹=끝1자, 실측 99.99%)·괄호 주석 제거·공백 제거.
+# - 전화: 뒤4자리(마스킹돼도 끝4 보임). 안심번호(4-4-4 가상·G마켓/옥션/쿠팡 등) 제외.
+# - 주소(고객키): 숫자/* 토큰 전까지 앞 토큰(시군구+도로명).
+# - 합포박스키: 풀이름+풀주소+발주일(박스=1회성·다운로드 내 일관).  솔트 없으면 키 빈값.
+_PAREN = re.compile(r"[\(\[（【].*?[\)\]）】]")
+ANON_CH = {"쿠팡(자동)", "11번가", "멸치쇼핑", "셀러허브 #1#1", "옥션 #2",
+           "G마켓", "G마켓 #2", "위메이크프라이스(자동)"}
+
+
+def _norm_ws(s):
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _name_front(nm):
+    s = re.sub(r"\s+", "", _PAREN.sub("", _nfc(nm)))
+    if len(s) >= 2:
+        s = s[:-1]
+    return s.rstrip("*")
+
+
+def _phone_last4(ph, anon):
+    if anon:
+        return ""
+    s = _nfc(ph)
+    parts = s.split("-")
+    if len(parts) == 3 and parts[0].isdigit() and len(parts[0]) == 4 and "*" not in s:
+        return ""                                  # 안심번호(4-4-4) per-row
+    d = re.findall(r"\d", s)
+    return "".join(d[-4:]) if len(d) >= 4 else ""
+
+
+def _addr_coarse(ad):
+    out = []
+    for t in _norm_ws(_nfc(ad)).split():
+        if any(c.isdigit() for c in t) or "*" in t:
+            break
+        out.append(t)
+        if len(out) >= 3:
+            break
+    return " ".join(out)
+
+
+def _date10(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    s = str(v)[:10]
+    return s if len(s) >= 8 and s[:4].isdigit() else ""
+
+
+def _cust_key(salt, ch, nm, ph, ad):
+    nf = _name_front(nm)
+    if not (salt and nf):
+        return ""
+    frag = "|".join([ch, nf, _phone_last4(ph, ch in ANON_CH), _addr_coarse(ad)])
+    return hashlib.sha1((salt + "|C|" + frag).encode()).hexdigest()[:16]
+
+
+def _box_key(salt, ch, nm, ad, balju):
+    fn, fa, bd = _norm_ws(_nfc(nm)), _norm_ws(_nfc(ad)), _date10(balju)
+    if not (salt and fn and fa and bd):
+        return ""
+    frag = "|".join([ch, fn, fa, bd])
+    return hashlib.sha1((salt + "|B|" + frag).encode()).hexdigest()[:16]
+
+
+def parse_orders(file, salt: str | None = None) -> pd.DataFrame:
+    """확장주문검색 .xls(경로/bytes/파일객체) → 비-PII 주문 DataFrame(기준일·송장그룹·고객키·합포박스키).
+
+    salt(=st.secrets[data].customer_key_salt) 있으면 robust 고객키/합포박스키 생성, 없으면 빈값.
+    PII(이름·전화·주소)는 키 생성에만 쓰고 저장 안 함(원본 폐기).
+    """
     src = io.BytesIO(file) if isinstance(file, (bytes, bytearray)) else file
     raw = pd.read_html(src, header=0)[0]
     if raw.shape[1] <= max(_KEEP):
         raise ValueError(f"확장주문검색 컬럼 부족: {raw.shape[1]}열 (≥{max(_KEEP) + 1} 필요)")
     out = pd.DataFrame({name: raw.iloc[:, i] for i, name in _KEEP.items()})
     out["송장그룹"] = raw.iloc[:, _INVOICE_COL].map(_hash_invoice)        # 원본 미저장(해시 그룹키)
+    # 키 생성(PII positional → 해시 → raw 폐기)
+    ch = raw.iloc[:, _KEEP_CH].map(_nfc)
+    nm = raw.iloc[:, _PII["이름"]]
+    ph = raw.iloc[:, _PII["휴대폰"]].where(raw.iloc[:, _PII["휴대폰"]].notna(), raw.iloc[:, _PII["전화"]])
+    ad = raw.iloc[:, _PII["주소"]]
+    bj = raw.iloc[:, _KEEP_BALJU]
+    out["고객키"] = [_cust_key(salt, c, n, p, a) for c, n, p, a in zip(ch, nm, ph, ad)]
+    out["합포박스키"] = [_box_key(salt, c, n, a, b) for c, n, a, b in zip(ch, nm, ad, bj)]
     for c in _STR_COLS:
         out[c] = out[c].map(_nfc).astype("string")
     for c in _NUM_COLS:
