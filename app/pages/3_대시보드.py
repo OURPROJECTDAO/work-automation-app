@@ -96,7 +96,13 @@ def load_ship_rate(pat: str, repo: str) -> dict:
         return {"rate": {}, "ch_rate": {}, "reconcile": {},
                 "stats": {"boxes": 0.0, "codes": 0, "months": [], "covered_pieces": 0.0}}
     pm = pd.read_csv(_REF / "product_master.csv", dtype=str, encoding="utf-8-sig")
-    return ship_alloc.compute_ship_rate(od, load_sales(pat, repo), make_box_lookup(pm))
+    try:                                                    # 175~200 물리합포 ceil(팩/3) 교정
+        hapo = set(pd.read_csv(_REF / "hapo_175_190.csv", dtype=str,
+                               encoding="utf-8-sig")["관리코드"].dropna())
+    except Exception:
+        hapo = None
+    return ship_alloc.compute_ship_rate(od, load_sales(pat, repo), make_box_lookup(pm),
+                                        hapo_codes=hapo)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
