@@ -29,6 +29,7 @@ from core.intelligence import daily_inbox as inbox
 from core.intelligence import stockout_board as sb
 from core.intelligence import purchases as _buy
 from core.intelligence import stock_history as shh
+from core.workflows import channel_margin_monitor as cmm
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_API = "https://api.github.com/repos/OURPROJECTDAO/work-automation-app/contents"
@@ -155,6 +156,128 @@ def _baseline_dict():
         k = _nfc(row["관리코드"])
         out[k] = {c: float(row[c]) for c in chans if row[c] not in ("", "None")}
     return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cmm_baseline_text():
+    code, text = _gh_raw("reference/baseline_margin.csv")
+    return text.decode("utf-8") if code == 200 else ""
+
+
+@st.cache_data(ttl=600, show_spinner="채널 권장가 불러오는 중...")
+def _cmm_listing(channel: str):
+    """채널 listing(reference/listing_<key>.csv) → (recs, compute_listing rows). 없으면 None."""
+    cfg = cmm.CHANNEL_CONFIG.get(channel)
+    if not cfg:
+        return None
+    code, text = _gh_raw(f"reference/listing_{cfg['key']}.csv")
+    if code != 200 or not text:
+        return None
+    recs = cmm.csv_text_to_recs(text.decode("utf-8"))
+    bl = _cmm_baseline_text()
+    override = cmm.parse_baseline_dict(bl) if bl else None
+    rows, _ = cmm.compute_listing(recs, channel, str(_REF), baseline_override=override)
+    return recs, rows
+
+
+def _rng(vals):
+    vals = [int(v) for v in vals if v not in (None, "", 0)]
+    if not vals:
+        return None
+    lo, hi = min(vals), max(vals)
+    return f"{lo:,}" if lo == hi else f"{lo:,}~{hi:,}"
+
+
+def _reco_lookup(channels):
+    """채널 set → {(채널, 관리코드NFC): (권장가표시, 현재가표시)} — 판매가 기준 권장가."""
+    out = {}
+    for ch in channels:
+        try:
+            data = _cmm_listing(ch)
+        except Exception:
+            data = None
+        if not data:
+            continue
+        _, rows = data
+        agg = {}
+        for r in rows:
+            mc = _nfc(r.get("관리코드"))
+            if not mc:
+                continue
+            a = agg.setdefault(mc, {"reco": [], "cur": []})
+            if r.get("권장가") is not None:
+                a["reco"].append(r["권장가"])
+            if r.get("판매가") is not None:
+                a["cur"].append(cmm._num(r.get("판매가")))
+        for mc, a in agg.items():
+            out[(ch, mc)] = (_rng(a["reco"]), _rng(a["cur"]))
+    return out
+
+
+def _gen_price_form(channel, cfg, pf, recs, rows, pids):
+    """선택 채널·pids → 가격변경 시트 bytes (cmm 빌더 재사용). 반환 dict(channel/bytes/preview 또는 error)."""
+    try:
+        mode = pf.get("mode")
+        prev = []
+        if mode == "append":
+            items, prev, _sk = cmm.build_append_items(pf, rows, recs, pids)
+            if not items:
+                return {"channel": channel, "error": "권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
+            out = cmm.build_price_form_append((_REF / pf["template"]).read_bytes(), items, pf)
+        elif mode == "filter":
+            rc, raw = _gh_raw(f"reference/listing_{cfg['key']}.xlsx")
+            if rc != 200 or not raw:
+                return {"channel": channel, "error": f"{channel} 원본양식(.xlsx)이 없습니다. 채널마진모니터에서 '상품관리 갱신 → 전체 교체'를 1회 실행하세요."}
+            out, prev, _sk, _ms = cmm.build_filter_price_xlsx(raw, rows, pids, cfg)
+            if not prev:
+                return {"channel": channel, "error": "권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
+        else:  # 스마트스토어 bulk(원본 filter)
+            new_prices, _sk = cmm.compute_new_prices(rows, recs, set(pids))
+            if not new_prices:
+                return {"channel": channel, "error": "권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
+            rc, raw = _gh_raw(f"reference/listing_{cfg['key']}.xlsx")
+            if rc != 200 or not raw:
+                return {"channel": channel, "error": f"{channel} 원본양식(.xlsx)이 없습니다. 채널마진모니터에서 '상품관리 갱신 → 전체 교체'를 1회 실행하세요."}
+            out, _kept, _ms = cmm.build_bulk_price_xlsx(raw, new_prices, cfg)
+            rb = {r["상품번호"]: r for r in recs}
+            ro = {r["상품번호"]: r for r in rows}
+            prev = [{"상품명": ro[p]["상품명"], "현재판매가": int(rb[p]["판매가"]),
+                     "새판매가": v[0], "권장가": ro[p]["권장가"]} for p, v in new_prices.items()]
+        return {"channel": channel, "bytes": out, "preview": prev,
+                "name": f"{channel}_가격변경_{datetime.now(_KST):%Y%m%d}.xlsx"}
+    except Exception as e:
+        return {"channel": channel, "error": f"생성 오류: {e}"}
+
+
+def _do_price_change(channel, codes):
+    """단일 채널 + 선택 관리코드 set → 그 채널 가격변경 시트 생성/다운로드 UI."""
+    cfg = cmm.CHANNEL_CONFIG.get(channel) or {}
+    pf = cfg.get("price_form")
+    if not pf:
+        st.info(f"**{channel}**는 가격변경 양식이 아직 없습니다(예: 알리). "
+                "지원: 스마트스토어·식봄·캐시노트·배민상회·쿠팡·올웨이즈·ESM.")
+        return
+    data = _cmm_listing(channel)
+    if not data:
+        st.warning(f"**{channel}** 저장 listing이 없습니다. 채널마진모니터에서 '상품관리 갱신'을 1회 실행하세요.")
+        return
+    recs, rows = data
+    pids = [r["상품번호"] for r in rows if _nfc(r.get("관리코드")) in codes]
+    if not pids:
+        st.warning("선택 상품이 해당 채널 listing에 없습니다(listing 갱신 필요할 수 있음).")
+        return
+    if st.button(f"🛠️ {channel} 가격변경 시트 생성 — 관리코드 {len(codes)}개 → listing {len(pids)}건",
+                 type="primary", key="d_pc_gen"):
+        st.session_state["d_pcform"] = _gen_price_form(channel, cfg, pf, recs, rows, pids)
+    _form = st.session_state.get("d_pcform")
+    if _form and _form.get("channel") == channel:
+        if _form.get("error"):
+            st.warning(_form["error"])
+        else:
+            st.download_button(f"⬇️ {channel} 가격변경 시트 다운로드 (.xlsx)",
+                               _form["bytes"], _form["name"], type="primary", key="d_pc_dl")
+            if _form.get("preview"):
+                st.dataframe(pd.DataFrame(_form["preview"]), hide_index=True, use_container_width=True)
 
 
 def _to_xlsx(df: pd.DataFrame, title: str) -> bytes:
@@ -365,25 +488,51 @@ else:
                          "품목수": st.column_config.NumberColumn(format="%d"),
                      })
         _view = st.radio("보기", ["이상치만", "전체"], horizontal=True, key="d_view")
-        _show = anom if _view == "이상치만" else ddf
+        _show = (anom if _view == "이상치만" else ddf).reset_index(drop=True)
         if _show.empty:
             st.success("✅ 당일 역마진·기준 미달 상품이 없습니다.")
         else:
-            _d = _show.copy()
+            _lk = _reco_lookup(set(_show["채널"]))
+            _disp = _show.copy()
+            _disp["현재가"] = [_lk.get((ch, _nfc(mc)), (None, None))[1]
+                            for ch, mc in zip(_show["채널"], _show["관리코드"])]
+            _disp["권장가"] = [_lk.get((ch, _nfc(mc)), (None, None))[0]
+                            for ch, mc in zip(_show["채널"], _show["관리코드"])]
             for col in ("마진율", "기준마진"):
-                _d[col] = (_d[col].astype(float) * 100).round(1)
-            st.dataframe(_d, hide_index=True, use_container_width=True, height=460,
-                         column_config={
-                             "매출": st.column_config.NumberColumn("매출(net)", format="%d"),
-                             "낱개수량": st.column_config.NumberColumn("낱개", format="%d"),
-                             "박스": st.column_config.NumberColumn("박스(송장배분)", format="%.1f"),
-                             "원가": st.column_config.NumberColumn(format="%d"),
-                             "택배": st.column_config.NumberColumn(format="%d"),
-                             "마진": st.column_config.NumberColumn(format="%d"),
-                             "마진율": st.column_config.NumberColumn("마진%", format="%.1f"),
-                             "기준마진": st.column_config.NumberColumn("기준%", format="%.1f"),
-                             "역마진": st.column_config.CheckboxColumn("역마진"),
-                             "미달": st.column_config.CheckboxColumn("미달"),
-                         })
-            st.download_button("📥 XLSX", _to_xlsx(anom, "당일마진이상"),
+                _disp[col] = (_disp[col].astype(float) * 100).round(1)
+            _order = ["채널", "관리코드", "상품명", "매출", "낱개수량", "박스", "원가", "택배",
+                      "마진", "마진율", "기준마진", "현재가", "권장가", "역마진", "미달"]
+            st.caption("왼쪽 체크박스로 상품 선택 → 아래에서 **그 채널** 가격변경 시트 다운로드. "
+                       "권장가 = 채널 기준마진율 달성 판매가(채널마진모니터 listing 기준).")
+            _ev = st.dataframe(_disp[_order], hide_index=True, use_container_width=True, height=460,
+                               on_select="rerun", selection_mode="multi-row", key="d_table",
+                               column_config={
+                                   "매출": st.column_config.NumberColumn("매출(net)", format="%d"),
+                                   "낱개수량": st.column_config.NumberColumn("낱개", format="%d"),
+                                   "박스": st.column_config.NumberColumn("박스(송장배분)", format="%.1f"),
+                                   "원가": st.column_config.NumberColumn(format="%d"),
+                                   "택배": st.column_config.NumberColumn(format="%d"),
+                                   "마진": st.column_config.NumberColumn(format="%d"),
+                                   "마진율": st.column_config.NumberColumn("마진%", format="%.1f"),
+                                   "기준마진": st.column_config.NumberColumn("기준%", format="%.1f"),
+                                   "현재가": st.column_config.TextColumn("현재가"),
+                                   "권장가": st.column_config.TextColumn("권장가(채널기준)"),
+                                   "역마진": st.column_config.CheckboxColumn("역마진"),
+                                   "미달": st.column_config.CheckboxColumn("미달"),
+                               })
+            st.download_button("📥 XLSX (전체 이상치)", _to_xlsx(anom, "당일마진이상"),
                                "당일마진_이상.xlsx", key="d_dl")
+            try:
+                _sel = list(_ev.selection["rows"])
+            except Exception:
+                _sel = []
+            if _sel:
+                _selrows = _show.iloc[_sel]
+                _selch = sorted(set(_selrows["채널"]))
+                st.markdown("---")
+                st.markdown("#### 🧾 선택 상품 → 채널 가격변경 시트")
+                if len(_selch) > 1:
+                    st.warning("⚠️ 가격변경 시트는 **한 채널만** 가능합니다. 한 채널 상품만 선택하세요. "
+                               f"(현재 선택 채널: {', '.join(_selch)})")
+                else:
+                    _do_price_change(_selch[0], {_nfc(x) for x in _selrows["관리코드"]})
