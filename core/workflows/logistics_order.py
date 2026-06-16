@@ -12,6 +12,7 @@
 import io
 import math
 import re
+import unicodedata
 from datetime import datetime, timezone, timedelta
 
 _KST = timezone(timedelta(hours=9))  # 한국 표준시 UTC+9
@@ -463,7 +464,7 @@ def generate_archive_xlsx(archive_df: pd.DataFrame) -> bytes:
 
 
 def generate_result_xlsx(logistics_df: pd.DataFrame,
-                         stockout_df: pd.DataFrame) -> bytes:
+                         stockout_df: pd.DataFrame, cadence: dict = None) -> bytes:
     """최종결과물 xlsx : 물류팀 + 품절목록."""
     wb = Workbook()
 
@@ -560,8 +561,9 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
 
     # ── 품절목록 시트 ─────────────────────────────
     ws2 = wb.create_sheet("품절목록")
-    ws2.append(["관리코드", "상품명", "발주수량", "현재고"])
-    for c in range(1, 5):
+    cadence = cadence or {}
+    ws2.append(["관리코드", "상품명", "발주수량", "현재고", "최근 입고일", "평균매입주기(일)"])
+    for c in range(1, 7):
         cell = ws2.cell(row=1, column=c)
         cell.fill = _SEC_FILL
         cell.font = _SEC_FONT
@@ -569,19 +571,29 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
 
     r_idx = 2
     for _, r in stockout_df.iterrows():
-        ws2.append([r["관리코드"], r["상품명"], r["발주수량"], int(r["현재고"])])
+        _code = unicodedata.normalize("NFC", str(r["관리코드"]).strip())
+        _info = cadence.get(_code, {})
+        _last = _info.get("최근입고일")
+        _last_s = _last.strftime("%Y-%m-%d") if (_last is not None and pd.notna(_last)) else ""
+        _avg = _info.get("평균주기")
+        _avg_v = round(_avg) if _avg is not None else ""
+        ws2.append([r["관리코드"], r["상품명"], r["발주수량"], int(r["현재고"]), _last_s, _avg_v])
         cf = ws2.cell(row=r_idx, column=4)
         cf.font = _OUT_FONT
         cf.fill = _OUT_FILL
         cf.alignment = _RIGHT
         ws2.cell(row=r_idx, column=3).alignment = _CENTER
+        ws2.cell(row=r_idx, column=5).alignment = _CENTER
+        ws2.cell(row=r_idx, column=6).alignment = _CENTER
         r_idx += 1
 
-    _write_border(ws2, 1, ws2.max_row, 1, 4)
+    _write_border(ws2, 1, ws2.max_row, 1, 6)
     ws2.column_dimensions["A"].width = 12
     ws2.column_dimensions["B"].width = 38
     ws2.column_dimensions["C"].width = 10
     ws2.column_dimensions["D"].width = 10
+    ws2.column_dimensions["E"].width = 13
+    ws2.column_dimensions["F"].width = 14
 
     buf = io.BytesIO()
     wb.save(buf)
