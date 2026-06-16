@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 import datetime
+import re
 
 _KST = datetime.timezone(datetime.timedelta(hours=9))  # 한국 표준시 UTC+9
 import io
@@ -271,6 +272,44 @@ def process(baeju_rows, baemin_ws, sss_ws, cls_map, comm_map, sub_map,
 # ── 출력 xlsx ─────────────────────────────────────────────────
 _HDR_FILL = PatternFill("solid", fgColor="2F5496")
 _HDR_FONT = Font(color="FFFFFF", bold=True)
+
+
+# ── 검수: 박스(전체) 시트 이상 탐지 (소분목록 누락 의심) ──────
+_ALPHA_RE = re.compile(r"[A-Za-z]")          # 박스 코드는 숫자-하이픈(영문 없음)
+_UNIT_TAG_RE = re.compile(r"\[\s*낱개")      # 낱개성 listing 상품명 태그
+
+
+def detect_box_anomalies(sheets: dict) -> list:
+    """전체(박스) 시트에 남은 행 중 '박스 코드가 아닌' 상품 탐지 — 비차단 경고.
+
+    소분목록에 아직 등록되지 않은 낱개성 코드는 낱개 시트로 이동되지 못하고
+    전체 시트에 그대로 남는다(파이프라인은 sub_list 멤버십만 본다). 파이프라인이
+    쓰지 않는 독립 신호로 이를 잡아 사용자에게 검수를 유도한다.
+      - 신호 A(코드)  : 관리코드에 영문자 포함 — 박스 코드는 숫자-하이픈, 낱개/PC/소분 코드만 영문.
+      - 신호 B(상품명): 상품명에 '[낱개' 태그.
+    하나라도 걸리면 검수 후보, 둘 다면 고확신. 전체 14시트만 검사(낱개 시트는 정상 이동분).
+    """
+    out = []
+    for name in ALL_SHEETS:
+        for r in sheets.get(name, []):
+            code = _code(r.get("B"))
+            pname = str(r.get("C") or "")
+            sig_code = bool(_ALPHA_RE.search(code))
+            sig_name = bool(_UNIT_TAG_RE.search(pname))
+            if sig_code or sig_name:
+                signals = []
+                if sig_code:
+                    signals.append("코드영문")
+                if sig_name:
+                    signals.append("상품명낱개태그")
+                out.append({
+                    "시트": name,
+                    "관리코드": code,
+                    "상품명": pname,
+                    "신호": " + ".join(signals),
+                    "확신": "높음" if (sig_code and sig_name) else "검토",
+                })
+    return out
 
 
 def generate_output_xlsx(sheets: dict, units: dict, run_date: datetime.date) -> bytes:
