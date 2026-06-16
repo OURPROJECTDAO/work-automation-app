@@ -231,5 +231,57 @@ st.caption(
     "ⓘ **마진율 = 순이익÷매입가**(분모 고정 → 채널 비교 정직). "
     "**정산단가**=실수령 낱개단가(매출÷판매량·일관), **노출가**=EA 소비자가(판매단위 기준·낱개 아님·세트/번들은 EA 과소). "
     "**택배**: 실측=EA 송장그룹 실배분(합포 ceil(팩/3) 교정), 추정=EA 미경유 채널 fallback. "
-    "탄력성(가격↓→매출↑) 예측은 후속 — 지금은 *현재 채널 비교(서술)* 단계."
+    "아래 **마진율별 판매량**은 같은 상품을 마진을 달리 두었던 달들의 판매량을 모은 것 — 실무 감용."
 )
+
+
+# ── 마진율별 판매량 (최근 18개월) — 당시 마진율 얼마에 얼마 팔렸나 ─────────────
+st.divider()
+st.subheader("📉 마진율별 판매량 (최근 18개월)")
+st.caption("이 상품을 **당시 마진율 얼마에 두었을 때 얼마나 팔렸나**. 점 하나 = 한 달(채널별 색). "
+           "마진을 낮춘 달이 더 많이 팔렸다면 ‘마진 양보 → 물량’ 효과. 상단 기간 필터와 무관하게 18개월 고정.")
+
+_ts18 = pd.Timestamp((pd.Timestamp(dmax) - pd.DateOffset(months=18)).date())
+_v18 = df[(df["거래일자"] >= _ts18) & (df["거래일자"] <= pd.Timestamp(dmax) + pd.Timedelta(days=1))
+          & (df["상호명"].astype(str).isin(online))].copy()
+if _v18.empty:
+    st.info("최근 18개월 온라인 매출 데이터가 없습니다.")
+else:
+    _prod18 = cc.compute_online_margin(_v18, ship, unit, use_actual=use_actual)
+    _sub = _prod18[_prod18["관리코드"].astype(str).map(_nfc) == _nfc(code)].copy()
+    if _sub.empty:
+        st.info("최근 18개월 이 상품의 온라인 판매 기록이 없습니다.")
+    else:
+        _sub["월"] = _sub["거래일자"].dt.to_period("M").astype(str)
+        gg = (_sub.groupby(["상호명", "월"], observed=True)
+                  .agg(순=("_순", "sum"), 매입=("_매입", "sum"), 판매량=("수량", "sum"))
+                  .reset_index())
+        gg = gg[gg["매입"] > 0].copy()
+        if gg.empty:
+            st.info("집계할 월별 데이터가 없습니다(매입가 0).")
+        else:
+            gg["마진율"] = (gg["순"] / gg["매입"] * 100).round(2)
+            gg["채널"] = gg["상호명"].map(cc.label)
+            gg["판매량"] = gg["판매량"].round().astype("int64")
+            st.scatter_chart(gg[["채널", "월", "마진율", "판매량"]],
+                             x="마진율", y="판매량", color="채널", height=340)
+            # 마진율 구간별 평균 월판매량
+            _bins = [-float("inf"), 0, 8, 12, 16, float("inf")]
+            _labels = ["역마진", "0–8%", "8–12%", "12–16%", "16%+"]
+            gg["마진구간"] = pd.cut(gg["마진율"], bins=_bins, labels=_labels)
+            tbl = (gg.groupby(["채널", "마진구간"], observed=True)
+                     .agg(평균월판매량=("판매량", "mean"), 월수=("판매량", "size")).reset_index())
+            tbl["평균월판매량"] = tbl["평균월판매량"].round().astype("int64")
+            piv = (tbl.pivot(index="채널", columns="마진구간", values="평균월판매량")
+                      .reindex(columns=[l for l in _labels if l in set(tbl["마진구간"])]))
+            cnt = (tbl.pivot(index="채널", columns="마진구간", values="월수")
+                      .reindex(columns=piv.columns).fillna(0).astype(int))
+            st.caption("마진율 구간별 **평균 월 판매량**(낱개) — 마진을 낮출수록 많이 팔리나? (괄호=해당 구간 월수)")
+            disp = piv.copy()
+            for c in disp.columns:
+                disp[c] = [f"{int(v):,} ({cnt.loc[i, c]}M)" if pd.notna(v) else "—"
+                           for i, v in zip(disp.index, disp[c])]
+            st.dataframe(disp, use_container_width=True)
+            st.caption("ⓘ x=그달 실현마진율(순이익÷매입가) · y=그달 판매량(낱개) · 점=월. "
+                       "왼쪽 위로 갈수록 ‘마진 낮음 + 많이 팔림’. "
+                       "품절·계절·행사는 보정 안 함 — 아래로 튄 점은 품절일 수 있으니 직접 판단.")
