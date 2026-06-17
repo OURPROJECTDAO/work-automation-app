@@ -188,29 +188,72 @@ def _rng(vals):
     return f"{lo:,}" if lo == hi else f"{lo:,}~{hi:,}"
 
 
-def _reco_lookup(channels):
-    """채널 set → {(채널, 관리코드NFC): (권장가표시, 현재가표시)} — 판매가 기준 권장가."""
-    out = {}
+@st.cache_data(ttl=600, show_spinner=False)
+def _cmm_refs():
+    return cmm.load_references(str(_REF))
+
+
+def _reco_from_master(channel, code, refs, bdict):
+    """product_master 매입가 기준 권장가(채널 기준마진 달성가) — listing 불요. N=1·채널기본 배송비 추정.
+    cmm 권장가 공식과 동일: ((매입가+2700)/(1-기준마진) - 배송비*0.967)/(1-수수료), 100원 올림."""
+    cfg = cmm.CHANNEL_CONFIG.get(channel) or {}
+    _typ, base, *_ = cmm.resolve_code(code, refs)
+    if base is None:
+        return None
+    bm = (bdict.get(code) or {}).get(cfg.get("baseline_col"))
+    b = cmm._num(bm, None) if bm not in (None, "") else None
+    if b is None or b >= 1:
+        return None
+    comm = cfg.get("commission")
+    if comm is None:                                  # 배민 등 상품별 수수료 → listing 없으면 대략치
+        comm = cfg.get("commission_add", 0.0) + 0.045
+    매입가 = base * 1.0                                # N 미상 → 1 가정(listing 있으면 실 N 사용)
+    배송비 = cfg.get("ship_fee_const", 0) or 0
+    reco = ((매입가 + cfg.get("real_ship", 2700)) / (1 - b)
+            - 배송비 * cfg.get("ship_settle", 0.967)) / (1 - comm)
+    return cmm._ceil100(reco)
+
+
+def _reco_lookup(pairs):
+    """{(채널,관리코드NFC):(권장가표시,현재가표시)}.
+    권장가 = listing에 있으면 정확값(실 N·실 배송비), 없으면 product_master 매입가 기준 추정(항상 표시).
+    현재가 = 채널 저장 listing 기준(미등재면 None — 최신성 인정)."""
+    refs = _cmm_refs()
+    bl = _cmm_baseline_text()
+    bdict = cmm.parse_baseline_dict(bl) if bl else {}
+    channels = {ch for ch, _ in pairs}
+    lmap = {}
     for ch in channels:
         try:
             data = _cmm_listing(ch)
         except Exception:
             data = None
-        if not data:
-            continue
-        _, rows = data
-        agg = {}
-        for r in rows:
-            mc = _nfc(r.get("관리코드"))
-            if not mc:
-                continue
-            a = agg.setdefault(mc, {"reco": [], "cur": []})
-            if r.get("권장가") is not None:
-                a["reco"].append(r["권장가"])
-            if r.get("판매가") is not None:
-                a["cur"].append(cmm._num(r.get("판매가")))
-        for mc, a in agg.items():
-            out[(ch, mc)] = (_rng(a["reco"]), _rng(a["cur"]))
+        m = {}
+        if data:
+            _, rows = data
+            for r in rows:
+                mc = _nfc(r.get("관리코드"))
+                if not mc:
+                    continue
+                a = m.setdefault(mc, {"reco": [], "cur": []})
+                if r.get("권장가") is not None:
+                    a["reco"].append(r["권장가"])
+                if r.get("판매가") is not None:
+                    a["cur"].append(cmm._num(r.get("판매가")))
+        lmap[ch] = m
+    out = {}
+    for ch, code in pairs:
+        mc = _nfc(code)
+        a = lmap.get(ch, {}).get(mc)
+        reco = _rng(a["reco"]) if (a and a["reco"]) else None
+        cur = _rng(a["cur"]) if (a and a["cur"]) else None
+        if reco is None:                              # listing 권장가 없음 → product_master 기준 역산
+            try:
+                est = _reco_from_master(ch, mc, refs, bdict)
+            except Exception:
+                est = None
+            reco = f"{est:,}" if est else None
+        out[(ch, mc)] = (reco, cur)
     return out
 
 
@@ -500,7 +543,7 @@ else:
         if _show.empty:
             st.success("✅ 당일 역마진·기준 미달 상품이 없습니다.")
         else:
-            _lk = _reco_lookup(set(_show["채널"]))
+            _lk = _reco_lookup({(ch, _nfc(mc)) for ch, mc in zip(_show["채널"], _show["관리코드"])})
             _disp = _show.copy()
             _disp["현재가"] = [_lk.get((ch, _nfc(mc)), (None, None))[1]
                             for ch, mc in zip(_show["채널"], _show["관리코드"])]
@@ -511,7 +554,8 @@ else:
             _order = ["채널", "관리코드", "상품명", "매출", "낱개수량", "박스", "원가", "택배",
                       "마진", "마진율", "기준마진", "현재가", "권장가", "역마진", "미달"]
             st.caption("왼쪽 체크박스로 상품 선택 → 아래에서 **그 채널** 가격변경 시트 다운로드. "
-                       "권장가 = 채널 기준마진율 달성 판매가(채널마진모니터 listing 기준).")
+                       "권장가 = 채널 기준마진율 달성 판매가(매입가 기준 역산 — 항상 표시). "
+                       "현재가 = 채널 저장 listing 기준(미등재면 빈칸).")
             _ev = st.dataframe(_disp[_order], hide_index=True, use_container_width=True, height=460,
                                on_select="rerun", selection_mode="multi-row", key="d_table",
                                column_config={
