@@ -214,10 +214,18 @@ def _reco_lookup(channels):
     return out
 
 
+def _supports_price_change(cfg) -> bool:
+    """가격변경 시트 생성 가능 채널? price_form(append/filter) 또는 스마트스토어형 bulk(즉시할인 cols·consolidate 아님). 알리=불가."""
+    if cfg.get("price_form"):
+        return True
+    cols = cfg.get("cols") or {}
+    return ("즉시할인" in cols) and not cfg.get("consolidate")
+
+
 def _gen_price_form(channel, cfg, pf, recs, rows, pids):
     """선택 채널·pids → 가격변경 시트 bytes (cmm 빌더 재사용). 반환 dict(channel/bytes/preview 또는 error)."""
     try:
-        mode = pf.get("mode")
+        mode = (pf or {}).get("mode")
         prev = []
         if mode == "append":
             items, prev, _sk = cmm.build_append_items(pf, rows, recs, pids)
@@ -253,7 +261,7 @@ def _do_price_change(channel, codes):
     """단일 채널 + 선택 관리코드 set → 그 채널 가격변경 시트 생성/다운로드 UI."""
     cfg = cmm.CHANNEL_CONFIG.get(channel) or {}
     pf = cfg.get("price_form")
-    if not pf:
+    if not _supports_price_change(cfg):
         st.info(f"**{channel}**는 가격변경 양식이 아직 없습니다(예: 알리). "
                 "지원: 스마트스토어·식봄·캐시노트·배민상회·쿠팡·올웨이즈·ESM.")
         return
