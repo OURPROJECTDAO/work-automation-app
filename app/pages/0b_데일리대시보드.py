@@ -164,10 +164,23 @@ def _cmm_baseline_text():
     return text.decode("utf-8") if code == 200 else ""
 
 
+def _cmm_key(channel):
+    """데일리 채널명 → CHANNEL_CONFIG 키 보정. ESM은 cfg 키가 'esm'(소문자)라
+    데일리 SHEET_TO_CMM 'ESM'(대문자)과 불일치 → 대소문자 무시 매칭으로 해소(전 채널 방어)."""
+    if channel in cmm.CHANNEL_CONFIG:
+        return channel
+    low = str(channel).lower()
+    for k in cmm.CHANNEL_CONFIG:
+        if k.lower() == low:
+            return k
+    return channel
+
+
 @st.cache_data(ttl=600, show_spinner="채널 권장가 불러오는 중...")
 def _cmm_listing(channel: str):
     """채널 listing(reference/listing_<key>.csv) → (recs, compute_listing rows). 없으면 None."""
-    cfg = cmm.CHANNEL_CONFIG.get(channel)
+    ck = _cmm_key(channel)
+    cfg = cmm.CHANNEL_CONFIG.get(ck)
     if not cfg:
         return None
     code, text = _gh_raw(f"reference/listing_{cfg['key']}.csv")
@@ -176,7 +189,7 @@ def _cmm_listing(channel: str):
     recs = cmm.csv_text_to_recs(text.decode("utf-8"))
     bl = _cmm_baseline_text()
     override = cmm.parse_baseline_dict(bl) if bl else None
-    rows, _ = cmm.compute_listing(recs, channel, str(_REF), baseline_override=override)
+    rows, _ = cmm.compute_listing(recs, ck, str(_REF), baseline_override=override)
     return recs, rows
 
 
@@ -196,7 +209,7 @@ def _cmm_refs():
 def _reco_from_master(channel, code, refs, bdict):
     """product_master 매입가 기준 권장가(채널 기준마진 달성가) — listing 불요. N=1·채널기본 배송비 추정.
     cmm 권장가 공식과 동일: ((매입가+2700)/(1-기준마진) - 배송비*0.967)/(1-수수료), 100원 올림."""
-    cfg = cmm.CHANNEL_CONFIG.get(channel) or {}
+    cfg = cmm.CHANNEL_CONFIG.get(_cmm_key(channel)) or {}
     _typ, base, *_ = cmm.resolve_code(code, refs)
     if base is None:
         return None
@@ -315,7 +328,7 @@ def _gen_price_form(channel, cfg, pf, recs, rows, pids):
 
 def _do_price_change(channel, codes):
     """단일 채널 + 선택 관리코드 set → 그 채널 가격변경 시트 생성/다운로드 UI."""
-    cfg = cmm.CHANNEL_CONFIG.get(channel) or {}
+    cfg = cmm.CHANNEL_CONFIG.get(_cmm_key(channel)) or {}
     pf = cfg.get("price_form")
     if not _supports_price_change(cfg):
         st.info(f"**{channel}**는 가격변경 양식이 아직 없습니다(예: 알리). "
