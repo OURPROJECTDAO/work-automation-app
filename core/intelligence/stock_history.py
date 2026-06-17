@@ -211,6 +211,48 @@ def detect_transitions(snaps: pd.DataFrame, in_stock_threshold: float = 0.0) -> 
             .sort_values(["금일", "상품코드"]).reset_index(drop=True))
 
 
+def detect_new_stock(snaps: pd.DataFrame, since=None,
+                     in_stock_threshold: float = 0.0) -> pd.DataFrame:
+    """재고가 새로 생긴 상품코드 — 입고 전이(≤thr→양수) ∪ 신규 등재(최초 등장+양수).
+
+    detect_transitions(입고)는 *직전 결측(신규 등재)을 제외*하므로(직전값 있어야 잡힘),
+    한 번도 안 보이던 상품코드가 재고를 갖고 처음 나타난 경우를 따로 더한다
+    (= 신규 업로드 대상 탐지: '새로 들어왔는데 아직 채널 미등록' 판별의 재고 신호).
+    ★ baseline floor: forward 적립이라 **최초 스냅샷일(seed)에 처음 뜬 코드는 신규 제외**
+      (그날 = 기존 catalog seed. 그 이후 처음 뜬 것만 진짜 신규). 입고 전이는 직전값이
+      있어야 잡히므로 seed 자동 제외.
+    since(date/Timestamp) 주면 이벤트일 ≥ since 만. 상품코드별 최신 이벤트 1건.
+    반환: 상품코드·관리코드·이벤트일·금일재고·유형(입고/신규등재).
+    """
+    cols = ["상품코드", "관리코드", "이벤트일", "금일재고", "유형"]
+    if snaps is None or snaps.empty:
+        return pd.DataFrame(columns=cols)
+    s = snaps.sort_values(["상품코드", "스냅샷일자"]).copy()
+    s["스냅샷일자"] = pd.to_datetime(s["스냅샷일자"])
+    s["박스재고"] = pd.to_numeric(s["박스재고"], errors="coerce").fillna(0.0)
+    thr = in_stock_threshold
+    baseline = s["스냅샷일자"].min()
+    s["_prev재고"] = s.groupby("상품코드")["박스재고"].shift(1)
+    s["_first일"] = s.groupby("상품코드")["스냅샷일자"].transform("min")
+    cur_in = s["박스재고"] > thr
+    prev_in = s["_prev재고"] > thr
+    is_restock = (~prev_in) & cur_in & s["_prev재고"].notna()
+    is_new = s["_prev재고"].isna() & cur_in & (s["_first일"] > baseline)
+    s["유형"] = None
+    s.loc[is_restock, "유형"] = "입고"
+    s.loc[is_new, "유형"] = "신규등재"
+    ev = s[s["유형"].notna()].copy()
+    if since is not None:
+        ev = ev[ev["스냅샷일자"] >= pd.Timestamp(since)]
+    if ev.empty:
+        return pd.DataFrame(columns=cols)
+    ev = ev.rename(columns={"스냅샷일자": "이벤트일", "박스재고": "금일재고"})
+    ev = (ev.sort_values(["상품코드", "이벤트일"])
+            .drop_duplicates("상품코드", keep="last"))
+    return (ev[cols].sort_values(["이벤트일", "상품코드"], ascending=[False, True])
+            .reset_index(drop=True))
+
+
 PRICE_FIELDS = {"매입단가": "매입가", "매출단가": "판매가"}
 
 
