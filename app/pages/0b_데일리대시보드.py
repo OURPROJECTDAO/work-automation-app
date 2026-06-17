@@ -480,7 +480,7 @@ else:
                 return ""
 
             _sty = (_disp.style
-                    .applymap(_dir_color, subset=["방향"])
+                    .map(_dir_color, subset=["방향"])
                     .format({"전일가": "{:,.0f}", "금일가": "{:,.0f}",
                              "변동률(%)": "{:.2f}", "박스재고": "{:,.0f}"}, na_rep="—"))
             st.dataframe(_sty, hide_index=True, use_container_width=True, height=360)
