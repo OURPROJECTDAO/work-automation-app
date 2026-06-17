@@ -30,6 +30,7 @@ from core.intelligence import stockout_board as sb
 from core.intelligence import purchases as _buy
 from core.intelligence import stock_history as shh
 from core.workflows import channel_margin_monitor as cmm
+from core.workflows import upload_monitor as um
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_API = "https://api.github.com/repos/OURPROJECTDAO/work-automation-app/contents"
@@ -118,6 +119,55 @@ def _price_changes(days: int, threshold: float):
             return chg
         cutoff = pd.Timestamp(datetime.now(_KST).date()) - pd.Timedelta(days=days)
         return chg[pd.to_datetime(chg["금일"]) >= cutoff].reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=1800, show_spinner="신규 입고·미업로드 감지 중...")
+def _new_uploads(days: int):
+    """최근 days일 재고 새로 생긴(입고·신규등재) 상품코드 ∩ 8채널 전부 미업로드 ∩ 재고>0.
+
+    재고 신호 = stock_history.detect_new_stock(1b 스냅샷). 채널 미등록 판정·제외/skip은
+    upload_monitor 코어 재사용(중복 0 — 업로드감시의 '최근 입고' 서브셋). 키=상품코드.
+    반환 컬럼: 관리코드·상품명·박스재고·유형·이벤트일·_mc·올릴채널수.
+    """
+    pat, repo = _data_secret()
+    if not pat:
+        return pd.DataFrame()
+    try:
+        snaps = shh.read_all_snapshots(pat, repo)   # baseline floor용 전 기간(월경계 연속)
+        since = pd.Timestamp(datetime.now(_KST).date()) - pd.Timedelta(days=days)
+        ev = shh.detect_new_stock(snaps, since=since)
+        if ev.empty:
+            return pd.DataFrame()
+        refs = um.load_references(str(_REF))
+        rows = um.build_gap_table(str(_REF), refs)   # 비판매 제외·재고>0·채널별 skip 반영
+        unup = {}                                    # 전채널 미업로드(모두 업로드필요/제외 & ≥1 업로드필요)
+        for r in rows:
+            chans = [r[k] for k in um.CHANNEL_KEYS]
+            if all(c in (um.ST_NEED_UP, um.ST_SKIP_CH) for c in chans) and um.ST_NEED_UP in chans:
+                unup[r["상품코드"]] = (r, sum(1 for c in chans if c == um.ST_NEED_UP))
+        out = []
+        for _, e in ev.iterrows():
+            sc = e["상품코드"]
+            if sc not in unup:
+                continue
+            r, need = unup[sc]
+            mc = _nfc(r.get("관리코드"))
+            out.append({
+                "관리코드": mc or f"({sc})",
+                "상품명": _nfc(r.get("상품명")),
+                "박스재고": r.get("박스재고"),
+                "유형": e["유형"],
+                "이벤트일": pd.Timestamp(e["이벤트일"]).strftime("%m-%d"),
+                "_mc": mc,
+                "올릴채널수": need,
+            })
+        if not out:
+            return pd.DataFrame()
+        return (pd.DataFrame(out)
+                .sort_values(["이벤트일", "박스재고"], ascending=[False, False])
+                .reset_index(drop=True))
     except Exception:
         return pd.DataFrame()
 
@@ -456,6 +506,41 @@ else:
             st.caption("입고 로그가 아직 없습니다.")
         else:
             st.dataframe(_log.tail(50).iloc[::-1], hide_index=True, use_container_width=True)
+
+st.divider()
+st.subheader("🆕 신규 업로드 대상")
+st.caption("최근 재고가 **새로 들어왔는데(입고·신규등재) 아직 어느 채널에도 안 올라간** 상품 — 신규 업로드 후보. "
+           "재고 스냅샷(2026-06-15~ 적립)으로 감지 · 채널 등록현황은 업로드감시와 동일 기준(업로드감시의 *최근 입고* 서브셋).")
+if not _pat_d:
+    st.info("data repo 시크릿([data] pat)이 없어 신규 업로드 대상을 쓸 수 없습니다.")
+else:
+    _u1, _u2 = st.columns([3, 1])
+    _udays = _u1.slider("최근 며칠", 1, 30, 7, key="nu_days")
+    _u2.write("")
+    if _u2.button("🔄 다시 읽기", key="nu_refresh"):
+        st.cache_data.clear(); st.rerun()
+    _nu = _new_uploads(int(_udays))
+    if _nu is None or _nu.empty:
+        st.success(f"최근 {_udays}일 내 새로 들어온 미업로드 상품이 없습니다. "
+                   "(재고 스냅샷은 상품관리 업로드일마다 적립 — 2026-06-15부터 누적)")
+    else:
+        _cad = _buyin_cadence()
+
+        def _last_buy(mc):
+            d = (_cad.get(mc) or {}).get("최근입고일")
+            return pd.Timestamp(d).strftime("%Y-%m-%d") if d is not None else "—"
+
+        _nu = _nu.copy()
+        _nu["최근매입일"] = _nu["_mc"].map(_last_buy)
+        st.caption(f"{len(_nu)}건 — 8채널 어디에도 미등록 · 현재 박스재고>0. "
+                   "최근매입일=매입현황(월1회 적재라 당일 매입은 늦게 반영).")
+        _ucols = ["관리코드", "상품명", "박스재고", "유형", "이벤트일", "최근매입일", "올릴채널수"]
+        _sty = (_nu[_ucols].style
+                .format({"박스재고": "{:,.0f}", "올릴채널수": "{:.0f}"}, na_rep="—"))
+        st.dataframe(_sty, hide_index=True, use_container_width=True, height=320)
+        st.download_button("📥 XLSX", _to_xlsx(_nu[_ucols], "신규업로드대상"),
+                           "신규업로드대상.xlsx", key="nu_dl")
+        st.caption("→ 채널별 상세 업로드 현황·등록 인계는 **업로드감시** 페이지에서.")
 
 st.divider()
 st.subheader("💲 가격 변동 알림")
