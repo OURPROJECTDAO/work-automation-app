@@ -462,16 +462,28 @@ else:
         if _chg.empty:
             st.caption("선택한 구분에 해당하는 변동이 없습니다.")
         else:
+            _bs = _box_stock_lookup()
+            _chg["박스재고"] = _chg["관리코드"].map(lambda x: _bs.get(_nfc(x)))
             _disp = _chg.copy()
-            _disp["방향"] = _disp["방향"].map({"인상": "🔺 인상", "인하": "🔻 인하"})
+            _disp["방향"] = _disp["방향"].map({"인상": "▲ 인상", "인하": "▼ 인하"})
             _disp["변동일"] = pd.to_datetime(_disp["금일"]).dt.strftime("%m-%d")
-            _disp = _disp[["관리코드", "상품명", "구분", "방향", "전일가", "금일가", "변동률", "변동일"]]
-            st.dataframe(_disp, hide_index=True, use_container_width=True, height=360,
-                         column_config={
-                             "전일가": st.column_config.NumberColumn(format="%d"),
-                             "금일가": st.column_config.NumberColumn(format="%d"),
-                             "변동률": st.column_config.NumberColumn("변동률%", format="%.2f"),
-                         })
+            _disp = _disp.rename(columns={"변동률": "변동률(%)"})
+            _disp = _disp[["관리코드", "상품명", "박스재고", "구분", "방향",
+                           "전일가", "금일가", "변동률(%)", "변동일"]]
+
+            def _dir_color(v):
+                s = str(v)
+                if "인상" in s:
+                    return "color:#d11; font-weight:600"
+                if "인하" in s:
+                    return "color:#1565c0; font-weight:600"
+                return ""
+
+            _sty = (_disp.style
+                    .applymap(_dir_color, subset=["방향"])
+                    .format({"전일가": "{:,.0f}", "금일가": "{:,.0f}",
+                             "변동률(%)": "{:.2f}", "박스재고": "{:,.0f}"}, na_rep="—"))
+            st.dataframe(_sty, hide_index=True, use_container_width=True, height=360)
             st.download_button("📥 XLSX", _to_xlsx(_chg, "가격변동"),
                                "가격변동알림.xlsx", key="pc_dl")
 
