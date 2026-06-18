@@ -64,6 +64,9 @@ def golden():
     out = {}
     for name in cy.ALL_SHEETS + cy.UNIT_SHEETS:
         nc = 11 if name in cy.UNIT_SHEETS else 8
+        if name not in wb.sheetnames:          # 골든에 없는 신규 시트(리테일 등) → 빈 목록
+            out[name] = []
+            continue
         out[name] = [r for r in wb[name].iter_rows(min_row=2, max_col=nc, values_only=True)
                      if r[1] not in (None, "")]
     wb.close()
@@ -133,3 +136,45 @@ def test_detect_box_anomalies_structure(result):
     for a in anom:
         assert set(a) == {"시트", "관리코드", "상품명", "신호", "확신"}
         assert a["시트"] in cy.ALL_SHEETS
+
+
+# ── 추가 판매처 매출통계(제이티·리테일) 병합 ──────────────────
+_STATS_HTML = """<html><body><table border=1>
+<tr><td>erp관리코드</td><td>어드민 옵션</td><td>총수량</td><td>평균단가</td>
+<td>정산금액</td><td>판매처그룹</td><td>선결제택배비</td><td>옵션추가항목1</td></tr>
+<tr><td><table><tr><td></td></tr></table></td>
+<td><table><tr><td>스위트A 275ML*24 [24-174]</td></tr><tr><td>더블랙 275ML*24 [24-175]</td></tr></table></td>
+<td>2</td><td>23,275</td><td>46,550</td><td>리테일앤인사이트</td><td>0</td>
+<td><table><tr><td>24-174</td></tr><tr><td>24-175</td></tr></table></td></tr>
+<tr><td>16-05</td><td>[롯데]런천미트(大)</td><td>5</td><td>9,936</td>
+<td>248,400</td><td>리테일앤인사이트</td><td>0</td><td></td></tr>
+<tr><td></td><td>코카콜라제로 355 [31-22-02]</td><td>1</td><td>20,200</td>
+<td>20,200</td><td>제이티유통</td><td>0</td><td><table><tr><td>31-22-02</td></tr></table></td></tr>
+</table></body></html>""".encode("utf-8")
+
+
+def test_parse_sales_stats_basic():
+    rows, skipped = cy.parse_sales_stats(_STATS_HTML)
+    by = {r[0]: r for r in rows}
+    # 정상 단일행 + 빈코드 단일코드 보정(코카콜라제로→31-22-02)
+    assert set(by) == {"16-05", "31-22-02"}
+    assert by["16-05"][2] == 5.0 and by["16-05"][4] == 248400.0      # 콤마 제거
+    assert by["16-05"][5] == "리테일앤인사이트"
+    assert by["31-22-02"][5] == "제이티유통"
+    # 묶음(코드 2개) → 스킵 경고
+    assert len(skipped) == 1 and skipped[0]["사유"].startswith("묶음")
+    assert skipped[0]["후보코드"] == "24-174 | 24-175"
+
+
+def test_stats_routing_retail_and_jt():
+    """리테일앤인사이트→리테일전체, 제이티유통→제이티전체, H=F/D."""
+    rows, _ = cy.parse_sales_stats(_STATS_HTML)
+    empty = openpyxl.Workbook(); ews = empty.active; ews.append(["h"] * 45)
+    empty2 = openpyxl.Workbook(); ews2 = empty2.active; ews2.append(["h"] * 45)
+    sheets, units = cy.process(rows, ews, ews2, {}, {}, {}, RUN_DATE)
+    assert "리테일전체" in sheets and "리테일낱개" in units
+    retail = {r["B"]: r for r in sheets["리테일전체"]}
+    assert "16-05" in retail
+    assert abs(retail["16-05"]["H"] - 248400.0 / 5) <= 0.5          # F/D, 수수료 없음
+    jt = {r["B"]: r for r in sheets["제이티전체"]}
+    assert "31-22-02" in jt and abs(jt["31-22-02"]["H"] - 20200.0) <= 0.5
