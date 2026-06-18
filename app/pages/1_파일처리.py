@@ -149,16 +149,24 @@ with tab_cy:
                                 help="발주서출력업무 Phase1에서 받은 발주자료 아카이브")
     f_baemin = c2.file_uploader("② 배민주문 (.xlsx)", type=["xlsx"], key="cy_baemin")
     f_sss    = c3.file_uploader("③ 스스주문 (.xlsx · 암호1323)", type=["xlsx"], key="cy_sss")
+    f_stats  = st.file_uploader(
+        "④ 추가 판매처 매출통계 (제이티·리테일 등 · 선택 · 여러 개 가능)",
+        type=["xls", "xlsx", "html", "htm"], key="cy_stats", accept_multiple_files=True,
+        help="발주자료에 안 섞여 들어오는 판매처(제이티유통·리테일앤인사이트 등) 매출통계 export. "
+             "올리면 발주자료에 자동 병합됩니다. 발주자료에 이미 들어 있으면 안 올려도 됩니다.")
 
     if f_baeju and f_baemin and f_sss:
         if st.button("▶ 실행", type="primary", use_container_width=True, key="cy_run"):
             with st.spinner("처리 중..."):
                 try:
-                    out, stats, sheets, _ = cy.run(
-                        f_baeju.getvalue(), f_baemin.getvalue(), f_sss.getvalue())
+                    stats_bytes = [f.getvalue() for f in (f_stats or [])]
+                    out, stats, sheets, _, merge_info = cy.run(
+                        f_baeju.getvalue(), f_baemin.getvalue(), f_sss.getvalue(),
+                        stats_files=stats_bytes)
                     st.session_state["cy_result"] = {
                         "bytes": out, "stats": stats,
                         "anomalies": cy.detect_box_anomalies(sheets),
+                        "merge": merge_info,
                         "name": datetime.now(_KST).strftime("%y%m%d") + ".xlsx",
                     }
                     _inbox.push(st.session_state, _inbox.SLOT_CHEONNYEON, out,   # 데일리 대시보드 자동 인계
@@ -179,6 +187,21 @@ with tab_cy:
             cols = st.columns(6)
             for col, (label, n) in zip(cols, items[i:i + 6]):
                 col.metric(label, f"{n}건")
+
+        merge = res.get("merge") or {}
+        if merge.get("added"):
+            st.info(f"➕ 추가 매출통계 **{merge['added']}행**을 발주자료에 병합했습니다.")
+        mskip = merge.get("skipped") or []
+        if mskip:
+            st.warning(
+                f"⚠️ 추가 매출통계 중 **코드 보정 불가 {len(mskip)}건**은 병합에서 제외했습니다 "
+                "(erp관리코드가 비었고 옵션코드가 2개 이상인 묶음 행 등). 수동 확인이 필요합니다.",
+                icon="⚠️",
+            )
+            st.dataframe(
+                pd.DataFrame(mskip)[["판매처그룹", "상품명", "정산금액", "후보코드", "사유"]],
+                use_container_width=True, hide_index=True,
+            )
 
         anomalies = res.get("anomalies") or []
         if anomalies:
