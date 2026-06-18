@@ -140,6 +140,30 @@ with tab2:
     if todo.empty:
         st.success("미검토 항목이 없습니다. 모두 처리되었습니다.")
     else:
+        # 저신뢰 일괄 없음 — 최고 점수 < 0.3(또는 후보 없음). 진짜 매칭 최저가 ~0.38이라 안전.
+        AUTO_THR = 0.3
+        low_idx = []
+        for ti in range(len(todo)):
+            r = todo.iloc[ti]
+            cs = M.suggest(r["name"], r["spec"], idx, topn=1)
+            if (cs[0]["점수"] if cs else 0.0) < AUTO_THR:
+                low_idx.append(ti)
+        if low_idx:
+            if st.button(f"⚪ 확신 낮은 {len(low_idx)}건 일괄 '없음' (최고점수<{AUTO_THR}·후보없음 포함)",
+                         key="bulk_none"):
+                new = mp.copy()
+                today = date.today().isoformat()
+                bulk = []
+                for ti in low_idx:
+                    rr = todo.iloc[ti]; g = _nfc(rr["ps_goid"])
+                    new = new[new["ps_goid"].map(_nfc) != g]
+                    bulk.append({"ps_goid": g, "nadl_name": rr["name"], "nadl_spec": rr["spec"],
+                                 "관리코드": "", "status": "none", "updated": today})
+                new = pd.concat([new, pd.DataFrame(bulk, columns=M.MAP_COLS)], ignore_index=True)
+                M.write_map(new, pat, repo)
+                _bump_map()
+                st.success(f"{len(bulk)}건 '없음' 처리 완료")
+                st.rerun()
         labels = [f"{r['name']}  ·  {r['spec']}  ·  개당 {_won(r['unit_price'])}"
                   for _, r in todo.iterrows()]
         pick = st.selectbox("매칭할 항목", range(len(todo)),
@@ -148,8 +172,8 @@ with tab2:
         goid = _nfc(nr["ps_goid"])
 
         st.markdown(f"### {nr['name']}")
-        st.caption(f"규격 `{nr['spec']}` · 박스가 {_won(nr['box_price'])} · "
-                   f"**개당가 {_won(nr['unit_price'])}**")
+        st.markdown(f"#### 규격 {nr['spec']} · 박스가 {_won(nr['box_price'])} · "
+                    f"개당가 {_won(nr['unit_price'])}")
 
         cands = M.suggest(nr["name"], nr["spec"], idx, topn=3)
         box = M.nadl_box(nr["name"], nr["spec"])
@@ -223,15 +247,20 @@ with tab3:
     st.download_button("⬇️ 매칭본 CSV", csv,
                        file_name=f"nadl_매칭본_{sel_date}.csv", mime="text/csv")
 
-    with st.expander("🛠 매핑 관리 (삭제·재매칭)"):
-        mm = mp[mp["status"] == "matched"].copy()
-        if mm.empty:
-            st.caption("확정된 매칭이 없습니다.")
+    with st.expander("🛠 매핑 관리 (삭제·재매칭 · '없음' 되돌리기)"):
+        flt = st.radio("표시", ["매칭", "없음", "전체"], horizontal=True, key="map_flt")
+        if flt == "전체":
+            mm = mp.copy()
         else:
-            mm = mm[["nadl_name", "nadl_spec", "관리코드", "updated", "ps_goid"]].rename(
-                columns={"nadl_name": "nadl_상품명", "nadl_spec": "nadl_규격"})
+            mm = mp[mp["status"] == ("matched" if flt == "매칭" else "none")].copy()
+        if mm.empty:
+            st.caption("항목이 없습니다.")
+        else:
+            mm = mm[["status", "nadl_name", "nadl_spec", "관리코드", "updated", "ps_goid"]].rename(
+                columns={"status": "상태", "nadl_name": "nadl_상품명", "nadl_spec": "nadl_규격"})
             st.dataframe(mm, use_container_width=True, hide_index=True)
-            del_goid = st.text_input("삭제할 ps_goid (해당 매핑 전체 삭제)", key="del_goid").strip()
+            st.caption("삭제하면 해당 매핑이 제거됩니다('없음'이면 다시 검토 큐로 돌아옴).")
+            del_goid = st.text_input("삭제할 ps_goid", key="del_goid").strip()
             if st.button("선택 매핑 삭제", disabled=not del_goid, key="del_btn"):
                 new = mp[mp["ps_goid"].map(_nfc) != _nfc(del_goid)].copy()
                 M.write_map(new, pat, repo)
