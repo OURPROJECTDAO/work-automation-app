@@ -178,3 +178,19 @@ def test_stats_routing_retail_and_jt():
     assert abs(retail["16-05"]["H"] - 248400.0 / 5) <= 0.5          # F/D, 수수료 없음
     jt = {r["B"]: r for r in sheets["제이티전체"]}
     assert "31-22-02" in jt and abs(jt["31-22-02"]["H"] - 20200.0) <= 0.5
+
+
+def test_optional_shipping_none():
+    """배민·스스 미업로드(None) → 크래시 없이 스마트스토어·배민상회 G=선결제비 폴백."""
+    baeju = [
+        ("23-18", "웅진하늘보리", 1, 13700, 13700, "제이티유통", 0),
+        ("20-90-11", "스마트상품", 3, 10000, 30000, "스마트스토어", 500),
+        ("88-01", "배민상품", 2, 5000, 10000, "배민상회", 700),
+    ]
+    assert cy.open_baemin(None) is None and cy.open_sss(None) is None
+    assert cy.process_baemin(None) == {} and cy.process_smartstore(None) == {}
+    sheets, _ = cy.process(baeju, cy.open_baemin(None), cy.open_sss(None),
+                           {}, {}, {}, RUN_DATE)
+    assert sheets["제이티전체"]                                   # 발주자료만으로 분배
+    assert sheets["스마트스토어전체"][0]["G"] == 500              # 선결제비 폴백
+    assert sheets["배민상회전체"][0]["G"] == 700
