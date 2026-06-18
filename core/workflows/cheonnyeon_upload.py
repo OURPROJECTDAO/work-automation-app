@@ -243,12 +243,17 @@ def parse_sales_stats(file_bytes: bytes):
     return rows, skipped
 
 
-def open_baemin(file_bytes: bytes):
+def open_baemin(file_bytes: bytes | None):
+    if not file_bytes:                          # 선택 입력 — 없으면 배송비 조인 생략
+        return None
     return openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True).active
 
 
-def open_sss(file_bytes: bytes, password: str = _SSS_PASSWORD):
-    """스스주문 워크시트 반환. 암호(1323) 걸려 있으면 복호화, 평문이면 그대로 연다."""
+def open_sss(file_bytes: bytes | None, password: str = _SSS_PASSWORD):
+    """스스주문 워크시트 반환. 암호(1323) 걸려 있으면 복호화, 평문이면 그대로 연다.
+    선택 입력 — 없으면 None(배송비 조인 생략)."""
+    if not file_bytes:
+        return None
     off = msoffcrypto.OfficeFile(io.BytesIO(file_bytes))
     try:
         encrypted = off.is_encrypted()
@@ -264,7 +269,9 @@ def open_sss(file_bytes: bytes, password: str = _SSS_PASSWORD):
 
 # ── 배송비조사 정제 ──────────────────────────────────────────
 def process_baemin(ws) -> dict:
-    """Z(코드) dedup, AL 합산 (Module7_1)."""
+    """Z(코드) dedup, AL 합산 (Module7_1). ws=None(미업로드)이면 빈 dict."""
+    if ws is None:
+        return {}
     agg = {}
     for r in ws.iter_rows(min_row=2, values_only=True):
         code = _code(r[25]) if len(r) > 25 else ""
@@ -276,7 +283,9 @@ def process_baemin(ws) -> dict:
 
 
 def process_smartstore(ws) -> dict:
-    """묶음번호(AJ) 개수로 AL 분할(6_8) → 상품코드(AO) dedup 합산(7)."""
+    """묶음번호(AJ) 개수로 AL 분할(6_8) → 상품코드(AO) dedup 합산(7). ws=None이면 빈 dict."""
+    if ws is None:
+        return {}
     rows = []
     for r in ws.iter_rows(min_row=3, values_only=True):
         aj = r[35] if len(r) > 35 else None
@@ -454,13 +463,15 @@ def generate_output_xlsx(sheets: dict, units: dict, run_date: datetime.date) -> 
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
-def run(baeju_bytes: bytes, baemin_bytes: bytes, sss_bytes: bytes,
+def run(baeju_bytes: bytes, baemin_bytes: bytes | None = None,
+        sss_bytes: bytes | None = None,
         run_date: datetime.date | None = None, sss_password: str = _SSS_PASSWORD,
         stats_files: list[bytes] | None = None):
-    """엔드투엔드: 3파일 bytes(+선택 매출통계) → (출력 xlsx, stats, sheets, units, merge_info).
+    """엔드투엔드: 발주자료(+선택 배민·스스·매출통계) → (출력 xlsx, stats, sheets, units, merge_info).
 
-    stats_files : 추가 판매처 매출통계(제이티·리테일 등) bytes 리스트. 발주자료 행에 병합.
-    merge_info  : {"added": 병합행수, "skipped": [코드보정 불가 행 …]}.
+    baemin_bytes/sss_bytes : 선택. 없으면 스마트스토어·배민상회 배송비 조인 생략(선결제비 폴백).
+    stats_files            : 추가 판매처 매출통계 bytes 리스트. 발주자료 행에 병합.
+    merge_info             : {"added": 병합행수, "skipped": [코드보정 불가 행 …]}.
     """
     if run_date is None:
         run_date = datetime.datetime.now(_KST).date()
