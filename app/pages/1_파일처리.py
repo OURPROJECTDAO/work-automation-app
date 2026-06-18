@@ -142,31 +142,27 @@ with tab_basic:
 # 탭 2 : 천년경영 업로드
 # ═══════════════════════════════════════════════
 with tab_cy:
-    st.caption("발주자료·배민주문·스스주문(암호 1323) 3개를 올리면 "
-               "마켓플레이스별 업로드 시트(전체/낱개)를 만들어드립니다.")
+    st.caption("★★발주자료를 올리면 마켓플레이스별 업로드 시트(전체/낱개)를 만들어드립니다. "
+               "배민주문·스스주문은 **선택**(스마트스토어·배민상회 배송비 조인용 — 없으면 선결제비로 폴백).")
     c1, c2, c3 = st.columns(3)
     f_baeju  = c1.file_uploader("① ★★발주자료 (.xlsx)", type=["xlsx"], key="cy_baeju",
-                                help="발주서출력업무 Phase1에서 받은 발주자료 아카이브")
-    f_baemin = c2.file_uploader("② 배민주문 (.xlsx)", type=["xlsx"], key="cy_baemin")
-    f_sss    = c3.file_uploader("③ 스스주문 (.xlsx · 암호1323)", type=["xlsx"], key="cy_sss")
-    f_stats  = st.file_uploader(
-        "④ 추가 판매처 매출통계 (제이티·리테일 등 · 선택 · 여러 개 가능)",
-        type=["xls", "xlsx", "html", "htm"], key="cy_stats", accept_multiple_files=True,
-        help="발주자료에 안 섞여 들어오는 판매처(제이티유통·리테일앤인사이트 등) 매출통계 export. "
-             "올리면 발주자료에 자동 병합됩니다. 발주자료에 이미 들어 있으면 안 올려도 됩니다.")
+                                help="발주서출력업무 Phase1에서 받은 발주자료 아카이브 (필수)")
+    f_baemin = c2.file_uploader("② 배민주문 (.xlsx · 선택)", type=["xlsx"], key="cy_baemin",
+                                help="배민상회 배송비. 없으면 배민상회 G=선결제비")
+    f_sss    = c3.file_uploader("③ 스스주문 (.xlsx · 암호1323 · 선택)", type=["xlsx"], key="cy_sss",
+                                help="스마트스토어 배송비. 없으면 스마트스토어 G=선결제비")
 
-    if f_baeju and f_baemin and f_sss:
+    if f_baeju:
         if st.button("▶ 실행", type="primary", use_container_width=True, key="cy_run"):
             with st.spinner("처리 중..."):
                 try:
-                    stats_bytes = [f.getvalue() for f in (f_stats or [])]
-                    out, stats, sheets, _, merge_info = cy.run(
-                        f_baeju.getvalue(), f_baemin.getvalue(), f_sss.getvalue(),
-                        stats_files=stats_bytes)
+                    out, stats, sheets, _, _ = cy.run(
+                        f_baeju.getvalue(),
+                        f_baemin.getvalue() if f_baemin else None,
+                        f_sss.getvalue() if f_sss else None)
                     st.session_state["cy_result"] = {
                         "bytes": out, "stats": stats,
                         "anomalies": cy.detect_box_anomalies(sheets),
-                        "merge": merge_info,
                         "name": datetime.now(_KST).strftime("%y%m%d") + ".xlsx",
                     }
                     _inbox.push(st.session_state, _inbox.SLOT_CHEONNYEON, out,   # 데일리 대시보드 자동 인계
@@ -177,7 +173,7 @@ with tab_cy:
                     st.error(f"오류: {e}")
                     st.exception(e)
     else:
-        st.info("3개 파일을 모두 업로드하세요.")
+        st.info("★★발주자료를 업로드하세요. (배민·스스주문은 선택)")
 
     res = st.session_state.get("cy_result")
     if res:
@@ -187,21 +183,6 @@ with tab_cy:
             cols = st.columns(6)
             for col, (label, n) in zip(cols, items[i:i + 6]):
                 col.metric(label, f"{n}건")
-
-        merge = res.get("merge") or {}
-        if merge.get("added"):
-            st.info(f"➕ 추가 매출통계 **{merge['added']}행**을 발주자료에 병합했습니다.")
-        mskip = merge.get("skipped") or []
-        if mskip:
-            st.warning(
-                f"⚠️ 추가 매출통계 중 **코드 보정 불가 {len(mskip)}건**은 병합에서 제외했습니다 "
-                "(erp관리코드가 비었고 옵션코드가 2개 이상인 묶음 행 등). 수동 확인이 필요합니다.",
-                icon="⚠️",
-            )
-            st.dataframe(
-                pd.DataFrame(mskip)[["판매처그룹", "상품명", "정산금액", "후보코드", "사유"]],
-                use_container_width=True, hide_index=True,
-            )
 
         anomalies = res.get("anomalies") or []
         if anomalies:
