@@ -40,21 +40,22 @@ GROUP_TO_SHEET = {
     "배민상회": "배민상회전체", "식봄": "식봄전체", "올웨이즈": "올웨이즈전체",
     "배민대용량": "대용량전체", "캐시노트": "캐시노트전체", "쿠팡": "쿠팡전체",
     "알리익스프레스": "알리전체", "셀러허브": "셀러허브전체", "제이티유통": "제이티전체",
+    "리테일앤인사이트": "리테일전체",
 }
 ALL_SHEETS = ["멸치식품", "멸치음료", "ESM전체", "스마트스토어전체", "11번가전체",
               "식봄전체", "배민상회전체", "올웨이즈전체", "대용량전체", "캐시노트전체",
-              "쿠팡전체", "알리전체", "셀러허브전체", "제이티전체"]
+              "쿠팡전체", "알리전체", "셀러허브전체", "제이티전체", "리테일전체"]
 NO_G = {"멸치식품", "멸치음료", "ESM전체", "11번가전체", "식봄전체"}
 FULL_TO_UNIT = {
     "멸치식품": "멸치낱개", "멸치음료": "멸치낱개", "스마트스토어전체": "스마트스토어낱개",
     "ESM전체": "ESM낱개", "11번가전체": "11번가낱개", "식봄전체": "식봄낱개",
     "배민상회전체": "배민상회낱개", "올웨이즈전체": "올웨이즈낱개", "대용량전체": "대용량낱개",
     "캐시노트전체": "캐시노트낱개", "쿠팡전체": "쿠팡낱개", "알리전체": "알리낱개",
-    "셀러허브전체": "셀러허브낱개", "제이티전체": "제이티낱개",
+    "셀러허브전체": "셀러허브낱개", "제이티전체": "제이티낱개", "리테일전체": "리테일낱개",
 }
 UNIT_SHEETS = ["멸치낱개", "스마트스토어낱개", "ESM낱개", "11번가낱개", "식봄낱개",
                "배민상회낱개", "올웨이즈낱개", "대용량낱개", "캐시노트낱개", "쿠팡낱개",
-               "알리낱개", "셀러허브낱개", "제이티낱개"]
+               "알리낱개", "셀러허브낱개", "제이티낱개", "리테일낱개"]
 _FULL_HEADER = ["일자", "관리코드", "상품명", "주문수량", "평균단가",
                 "정산금액", "선결제택배비", "실제기입단가"]
 _UNIT_HEADER = ["일자", "관리코드", "상품명", "코드단위주문수량", "평균단가", "정산금액",
@@ -123,6 +124,123 @@ def parse_baeju(file_bytes: bytes):
             continue
         rows.append(r)
     return rows
+
+
+# ── 추가 판매처 매출통계 (제이티·리테일 등) ───────────────────
+#   ERP "판매처상품매출통계" export. 컬럼 = 발주자료 앞 7열과 동일 +
+#   옵션추가항목1(8열). 보통 HTML 테이블형 가짜 .xls(셀 안에 중첩 table),
+#   드물게 진짜 .xlsx. 파싱 후 발주자료 행에 그대로 병합한다.
+#   빈 erp관리코드 행은 옵션추가항목1의 코드로 보정(코드 1개면 채움,
+#   2개 이상 묶음은 임의분할 위험 → skipped로 경고만).
+from html.parser import HTMLParser as _HTMLParser
+
+
+class _StatsHTMLParser(_HTMLParser):
+    """바깥 table의 행/셀만 추출. 셀 안 중첩 table 텍스트는 토큰으로 분리."""
+    _SEP = "\x00"
+
+    def __init__(self):
+        super().__init__()
+        self.table_depth = 0
+        self.rows = []
+        self._row = None
+        self._cell = None
+        self._cap = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self.table_depth += 1
+        elif tag == "tr" and self.table_depth == 1:
+            self._row = []
+        elif tag == "td":
+            if self.table_depth == 1:
+                self._cell = []
+                self._cap = True
+            elif self._cap:
+                self._cell.append(self._SEP)        # 중첩 셀 경계
+        elif tag == "br" and self._cap:
+            self._cell.append(self._SEP)
+
+    def handle_endtag(self, tag):
+        if tag == "table":
+            self.table_depth -= 1
+        elif tag == "td" and self.table_depth == 1 and self._cell is not None:
+            parts = [p.strip() for p in "".join(self._cell).split(self._SEP)]
+            self._row.append([p for p in parts if p])
+            self._cell = None
+            self._cap = False
+        elif tag == "tr" and self.table_depth == 1 and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+
+    def handle_data(self, data):
+        if self._cap and data.strip():
+            self._cell.append(data)
+
+
+def _stats_num(v):
+    """'23,275' → 23275.0 (콤마 제거)."""
+    if v is None or v == "":
+        return None
+    try:
+        return float(str(v).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_sales_stats(file_bytes: bytes):
+    """판매처상품매출통계 → (rows, skipped).
+
+    rows    : 발주자료와 동일한 7열 튜플 [코드, 상품명, 총수량, 평균단가, 정산금액, 판매처그룹, 선결제비]
+    skipped : 코드 보정 불가 행(묶음/코드없음) — 비차단 경고용 dict 리스트.
+    """
+    rows, skipped = [], []
+    # 진짜 .xlsx면 zip 매직(PK) → openpyxl, 아니면 HTML 테이블.
+    if file_bytes[:2] == b"PK":
+        ws = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True).active
+        raw = []
+        for r in ws.iter_rows(min_row=1, max_col=8, values_only=True):
+            raw.append([[("" if c is None else str(c))] if not isinstance(c, list) else c
+                        for c in r])
+    else:
+        text = file_bytes.decode("utf-8", errors="replace")
+        p = _StatsHTMLParser()
+        p.feed(text)
+        raw = p.rows
+
+    def cell0(cell):                       # 단일 토큰 셀 → 첫 토큰
+        return cell[0] if cell else ""
+
+    for cells in raw:
+        if len(cells) < 7:
+            continue
+        group = cell0(cells[5]).strip()
+        if not group or group == "판매처그룹":   # 헤더/빈 행 스킵
+            continue
+        qty = _stats_num(cell0(cells[2]))
+        if qty is None:                       # 합계/소계 등 비데이터 행 스킵
+            continue
+        code = _code(cell0(cells[0]))
+        name = " | ".join(cells[1]) if cells[1] else ""
+        if not code:                          # 빈 코드 → 옵션추가항목1로 보정
+            opt = cells[7] if len(cells) > 7 else []
+            opt = [_code(x) for x in opt if _code(x)]
+            if len(opt) == 1:
+                code = opt[0]
+            else:
+                skipped.append({
+                    "상품명": name, "판매처그룹": group,
+                    "정산금액": _stats_num(cell0(cells[4])),
+                    "후보코드": " | ".join(opt) if opt else "(없음)",
+                    "사유": "묶음(코드 2개+)" if len(opt) > 1 else "코드 없음",
+                })
+                continue
+        rows.append((
+            code, name, qty,
+            _stats_num(cell0(cells[3])), _stats_num(cell0(cells[4])),
+            group, _stats_num(cell0(cells[6])),
+        ))
+    return rows, skipped
 
 
 def open_baemin(file_bytes: bytes):
@@ -230,7 +348,7 @@ def process(baeju_rows, baemin_ws, sss_ws, cls_map, comm_map, sub_map,
     def Hf(factor):
         return lambda r: (r["F"] * factor) / r["D"] if r["D"] else None
     simple = {"멸치식품": 1.0, "멸치음료": 1.0, "ESM전체": 1.0, "11번가전체": 1.0,
-              "올웨이즈전체": 1.0, "셀러허브전체": 1.0, "제이티전체": 1.0,
+              "올웨이즈전체": 1.0, "셀러허브전체": 1.0, "제이티전체": 1.0, "리테일전체": 1.0,
               "식봄전체": 0.93, "캐시노트전체": 0.94, "쿠팡전체": 0.88, "알리전체": 0.91}
     for name, f in simple.items():
         for r in sheets[name]:
@@ -337,15 +455,27 @@ def generate_output_xlsx(sheets: dict, units: dict, run_date: datetime.date) -> 
 
 
 def run(baeju_bytes: bytes, baemin_bytes: bytes, sss_bytes: bytes,
-        run_date: datetime.date | None = None, sss_password: str = _SSS_PASSWORD):
-    """엔드투엔드: 3파일 bytes → (출력 xlsx bytes, 통계 dict)."""
+        run_date: datetime.date | None = None, sss_password: str = _SSS_PASSWORD,
+        stats_files: list[bytes] | None = None):
+    """엔드투엔드: 3파일 bytes(+선택 매출통계) → (출력 xlsx, stats, sheets, units, merge_info).
+
+    stats_files : 추가 판매처 매출통계(제이티·리테일 등) bytes 리스트. 발주자료 행에 병합.
+    merge_info  : {"added": 병합행수, "skipped": [코드보정 불가 행 …]}.
+    """
     if run_date is None:
         run_date = datetime.datetime.now(_KST).date()
+    baeju_rows = list(parse_baeju(baeju_bytes))
+    merge_info = {"added": 0, "skipped": []}
+    for sb in (stats_files or []):
+        extra, skipped = parse_sales_stats(sb)
+        baeju_rows.extend(extra)
+        merge_info["added"] += len(extra)
+        merge_info["skipped"].extend(skipped)
     sheets, units = process(
-        parse_baeju(baeju_bytes), open_baemin(baemin_bytes),
+        baeju_rows, open_baemin(baemin_bytes),
         open_sss(sss_bytes, sss_password),
         load_classification(), load_commission(), load_sub_list(), run_date)
     out = generate_output_xlsx(sheets, units, run_date)
     stats = {name: len(sheets[name]) for name in ALL_SHEETS if sheets[name]}
     stats.update({name: len(units[name]) for name in UNIT_SHEETS if units[name]})
-    return out, stats, sheets, units
+    return out, stats, sheets, units, merge_info
