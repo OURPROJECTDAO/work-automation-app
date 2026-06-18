@@ -18,6 +18,7 @@ import pandas as pd
 import streamlit as st
 
 from core.workflows import channel_margin_monitor as cmm
+from core.intelligence import listing_history
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_REPO = "OURPROJECTDAO/work-automation-app"
@@ -104,6 +105,33 @@ def _commit_raw(key: str, xlsx_bytes: bytes):
     if code == 200:
         payload["sha"] = m["sha"]
     _gh(path, "PUT", payload)
+
+
+def _data_secret():
+    """(pat, repo) — private data repo(이력 엔진 1d). secrets [data] 우선, 없으면 GITHUB_PAT 폴백."""
+    repo = "OURPROJECTDAO/work-automation-data"
+    try:
+        d = st.secrets["data"]
+        return d["pat"], d.get("repo", repo)
+    except Exception:
+        return st.secrets.get("GITHUB_PAT", ""), repo
+
+
+def _accumulate_listing(key: str, recs: list) -> None:
+    """listing 커밋 직후 그 채널 가격을 날짜본으로 data repo에 적립(이력 1d). 비차단·best-effort.
+
+    forward 축적(과거 소급 불가). 두뇌③ 채널 가격 A/B 가격변경 전후 토대. PII 없음(가격만).
+    """
+    pat, repo = _data_secret()
+    if not pat:
+        return  # data repo 미설정 — 조용히 건너뜀(이력 비활성)
+    try:
+        snap_date = datetime.now(_KST).date()
+        snap = listing_history.snapshot_from_recs(recs, key, snap_date)
+        res = listing_history.ingest_listing_snapshot(snap, pat, repo)
+        st.toast(f"📚 listing 가격 스냅샷 적립 {snap_date} · {res['added']}행", icon="📚")
+    except Exception as e:
+        st.toast(f"⚠️ listing 스냅샷 적립 실패(저장은 완료): {e}", icon="⚠️")
 
 
 _BASELINE_PATH = "reference/baseline_margin.csv"
@@ -258,6 +286,7 @@ if committed is not None:
     recs = committed
     meta = {"updated_at": datetime.now(_KST).isoformat(timespec="seconds"), "rows": len(committed)}
     st.success(flash)
+    _accumulate_listing(key, committed)   # 이력 1d: 갱신 시점 가격 날짜본 적립(비차단)
 else:
     recs, meta = _load_listing(key)
 
