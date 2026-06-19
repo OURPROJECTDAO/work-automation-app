@@ -130,6 +130,24 @@ def load_turnover(pat: str, repo: str) -> dict:
         return {}
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_locked() -> dict:
+    """가격 제한(마진 민감) 상품 — reference/margin_floor.csv. {관리코드(NFC): 제한내용}.
+    채널마진모니터 '제한 상품'과 동일 소스. 이들은 가격을 못 움직임 → 작업목록서 제외."""
+    try:
+        m = pd.read_csv(_REF / "margin_floor.csv", dtype=str, encoding="utf-8-sig")
+        out = {}
+        for _, r in m.iterrows():
+            code = _nfc(str(r.get("관리코드") or ""))
+            if not code:
+                continue
+            note = _nfc(str(r.get("제한내용") or "")) or _nfc(str(r.get("비고") or "")) or "가격 제한"
+            out[code] = note
+        return out
+    except Exception:
+        return {}
+
+
 # 8개 관리채널(기준마진율 baseline 컬럼 보유) — 그 외(나들·제이티유통·11번가·셀러허브·리테일앤인사이트·멸치 등
 # 미관리/유통 상호명)는 작업목록 스코프에서 제외(기준마진율 적용 대상 아님)
 _MANAGED = {"스마트스토어", "ESM(G마켓·옥션)", "식봄", "캐시노트", "알리", "쿠팡", "배민상회", "올웨이즈"}
@@ -317,7 +335,12 @@ with tab_wl:
         act["_k"] = list(zip(act["관리코드"].astype(str), act["채널"].astype(str)))
         _n_sup_shown = int(act["_k"].isin(_sup).sum()) if _sup else 0
         act = act[~act["_k"].isin(_sup)].drop(columns="_k").copy()
-        # 변화 없음(권장=현재 · 주로 '낮게 유지' 🔴 = 가격 외 요인) → 작업목록서 빼고 별도 묶음
+        # 가격 제한(마진 민감) 상품 = 못 건드림 → 작업목록서 빼고 🔒 별도 묶음(baseline 미적용)
+        _lock = load_locked()
+        act["_nfc"] = act["관리코드"].astype(str).map(_nfc)
+        act_lock = act[act["_nfc"].isin(_lock)].drop(columns="_nfc").copy()
+        act = act[~act["_nfc"].isin(_lock)].drop(columns="_nfc").copy()
+        # 변화 없음(권장=현재 · 주로 '낮게 유지' 🔴 = 가격 외 요인) → 별도 묶음
         act_none = act[act["Δ"].abs() < 0.05].copy()
         act = act[act["Δ"].abs() >= 0.05].copy()
 
@@ -353,6 +376,10 @@ with tab_wl:
             return d
         scoped = _apply_chq(act)        # KPI 기준 = 채널+검색(플래그 무관)
         none_v = _apply_chq(act_none)   # 변화없음 묶음도 채널+검색 따라감
+        lock_v = _apply_chq(act_lock)   # 가격제한 묶음도 채널+검색 따라감
+        if len(lock_v):
+            lock_v = lock_v.copy()
+            lock_v["제한내용"] = lock_v["관리코드"].astype(str).map(_nfc).map(_lock)
         v = scoped.copy()
         if pick_fl:
             v = v[v["플래그"].isin(pick_fl)]
@@ -374,9 +401,22 @@ with tab_wl:
         k2.metric("🟢 수락", f"{(scoped['플래그']=='🟢').sum():,}")
         k3.metric("🟡 검토", f"{(scoped['플래그']=='🟡').sum():,}")
         k4.metric("🔴 필수", f"{(scoped['플래그']=='🔴').sum():,}")
-        st.caption(f"숫자판=채널·검색 필터 반영 · 변화없음(검토만) {len(none_v):,} · 실험큐(관망) {len(queue):,} · "
+        st.caption(f"숫자판=채널·검색 필터 반영 · 🔒가격제한 {len(lock_v):,} · 변화없음(검토만) {len(none_v):,} · 실험큐(관망) {len(queue):,} · "
                    f"측정중(45일 숨김) {_n_sup_shown:,} · 📉매출목표 미달 {int((scoped['목표']=='📉미달').sum()):,} · "
                    f"선물세트 {len(load_giftset_codes()):,}종 제외(⑧) — 임팩트(월순이익)순. 행 선택 → 아래에서 기록/적용.")
+
+        if len(lock_v):
+            with st.expander(f"🔒 가격 제한(마진 민감) {len(lock_v):,}건 — 가격 못 움직임(채널마진모니터 제한상품) · 기준마진율 변경 대상 아님"):
+                _lshow = lock_v.sort_values("월순이익", ascending=False)[
+                    ["관리코드", "상품명", "채널", "현재마진", "베이스", "월순이익", "제한내용"]]
+                st.dataframe(_lshow, use_container_width=True, hide_index=True,
+                             column_config={
+                                 "현재마진": st.column_config.NumberColumn("현재(%)", format="%.1f"),
+                                 "베이스": st.column_config.NumberColumn("베이스(%)", format="%.1f"),
+                                 "월순이익": st.column_config.NumberColumn("월순이익", format="localized"),
+                                 "제한내용": st.column_config.TextColumn("제한내용", width="medium")},
+                             height=min(400, 80 + 36 * min(len(_lshow), 10)))
+                st.caption("margin_floor.csv에 '마진율 민감 상품'으로 등록된 건(단가유지·배송비포함가 등). 가격을 못 바꾸므로 추천·baseline 변경 안 함 — 등록/해제는 채널마진모니터 쪽 margin_floor 관리.")
 
         if len(none_v):
             with st.expander(f"🔴 변화 없음 · 가격 외 요인 {len(none_v):,}건 — 이미 싼데 안 팔림(노출·상세·광고/단종 판단)"):
