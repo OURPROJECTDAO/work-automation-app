@@ -28,6 +28,16 @@ TEST_CAP = 0.01         # ⑦ 나들 마진 없을 때 fallback 테스트 인하
 TURN_LONG_DAYS = 180    # ② 소진예측일 ≥ 이 값 = 장기소진(과잉재고) → 회전 마크다운 고려
 TURN_CAP_PP = 0.02      # ② 한 사이클 회전 마크다운 캡(−2%p). 360일=full·270일=1%p 램프
 
+# 액션 라벨(평어) — 작업목록 '액션' 컬럼
+A_HOLD = "유지"
+A_UP = "올림"
+A_DOWN = "내림"
+A_HOLDLOW = "낮게 유지"
+A_TURN = "재고정리 내림"
+A_QUEUE = "가격 테스트"
+_MOVE_ACTIONS = {A_UP, A_DOWN, A_TURN}   # 변동 액션(미세컷·신호약함 처리)
+_DOWN_ACTIONS = {A_DOWN, A_TURN}          # 인하 액션(_verdict '추가 인하 후보')
+
 
 def _nfc(s) -> str:
     if s is None:
@@ -112,41 +122,41 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=Non
         share = (max(r["월순이익"], 0) / tot_profit) if tot_profit > 0 else 0.0
         is_proven = ch in proven
         signal_weak = (r["개월"] < MIN_MONTHS) or (r["마진std"] < FLAT_STD)
-        action, target, reason, flag = "유지", m, "", "🟢"
+        action, target, reason, flag = A_HOLD, m, "", "🟢"
 
         if share < IGNORE_SHARE and not is_proven:
             # 관망(저우선 실험큐) — 영구배제 아님, 테스트 큐
-            action, target = "실험큐", m
+            action, target = A_QUEUE, m
             reason = f"이익에서 차지하는 비중이 작음({share*100:.1f}%) → 가격 한번 테스트(반응 보기), 두 번 반응 없으면 잠시 보류"
             flag = "⚪"
         elif is_proven:
             # 베이스 정의·유지. 베이스보다 낮으면 절반스텝 올림(가격둔감 여지)
             if m < base - 0.005:
                 target = m + (base - m) * HALF_STEP
-                action, reason, flag = "↑ 절반스텝", "잘 팔리는 핵심 채널인데 마진이 기준보다 낮음 → 조금 올려도 될 듯(가격에 둔감)", "🟢"
+                action, reason, flag = A_UP, "잘 팔리는 핵심 채널인데 마진이 기준보다 낮음 → 조금 올려도 될 듯(가격에 둔감)", "🟢"
             else:
-                action, target, reason, flag = "유지", m, "잘 팔리는 핵심 채널·마진 적정(이 상품 기준)", "🟢"
+                action, target, reason, flag = A_HOLD, m, "잘 팔리는 핵심 채널·마진 적정(이 상품 기준)", "🟢"
         elif m > base + 0.005:
             # 저볼륨·고마진 → 베이스로 절반스텝 인하
             target = m - (m - base) * HALF_STEP
-            action, reason = "↓ 절반스텝", f"적게 팔리는데 마진은 기준({base*100:.1f}%)보다 높음 → 기준 쪽으로 절반만 내려 반응 보기"
+            action, reason = A_DOWN, f"적게 팔리는데 마진은 기준({base*100:.1f}%)보다 높음 → 기준 쪽으로 절반만 내려 반응 보기"
             flag = "🟡"
             if signal_weak:
                 flag, reason = "🔴", reason + " · 가격 바꿔본 적 거의 없어 실험 성격(확신 낮음)"
         elif share >= IGNORE_SHARE * 10:
             # 비proven이지만 큰 채널(비중≥10%) 베이스 미만 → 상향 여지(가격둔감)
             target = m + (base - m) * HALF_STEP
-            action, reason, flag = "↑ 절반스텝", f"많이 파는 채널({share*100:.0f}%)인데 마진이 기준보다 낮음 → 기준 쪽으로 절반만 올려보기", "🟡"
+            action, reason, flag = A_UP, f"많이 파는 채널({share*100:.0f}%)인데 마진이 기준보다 낮음 → 기준 쪽으로 절반만 올려보기", "🟡"
         else:
             # 저볼륨·저마진(<베이스) → hold-low
-            action, target = "hold-low", m
+            action, target = A_HOLDLOW, m
             reason = f"이미 싼데도 안 팔림(기준 {base*100:.1f}%보다 낮음) → 더 안 내리고 그대로 둠(팔리기 시작하면 다시 봄)"
             flag = "🔴"
 
         # ⑦ 매출목표 미달(small) override — 나들 floor까지 절반스텝(볼륨 푸시) / 저마진은 🔴
-        if small and action != "실험큐":
+        if small and action != A_QUEUE:
             if m < base - 0.005:
-                action, target, flag = "hold-low", m, "🔴"
+                action, target, flag = A_HOLDLOW, m, "🔴"
                 reason = (f"매출목표 미달(가장 잘 파는 채널도 월 {_fmt_floor}만 미만)인데 마진이 이미 낮음 "
                           "→ 가격 문제 아닐 수 있음(노출·상품성) → 사람이 판단")
             else:
@@ -159,11 +169,11 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=Non
                     reason = (f"매출목표 미달(월 {_fmt_floor}만 미만)·나들 기준 없음 → "
                               f"더 팔리게 {TEST_CAP*100:.0f}%p만 내려 테스트")
                 target = max(target, 0.0)  # 역마진 방지(나들 anchor라 기본 보장)
-                action, flag = "↓ 절반스텝", "🟡"
+                action, flag = A_DOWN, "🟡"
 
         # ② 회전 markdown — 장기소진(과잉재고)이면 청산 인하(단방향·−2%p 캡·베이스아래 허용·자동복귀)
         if (turnover_days is not None and turnover_days > TURN_LONG_DAYS
-                and action != "실험큐"):
+                and action != A_QUEUE):
             md = min(TURN_CAP_PP,
                      TURN_CAP_PP * (turnover_days - TURN_LONG_DAYS) / TURN_LONG_DAYS)
             turn_target = m - md
@@ -176,7 +186,7 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=Non
                               "→ 사람이 판단 · " + reason)
                 else:
                     target = max(turn_target, floor_anchor, 0.0)
-                    action = "↓ 회전"
+                    action = A_TURN
                     _mdr = (f"재고가 오래 안 빠짐({turnover_days:.0f}일) → 재고 정리용으로 {md*100:.1f}%p 내림"
                             "(재고 풀리면 자동 원복)")
                     reason = _mdr + (" · " + reason if reason else "")
@@ -184,12 +194,12 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=Non
                         flag = "🟡"
 
         delta = target - m
-        if action in ("↑ 절반스텝", "↓ 절반스텝", "↓ 회전") and abs(delta) < MIN_DELTA:
-            action, target, delta, flag = "유지", m, 0.0, "🟢"
+        if action in _MOVE_ACTIONS and abs(delta) < MIN_DELTA:
+            action, target, delta, flag = A_HOLD, m, 0.0, "🟢"
             reason = "기준과 거의 같음(차이 미미) → 그대로 둠"
         if abs(delta) > BIG_MOVE:
             flag = "🔴"
-        if (action.startswith("↑") or action.startswith("↓")) and signal_weak and flag != "🔴":
+        if action in _MOVE_ACTIONS and signal_weak and flag != "🔴":
             flag = "🟡"
 
         out.append(dict(
@@ -241,7 +251,7 @@ def _verdict(action, before, after, ready: bool) -> tuple[str, str]:
         thr = max(abs(before) * RESP_BAND, 1000.0)
         v = "개선" if d > thr else ("악화" if d < -thr else "무변화")
     if v == "개선":
-        s = "유지" + (" · 추가 인하 후보" if str(action).startswith("↓") else "")
+        s = "유지" + (" · 추가 인하 후보" if str(action) in _DOWN_ACTIONS else "")
     elif v == "악화":
         s = "되돌림"
     else:
