@@ -199,13 +199,16 @@ def measure(prod: pd.DataFrame, pending: pd.DataFrame, today=None,
     prod = compute_online_margin 결과(거래일자·수량·판매금액·_순·관리코드·채널·상품명).
     pending = 원장 status=pending 행(decision_id·관리코드·채널·ts·액션·마진_before·마진_적용·
               측정전_월볼륨·측정전_월순이익·베이스·플래그).
-    return 행별: 측정전/측정후(월순이익·월볼륨)·측정후마진·post_개월·경과일·ready·결과·제안.
-    같은 (관리코드,채널)의 ts 이후 거래만 → 월수(YYYY-MM nunique)로 run-rate. 동일 마진정의(순/매출).
+    return 행별: 측정전/측정후(월순이익·월볼륨)·측정후마진·측정일수·post_개월·경과일·ready·결과·제안.
+    ★ready·run-rate는 **적재 데이터 커버리지** 기준(벽시계 아님): 월별 적재 갭 편향 방지.
+      측정일수 = 적재 최신거래일(data_max) − ts. ready = 측정일수 ≥ min_days.
+      월순/월볼 = ts 이후 거래 합 ÷ (측정일수/30.4) — **일수 정규화**(부분월·월말 결정 편향 제거).
+      동일 마진정의(순/매출). post 매출 0이어도 ready면 월순=0(=판매 붕괴 신호).
     """
     import datetime as _dt
     today = today or _dt.date.today()
     cols_out = ["decision_id", "관리코드", "상품명", "채널", "액션", "ts", "경과일",
-                "post_개월", "측정전_월순이익", "측정후_월순이익", "측정전_월볼륨",
+                "측정일수", "post_개월", "측정전_월순이익", "측정후_월순이익", "측정전_월볼륨",
                 "측정후_월볼륨", "측정후마진", "마진_before", "마진_적용", "베이스",
                 "플래그", "ready", "결과", "제안"]
     if pending is None or len(pending) == 0 or prod is None or prod.empty:
@@ -215,6 +218,8 @@ def measure(prod: pd.DataFrame, pending: pd.DataFrame, today=None,
     df["_ch"] = df["채널"].astype(str).map(_nfc)
     df["_dt"] = pd.to_datetime(df["거래일자"])
     df["_ym"] = df["_dt"].dt.strftime("%Y-%m")
+    _dmax = df["_dt"].max()
+    data_max_d = _dmax.date() if pd.notna(_dmax) else today  # 적재 프론티어(전 셀 공통)
     name_by = (df.dropna(subset=["상품명"]).groupby("_code")["상품명"].first().to_dict()
                if "상품명" in df.columns else {})
     out = []
@@ -226,31 +231,35 @@ def measure(prod: pd.DataFrame, pending: pd.DataFrame, today=None,
             ts_d = _dt.date.fromisoformat(ts[:10])
         except Exception:
             ts_d = today
-        elapsed = (today - ts_d).days
+        elapsed = (today - ts_d).days          # 벽시계(표시용)
+        cov_days = (data_max_d - ts_d).days     # 적재된 post 기간(측정 기준)
+        ready = cov_days >= min_days
         sub = df[(df["_code"] == code) & (df["_ch"] == ch)
                  & (df["_dt"] > pd.Timestamp(ts_d))]
-        post_m = int(sub["_ym"].nunique())
-        if post_m > 0:
+        post_ym = int(sub["_ym"].nunique())
+        if ready:
             매출 = float(sub["판매금액"].sum())
             순 = float(sub["_순"].sum())
             수량 = float(sub["수량"].sum())
-            월순 = 순 / post_m
-            월볼 = 수량 / post_m
+            months = max(cov_days / 30.4, 1e-9)   # 일수 정규화(달력월 개수 아님)
+            월순 = 순 / months
+            월볼 = 수량 / months
             마진 = (순 / 매출) if 매출 > 0 else float("nan")
+            after = 월순
         else:
             월순 = 월볼 = 마진 = float("nan")
-        ready = (elapsed >= min_days) and (post_m > 0)
+            after = None
         before = float(r.get("측정전_월순이익") or 0)
-        v, s = _verdict(r.get("액션"), before, (월순 if post_m > 0 else None), ready)
+        v, s = _verdict(r.get("액션"), before, after, ready)
         out.append(dict(
             decision_id=r.get("decision_id"), 관리코드=r.get("관리코드"),
             상품명=name_by.get(code, ""), 채널=r.get("채널"), 액션=r.get("액션"),
-            ts=ts[:10], 경과일=elapsed, post_개월=post_m,
+            ts=ts[:10], 경과일=elapsed, 측정일수=max(cov_days, 0), post_개월=post_ym,
             측정전_월순이익=int(round(before)),
-            측정후_월순이익=(int(round(월순)) if post_m > 0 else None),
+            측정후_월순이익=(int(round(월순)) if ready else None),
             측정전_월볼륨=int(r.get("측정전_월볼륨") or 0),
-            측정후_월볼륨=(int(round(월볼)) if post_m > 0 else None),
-            측정후마진=(round(마진 * 100, 1) if (post_m > 0 and pd.notna(마진)) else None),
+            측정후_월볼륨=(int(round(월볼)) if ready else None),
+            측정후마진=(round(마진 * 100, 1) if (ready and pd.notna(마진)) else None),
             마진_before=r.get("마진_before"), 마진_적용=r.get("마진_적용"),
             베이스=r.get("베이스"), 플래그=r.get("플래그"),
             ready=ready, 결과=v, 제안=s))
