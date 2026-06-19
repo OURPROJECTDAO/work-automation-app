@@ -282,6 +282,8 @@ if not pat:
     st.stop()
 
 unit = 2700.0  # 실택배비 표준(daily_margin.DEFAULT_FLAT·채널마진모니터와 동일)
+st.session_state.setdefault("mo_recent", set())   # 이번 세션 방금 기록한 (관리코드,채널) — 즉시 숨김(원장 복제 지연 대비)
+st.session_state.setdefault("mo_tblver", 0)        # 작업목록 표 버전(기록 후 선택 초기화용)
 
 tab_wl, tab_ms = st.tabs(["📋 작업목록", "📈 측정 결과 (Gate3)"])
 
@@ -311,6 +313,7 @@ with tab_wl:
                 _sup = set(zip(_r["관리코드"].astype(str), _r["채널"].astype(str)))
         except Exception:
             _sup = set()
+        _sup |= st.session_state.get("mo_recent", set())  # 방금 기록분 즉시 숨김
         act["_k"] = list(zip(act["관리코드"].astype(str), act["채널"].astype(str)))
         _n_sup_shown = int(act["_k"].isin(_sup).sum()) if _sup else 0
         act = act[~act["_k"].isin(_sup)].drop(columns="_k").copy()
@@ -401,7 +404,8 @@ with tab_wl:
                 "월볼륨": st.column_config.NumberColumn("월볼륨", format="localized"),
                 "사유": st.column_config.TextColumn(width="large"),
             },
-            height=min(620, 80 + 36 * min(len(show), 15)), key="mo_tbl")
+            height=min(620, 80 + 36 * min(len(show), 15)),
+            key=f"mo_tbl_{st.session_state['mo_tblver']}")
 
         sel_rows = []
         try:
@@ -461,7 +465,15 @@ with tab_wl:
                                 msg += f" · 기준값 없음 {len(miss_row)}건(기록만)."
                             if skip:
                                 msg += f" · 매핑외 채널 건너뜀: {', '.join(sorted(set(skip)))}."
-                    st.success(msg + " 다음 사이클에 반응 측정 → 유지/되돌림.")
+                    # 방금 처리분 즉시 숨김 + 표 선택 초기화 + 새로고침(필터는 유지) → 이어서 진행
+                    for _i in sel_rows:
+                        _rr = v.iloc[_i]
+                        st.session_state["mo_recent"].add((str(_rr["관리코드"]), str(_rr["채널"])))
+                    st.session_state["mo_tblver"] += 1
+                    if chg:
+                        load_baseline.clear()  # 기준마진율 컬럼 최신화
+                    st.toast("✅ " + msg + " 이어서 진행하세요.")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"실패: {e}")
 
