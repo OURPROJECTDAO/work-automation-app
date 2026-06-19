@@ -25,6 +25,8 @@ MIN_MONTHS = 6          # 신호 판단 최소 개월
 FLAT_STD = 0.015        # 월 마진 표준편차 < 1.5%p = "거의 안 흔듦" = 신호 없음
 TARGET_FLOOR = 1_000_000  # ⑦ 월매출 목표 floor(원) — best 관리채널 월매출 < 이 값이면 "매출목표 미달"
 TEST_CAP = 0.01         # ⑦ 나들 마진 없을 때 fallback 테스트 인하폭(−1%p)
+TURN_LONG_DAYS = 180    # ② 소진예측일 ≥ 이 값 = 장기소진(과잉재고) → 회전 마크다운 고려
+TURN_CAP_PP = 0.02      # ② 한 사이클 회전 마크다운 캡(−2%p). 360일=full·270일=1%p 램프
 
 
 def _nfc(s) -> str:
@@ -87,12 +89,14 @@ def base_margin(cells: pd.DataFrame) -> tuple[float, list[str]]:
     return base, list(proven["채널"])
 
 
-def recommend_code(cells_code: pd.DataFrame, nadl_margin=None) -> pd.DataFrame:
+def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=None) -> pd.DataFrame:
     """한 관리코드의 채널별 권장 기준마진율 + 플래그 + 사유.
 
     cells_code = cell_stats 중 한 관리코드. nadl_margin = 그 상품 나들 순마진(분수·하한 anchor) or None.
     ⑦ 매출목표: best 관리채널 월매출 < TARGET_FLOOR면 "미달" → 볼륨 푸시.
       고마진/베이스근처/proven → 나들 마진까지 절반스텝 인하(없으면 −TEST_CAP 테스트) / 저마진 → 🔴 사람판단.
+    ② 회전: turnover_days(소진예측일·상품단위) > TURN_LONG_DAYS면 장기소진 → 마크다운(−2%p 캡 램프·
+      단방향·베이스아래 허용·나들/0 바닥·이미 저마진/바닥은 🔴·재고 풀리면 다음 사이클 자동복귀).
     return 채널별 추천 행(+목표 컬럼).
     """
     cells_code = cells_code.copy()
@@ -157,8 +161,30 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None) -> pd.DataFrame:
                 target = max(target, 0.0)  # 역마진 방지(나들 anchor라 기본 보장)
                 action, flag = "↓ 절반스텝", "🟡"
 
+        # ② 회전 markdown — 장기소진(과잉재고)이면 청산 인하(단방향·−2%p 캡·베이스아래 허용·자동복귀)
+        if (turnover_days is not None and turnover_days > TURN_LONG_DAYS
+                and action != "실험큐"):
+            md = min(TURN_CAP_PP,
+                     TURN_CAP_PP * (turnover_days - TURN_LONG_DAYS) / TURN_LONG_DAYS)
+            turn_target = m - md
+            floor_anchor = nadl_margin if (nadl_margin is not None and nadl_margin >= 0) else 0.0
+            if turn_target < target - 1e-9:  # 회전이 기존보다 더 깊게 내릴 때만(단방향)
+                if (m < base - 0.005) or (turn_target <= floor_anchor + 1e-9):
+                    target = max(turn_target, floor_anchor)
+                    flag = "🔴"
+                    reason = (f"⚪장기소진({turnover_days:.0f}일) 청산 필요인데 이미 저마진/바닥 근처 "
+                              "→ 사람판단 · " + reason)
+                else:
+                    target = max(turn_target, floor_anchor, 0.0)
+                    action = "↓ 회전"
+                    _mdr = (f"⚪장기소진({turnover_days:.0f}일) → −{md*100:.1f}%p 마크다운"
+                            "(청산·재고 풀리면 자동복귀)")
+                    reason = _mdr + (" · " + reason if reason else "")
+                    if flag != "🔴":
+                        flag = "🟡"
+
         delta = target - m
-        if action in ("↑ 절반스텝", "↓ 절반스텝") and abs(delta) < MIN_DELTA:
+        if action in ("↑ 절반스텝", "↓ 절반스텝", "↓ 회전") and abs(delta) < MIN_DELTA:
             action, target, delta, flag = "유지", m, 0.0, "🟢"
             reason = "베이스와 거의 일치(미세) → 유지"
         if abs(delta) > BIG_MOVE:
@@ -178,15 +204,18 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None) -> pd.DataFrame:
     return df.sort_values("월순이익", ascending=False).reset_index(drop=True)
 
 
-def worklist(cells: pd.DataFrame, codes=None, nadl_map=None) -> pd.DataFrame:
-    """여러 관리코드 → 전체 작업목록. nadl_map={관리코드(NFC): 나들 순마진} = ⑦ 하한 anchor."""
+def worklist(cells: pd.DataFrame, codes=None, nadl_map=None, turnover_map=None) -> pd.DataFrame:
+    """여러 관리코드 → 전체 작업목록. nadl_map={관리코드(NFC): 나들 순마진}=⑦ anchor·
+    turnover_map={관리코드(NFC): 소진예측일}=② 회전 신호."""
     nadl_map = nadl_map or {}
+    turnover_map = turnover_map or {}
     res = []
     grp = cells.groupby("관리코드", observed=True)
     for code, g in grp:
         if codes is not None and code not in codes:
             continue
-        res.append(recommend_code(g, nadl_margin=nadl_map.get(_nfc(code))))
+        res.append(recommend_code(g, nadl_margin=nadl_map.get(_nfc(code)),
+                                  turnover_days=turnover_map.get(_nfc(code))))
     if not res:
         return pd.DataFrame()
     df = pd.concat(res, ignore_index=True)
