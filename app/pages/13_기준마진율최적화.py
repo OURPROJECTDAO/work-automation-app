@@ -399,8 +399,9 @@ with tab_wl:
 # 탭 2 — 측정 결과 (Gate 3: 결정 후 실적으로 효과 측정 → 유지/되돌림)
 # ════════════════════════════════════════════════════════════════════
 with tab_ms:
-    st.caption(f"기록한 결정의 **결정일 이후 실적**으로 효과를 측정합니다. 결정 후 **{mo.MEASURE_MIN_DAYS}일** 경과 + 매출 발생 시 "
-               "측정 대상. **개선=유지 · 악화=되돌림(기준마진율 원복)**. 판정은 제안 — 사람이 최종 (Gate 3: 잘못된 결정 리뷰).")
+    st.caption(f"기록한 결정의 **결정일 이후 실적**으로 효과를 측정합니다. **적재된 매출이 결정일 기준 {mo.MEASURE_MIN_DAYS}일분** "
+               "쌓이면 측정 대상(월별 적재 갭에 안 휘둘리도록 벽시계 아닌 **데이터 커버리지** 기준). "
+               "**개선=유지 · 악화=되돌림(기준마진율 원복)**. 판정은 제안 — 사람이 최종 (Gate 3: 잘못된 결정 리뷰).")
     led = dl.read_all(pat, repo)
     if led is None or led.empty:
         st.info("기록된 결정이 없습니다. **작업목록** 탭에서 결정을 기록하면 여기서 측정합니다.")
@@ -429,7 +430,7 @@ with tab_ms:
             if len(ready):
                 rshow = ready[["결과", "제안", "관리코드", "상품명", "채널", "액션",
                                "측정전_월순이익", "측정후_월순이익", "측정전_월볼륨",
-                               "측정후_월볼륨", "측정후마진", "post_개월", "경과일", "플래그"]].copy()
+                               "측정후_월볼륨", "측정후마진", "측정일수", "post_개월", "플래그"]].copy()
                 rev = st.dataframe(
                     rshow, use_container_width=True, hide_index=True,
                     on_select="rerun", selection_mode="multi-row",
@@ -442,6 +443,7 @@ with tab_ms:
                         "측정전_월볼륨": st.column_config.NumberColumn("전·월볼륨", format="localized"),
                         "측정후_월볼륨": st.column_config.NumberColumn("후·월볼륨", format="localized"),
                         "측정후마진": st.column_config.NumberColumn("후마진%", format="%.1f"),
+                        "측정일수": st.column_config.NumberColumn("측정일수", format="%d", help="run-rate에 쓴 적재 post 기간(일). 30.4일=1개월로 일수 정규화"),
                     },
                     height=min(560, 80 + 36 * min(len(rshow), 12)), key="ms_ready")
                 try:
@@ -467,10 +469,12 @@ with tab_ms:
                 st.caption("측정 가능한 결정이 아직 없습니다.")
 
             if len(wait):
-                with st.expander(f"측정 대기 {len(wait)}건 — 경과일/매출 부족"):
+                with st.expander(f"측정 대기 {len(wait)}건 — 적재 post 기간 부족(<{mo.MEASURE_MIN_DAYS}일)"):
+                    st.caption("측정일수 = 적재 최신거래일 − 결정일. 다음 월 매출이 적재되면 자동으로 측정 가능으로 넘어옵니다.")
                     st.dataframe(
-                        wait[["관리코드", "상품명", "채널", "액션", "경과일", "post_개월", "플래그"]],
-                        hide_index=True, use_container_width=True)
+                        wait[["관리코드", "상품명", "채널", "액션", "측정일수", "경과일", "post_개월", "플래그"]],
+                        hide_index=True, use_container_width=True,
+                        column_config={"측정일수": st.column_config.NumberColumn("측정일수(적재)", format="%d")})
 
             st.divider()
 
@@ -568,7 +572,8 @@ with tab_ms:
 
     st.divider()
     st.caption(
-        "ⓘ 측정후 = **결정일(ts) 이후** 거래만으로 월 run-rate 재계산(동일 마진정의). "
+        "ⓘ 측정후 = **결정일(ts) 이후** 거래만 월 run-rate(동일 마진정의). **일수 정규화**(합÷측정일수/30.4 — 달력월 개수 아님) + "
+        f"**커버리지 게이트**(적재 post 기간 ≥{mo.MEASURE_MIN_DAYS}일이면 측정; 월별 적재 갭에 안 휘둘림). "
         f"개선=후월순이익 > 전×{1 + mo.RESP_BAND:.0%} · 악화 < 전×{1 - mo.RESP_BAND:.0%} · 그 사이=무변화(관찰). "
         "행사·시즌·품절 교란은 미보정(관찰 한계) — 판정은 제안. **되돌림**은 적용했던 변화(Δ)를 baseline에서 "
         "역가산 원복(기록만 결정은 원복 없이 종료). 원장 status: pending→measured→closed/reverted (forward·비-PII).")
