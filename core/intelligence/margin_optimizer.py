@@ -123,9 +123,9 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=Non
             # 베이스 정의·유지. 베이스보다 낮으면 절반스텝 올림(가격둔감 여지)
             if m < base - 0.005:
                 target = m + (base - m) * HALF_STEP
-                action, reason, flag = "↑ 절반스텝", "proven인데 베이스 미만 → 절반스텝 상향(가격둔감 여지)", "🟢"
+                action, reason, flag = "↑ 절반스텝", "잘 팔리는 핵심 채널인데 마진이 기준보다 낮음 → 조금 올려도 될 듯(가격에 둔감)", "🟢"
             else:
-                action, target, reason, flag = "유지", m, "proven(베이스 정의·적정)", "🟢"
+                action, target, reason, flag = "유지", m, "잘 팔리는 핵심 채널·마진 적정(이 상품 기준)", "🟢"
         elif m > base + 0.005:
             # 저볼륨·고마진 → 베이스로 절반스텝 인하
             target = m - (m - base) * HALF_STEP
