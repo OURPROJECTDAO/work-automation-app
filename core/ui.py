@@ -23,6 +23,7 @@ G, Y, R = "#2F9E44", "#F08C00", "#E03131"  # 🟢🟡🔴
 
 _CSS = """
 <style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
 /* ===== 본문 간격·타이포 ===== */
 .block-container { padding-top: 2.2rem; padding-bottom: 4rem; max-width: 1180px; }
 h1 { letter-spacing: -0.02em; font-weight: 700; }
@@ -74,6 +75,15 @@ h2, h3 { letter-spacing: -0.01em; }
 .ui-pill.r { background:#FFF0F0; color:#E03131; }
 .ui-up { color:#E03131; font-weight:700; font-variant-numeric:tabular-nums; }
 .ui-down { color:#1971C2; font-weight:700; font-variant-numeric:tabular-nums; }
+
+/* ===== 섹션 헤더 (인디고 액센트 바) ===== */
+.ui-eyebrow{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:11.5px;font-weight:600;
+  letter-spacing:.12em;text-transform:uppercase;color:#3B5BDB}
+.ui-sec{display:flex;align-items:center;gap:11px;margin:10px 0 16px}
+.ui-sec .ui-bar{width:4px;height:21px;border-radius:3px;background:#3B5BDB;flex:none}
+.ui-sec h2{font-size:19px;font-weight:700;letter-spacing:-.01em;margin:0;line-height:1.2}
+.ui-sec .ui-tag{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:11px;color:#9AA1AC;
+  margin-left:auto;font-weight:500;font-variant-numeric:tabular-nums}
 </style>
 """
 
@@ -133,3 +143,14 @@ def kpi_row(items: list[dict]) -> None:
         )
     st.markdown('<div class="ui-kpis">' + "".join(cards) + "</div>",
                 unsafe_allow_html=True)
+
+
+def section_head(title: str, icon: str = "", tag: str | None = None) -> None:
+    """섹션 헤더 — 인디고 액센트 바 + 제목 (+선택 mono 태그)."""
+    ic = f"{icon} " if icon else ""
+    tag_html = f'<span class="ui-tag">{tag}</span>' if tag else ""
+    st.markdown(
+        f'<div class="ui-sec"><span class="ui-bar"></span>'
+        f'<h2>{ic}{title}</h2>{tag_html}</div>',
+        unsafe_allow_html=True,
+    )
