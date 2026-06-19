@@ -24,6 +24,7 @@ from core.intelligence import decision_log as dl
 from core.intelligence import margin_optimizer as mo
 from core.intelligence import orders as _orders
 from core.intelligence import ship_alloc
+from core.intelligence import stockout
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 
@@ -110,6 +111,24 @@ def load_giftset_codes() -> set:
         return set()
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_turnover(pat: str, repo: str) -> dict:
+    """② 회전 신호 — 관리코드별 소진예측일(현재고÷최근3개월 일소진). 두뇌② forecast 재사용."""
+    try:
+        pm = pd.read_csv(_REF / "product_master.csv", dtype=str, encoding="utf-8-sig")
+        sales = load_sales_min(pat, repo)
+        if sales.empty:
+            return {}
+        dep = stockout.depletion_rate(sales, months=3)
+        fc = stockout.forecast(pm, dep, {}, default_lead_days=14.0)  # 소진예측일은 cadence 무관
+        if fc.empty:
+            return {}
+        return {_nfc(c): (float(d) if pd.notna(d) else None)
+                for c, d in zip(fc["관리코드"], fc["소진예측일"])}
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=1800, show_spinner="온라인 매출 정제 중...")
 def build_prod(pat: str, repo: str, unit: float) -> tuple[pd.DataFrame, dict]:
     """온라인 18개월 매출 → 택배 실배분·채널 라벨·나들 제외. 작업목록·측정 공용 토대."""
@@ -148,7 +167,7 @@ def build_worklist(pat: str, repo: str, unit: float) -> tuple[pd.DataFrame, pd.D
     if prod.empty:
         return pd.DataFrame(), pd.DataFrame()
     cells = mo.cell_stats(prod)
-    return mo.worklist(cells, nadl_map=nadl_map), cells
+    return mo.worklist(cells, nadl_map=nadl_map, turnover_map=load_turnover(pat, repo)), cells
 
 
 # 두뇌④ 채널 라벨 → baseline_margin.csv 컬럼 (ESM 라벨만 다름)
@@ -250,7 +269,7 @@ with tab_wl:
     if wl.empty:
         st.info("적재된 온라인 매출 데이터가 없습니다. (거래처 그룹에 '온라인' 지정 필요)")
     else:
-        ACT = ["↑ 절반스텝", "↓ 절반스텝", "hold-low"]
+        ACT = ["↑ 절반스텝", "↓ 절반스텝", "hold-low", "↓ 회전"]
         act = wl[wl["액션"].isin(ACT)].copy()
         queue = wl[wl["액션"] == "실험큐"]
 
@@ -416,7 +435,8 @@ with tab_wl:
             "순이익가중평균. **↑/↓ 절반스텝**=베이스까지 거리의 절반만(반응 보고 또 절반/되돌림). **hold-low**=싼데 안 "
             "팔림→안 올림. **🔴**=|Δ|>3%p·신호 약함·hold-low(사람 판단). 권장변화 ▲올림(빨강)·▼내림(파랑)·한국식. "
             "v0 한계: ⑧ 시즌(명절세트) 미보정으로 월순이익 상위에 세트류 부풀려질 수 있음 · 나들=하한 참조(별도) · "
-            "'기준마진율도 함께 변경' 켜면 baseline_margin.csv에 써서 cmm 반영(끄면 기록만)·같은 결정은 45일 측정창 동안 숨김. 택배비 2,700원 고정·나들 제외.")
+            "'기준마진율도 함께 변경' 켜면 baseline_margin.csv에 써서 cmm 반영(끄면 기록만)·같은 결정은 45일 측정창 동안 숨김. "
+            "**↓ 회전**=장기소진(소진예측>180일·두뇌②) 청산 마크다운(−2%p 캡·재고풀리면 자동복귀). **📉목표**=best 채널 월매출<100만(⑦·나들 마진까지). 택배비 2,700원 고정·나들 제외·선물세트 제외.")
 
 # ════════════════════════════════════════════════════════════════════
 # 탭 2 — 측정 결과 (Gate 3: 결정 후 실적으로 효과 측정 → 유지/되돌림)
