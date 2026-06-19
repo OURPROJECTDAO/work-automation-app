@@ -28,6 +28,7 @@ from core.intelligence import stockout
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 
+st.set_page_config(layout="wide")  # 표 좌우 폭 확장(컬럼 많음)
 st.title("🎯 기준마진율 최적화")
 st.caption("상품×채널마다 **권장 기준마진율**을 데이터로. 손볼 가치 있는 소수만 임팩트(월순이익)순으로. "
            "🟢 수락 · 🟡 검토 · 🔴 사람 판단 필수. 적용은 **채널마진모니터**에서 저장(여기선 권장값·결정 기록).")
@@ -290,10 +291,16 @@ with tab_wl:
         act = act[~act["_k"].isin(_sup)].drop(columns="_k").copy()
 
         # ── 필터 ───────────────────────────────────────────
-        f1, f2, f3 = st.columns([1.4, 1.4, 2])
-        with f1:
-            chans = sorted(act["채널"].unique())
-            pick_ch = st.multiselect("채널", chans, default=[], key="mo_ch", placeholder="전체")
+        chans = sorted(act["채널"].unique())
+        st.caption("**채널** — 체크 해제로 제외 (전부 켜짐 = 전체)")
+        _ccols = st.columns(len(chans)) if chans else [st]
+        pick_ch = []
+        for i, c in enumerate(chans):
+            if _ccols[i].checkbox(c, value=True, key=f"mo_ch_{c}"):
+                pick_ch.append(c)
+        if len(pick_ch) == len(chans):
+            pick_ch = []  # 전부 켜짐 = 필터 없음(전체)
+        f2, f3 = st.columns([1.4, 2.6])
         with f2:
             flags = ["🟢", "🟡", "🔴"]
             pick_fl = st.multiselect("플래그", flags, default=flags, key="mo_fl")
