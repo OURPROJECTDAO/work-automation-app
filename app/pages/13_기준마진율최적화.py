@@ -173,19 +173,23 @@ st.caption(f"실험큐(관망·저우선) {len(queue):,}건 · 전체 셀 {len(w
            "표에서 행 선택 → 아래 [결정 원장에 기록].")
 
 # ── 작업목록 ────────────────────────────────────────────
-show = v[["플래그", "관리코드", "상품명", "채널", "현재마진", "베이스", "권장마진", "Δ",
-          "월매출", "월순이익", "월볼륨", "액션", "사유"]]
+disp = v.copy()
+disp["변화"] = disp["Δ"].map(
+    lambda x: f"▲ +{x:.1f}" if x > 0 else (f"▼ {x:.1f}" if x < 0 else "—"))
+show = disp[["플래그", "관리코드", "상품명", "채널", "현재마진", "베이스", "권장마진",
+             "변화", "월매출", "월순이익", "월볼륨", "액션", "사유"]]
 
 
-def _color_delta(val):
-    if val > 0:
-        return "color:#1a7f37;font-weight:700"   # ↑ 상향 = 초록
-    if val < 0:
-        return "color:#cf222e;font-weight:700"   # ↓ 인하 = 빨강
-    return "color:#8c959f"                       # 유지/hold = 회색
+def _color_dir(s):
+    # 한국식: 올림 ▲ 빨강 · 내림 ▼ 파랑 · 유지 회색
+    if isinstance(s, str) and s.startswith("▲"):
+        return "color:#cf222e;font-weight:700"
+    if isinstance(s, str) and s.startswith("▼"):
+        return "color:#0969da;font-weight:700"
+    return "color:#8c959f"
 
 
-styled = show.style.map(_color_delta, subset=["Δ"])
+styled = show.style.map(_color_dir, subset=["변화"])
 ev = st.dataframe(
     styled, use_container_width=True, hide_index=True,
     on_select="rerun", selection_mode="multi-row",
@@ -196,7 +200,7 @@ ev = st.dataframe(
         "현재마진": st.column_config.NumberColumn("현재(%)", format="%.1f"),
         "베이스": st.column_config.NumberColumn("베이스(%)", format="%.1f"),
         "권장마진": st.column_config.NumberColumn("권장(%)", format="%.1f"),
-        "Δ": st.column_config.NumberColumn("Δ(%p)", format="%+.1f"),
+        "변화": st.column_config.TextColumn("권장변화(%p)", width="small"),
         "월매출": st.column_config.NumberColumn("월매출", format="localized"),
         "월순이익": st.column_config.NumberColumn("월순이익", format="localized"),
         "월볼륨": st.column_config.NumberColumn("월볼륨", format="localized"),
@@ -235,7 +239,7 @@ st.divider()
 st.caption(
     "ⓘ **마진=순이익÷정산액**(택배 실배분 차감·기준마진율 시트 정의). **베이스**=순이익 누적 85% proven 채널 "
     "순이익가중평균. **↑/↓ 절반스텝**=베이스까지 거리의 절반만(반응 보고 또 절반/되돌림). **hold-low**=싼데 안 "
-    "팔림→안 올림. **🔴**=|Δ|>3%p·신호 약함·hold-low(사람 판단). "
+    "팔림→안 올림. **🔴**=|Δ|>3%p·신호 약함·hold-low(사람 판단). 권장변화 ▲올림(빨강)·▼내림(파랑)·한국식. "
     "v0 한계: ⑧ 시즌(명절세트) 미보정으로 월순이익 상위에 세트류 부풀려질 수 있음 · 나들=하한 참조(별도) · "
     "cmm 편집창 직접 prefill은 후속(현재는 권장값·결정 기록까지). 택배비 2,700원 고정(실택배비 표준)·나들 제외(데이터 확인용 채널)."
 )
