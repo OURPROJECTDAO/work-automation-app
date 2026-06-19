@@ -120,6 +120,48 @@ def build_worklist(pat: str, repo: str, unit: float) -> tuple[pd.DataFrame, pd.D
     return mo.worklist(cells), cells
 
 
+# 두뇌④ 채널 라벨 → baseline_margin.csv 컬럼 (ESM 라벨만 다름)
+_BCOL = {"스마트스토어": "스마트스토어", "ESM(G마켓·옥션)": "ESM", "식봄": "식봄",
+         "캐시노트": "캐시노트", "알리": "알리", "쿠팡": "쿠팡",
+         "배민상회": "배민상회", "올웨이즈": "올웨이즈"}
+_BASELINE_PATH = "reference/baseline_margin.csv"
+_APP_REPO = "OURPROJECTDAO/work-automation-app"
+
+
+def _app_pat() -> str:
+    return st.secrets.get("GITHUB_PAT", "")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_baseline(pat_app: str) -> dict:
+    """baseline_margin.csv → {(관리코드, 채널컬럼): 분수}. 현 cmm 기준마진율(타깃)."""
+    if not pat_app:
+        return {}
+    import base64 as _b64, io as _io, json as _js, urllib.parse as _uq, urllib.request as _ur
+    url = "https://api.github.com/repos/%s/contents/%s" % (
+        _APP_REPO, "/".join(_uq.quote(s) for s in _BASELINE_PATH.split("/")))
+    try:
+        req = _ur.Request(url, headers={"Authorization": "Bearer " + pat_app,
+                          "Accept": "application/vnd.github+json", "User-Agent": "mo"})
+        with _ur.urlopen(req) as r:
+            meta = _js.load(r)
+        df = pd.read_csv(_io.StringIO(_b64.b64decode(meta["content"]).decode("utf-8-sig")), dtype=str)
+        cc = df.columns[0]
+        out = {}
+        for _, row in df.iterrows():
+            code = str(row[cc])
+            for col in df.columns[1:]:
+                val = row[col]
+                if pd.notna(val) and str(val).strip():
+                    try:
+                        out[(code, col)] = float(val)
+                    except (TypeError, ValueError):
+                        pass
+        return out
+    except Exception:
+        return {}
+
+
 pat, repo = _data_secret()
 if not pat:
     st.warning("저장소 접근 정보(secrets `[data] pat`)가 설정되지 않았습니다.")
@@ -178,6 +220,12 @@ _rev = cells.copy()
 _rev["월매출"] = (_rev["매출"] / _rev["개월"].clip(lower=1)).round().astype("int64")
 v = v.merge(_rev[["관리코드", "채널", "월매출"]], on=["관리코드", "채널"], how="left")
 v["월매출"] = v["월매출"].fillna(0).astype("int64")
+# 현 기준마진율(cmm 타깃) — baseline_margin.csv 채널별 조회
+_bl = load_baseline(_app_pat())
+v["기준마진율"] = [
+    (round(_bl[(str(c), _BCOL[ch])] * 100, 2)
+     if (ch in _BCOL and (str(c), _BCOL[ch]) in _bl) else float("nan"))
+    for c, ch in zip(v["관리코드"], v["채널"])]
 
 # ── KPI ────────────────────────────────────────────────
 k1, k2, k3, k4 = st.columns(4)
@@ -193,7 +241,7 @@ disp = v.copy()
 disp["변화"] = disp["Δ"].map(
     lambda x: f"▲ +{x:.1f}" if x > 0 else (f"▼ {x:.1f}" if x < 0 else "—"))
 show = disp[["플래그", "관리코드", "상품명", "채널", "현재마진", "베이스", "권장마진",
-             "변화", "월매출", "월순이익", "월볼륨", "액션", "사유"]]
+             "변화", "기준마진율", "월매출", "월순이익", "월볼륨", "액션", "사유"]]
 
 
 def _color_dir(s):
@@ -217,6 +265,7 @@ ev = st.dataframe(
         "베이스": st.column_config.NumberColumn("베이스(%)", format="%.1f"),
         "권장마진": st.column_config.NumberColumn("권장(%)", format="%.1f"),
         "변화": st.column_config.TextColumn("권장변화(%p)", width="small"),
+        "기준마진율": st.column_config.NumberColumn("기준(현)%", format="%.2f", help="현 cmm 기준마진율(타깃). 변경 시 여기에 변화량(Δ)을 더함"),
         "월매출": st.column_config.NumberColumn("월매출", format="localized"),
         "월순이익": st.column_config.NumberColumn("월순이익", format="localized"),
         "월볼륨": st.column_config.NumberColumn("월볼륨", format="localized"),
@@ -230,19 +279,11 @@ try:
 except Exception:
     sel_rows = []
 
-# 두뇌④ 채널 라벨 → baseline_margin.csv 컬럼 (ESM 라벨만 다름)
-_BCOL = {"스마트스토어": "스마트스토어", "ESM(G마켓·옥션)": "ESM", "식봄": "식봄",
-         "캐시노트": "캐시노트", "알리": "알리", "쿠팡": "쿠팡",
-         "배민상회": "배민상회", "올웨이즈": "올웨이즈"}
-_BASELINE_PATH = "reference/baseline_margin.csv"
-_APP_REPO = "OURPROJECTDAO/work-automation-app"
-
-
 def _apply_baseline(updates):
-    """updates=[(관리코드, baseline컬럼, 분수)]. baseline_margin.csv 갱신 → cmm 반영.
+    """updates=[(관리코드, baseline컬럼, Δ분수)]. 기존 타깃 + Δ 로 갱신(절대 덮어쓰기 아님) → cmm 반영.
     return ((applied, miss_row), None) | (None, err). 앱 repo 쓰기 = GITHUB_PAT."""
     import base64 as _b64, io as _io, json as _js, urllib.parse as _uq, urllib.request as _ur
-    pat_app = st.secrets.get("GITHUB_PAT", "")
+    pat_app = _app_pat()
     if not pat_app:
         return None, "GITHUB_PAT(앱 repo 쓰기) secrets 없음"
     url = "https://api.github.com/repos/%s/contents/%s" % (
@@ -256,17 +297,21 @@ def _apply_baseline(updates):
     bdf = bdf.set_index(code_col)
     idx = set(bdf.index.astype(str))
     applied, miss_row = [], []
-    for code, col, frac in updates:
-        if col not in bdf.columns:
-            continue
-        if str(code) not in idx:
+    for code, col, dlt in updates:
+        if col not in bdf.columns or str(code) not in idx:
             miss_row.append(code)
             continue
-        bdf.loc[str(code), col] = (f"{frac:.4f}").rstrip("0").rstrip(".")
+        try:
+            cur = float(bdf.loc[str(code), col])
+        except (TypeError, ValueError):
+            miss_row.append(code)
+            continue
+        new = max(0.0, cur + dlt)
+        bdf.loc[str(code), col] = (f"{new:.4f}").rstrip("0").rstrip(".")
         applied.append((code, col))
     buf = _io.StringIO()
     bdf.reset_index().to_csv(buf, index=False, lineterminator="\r\n")
-    body = {"message": "data(baseline): 두뇌④ 권장 적용(%d건)" % len(applied),
+    body = {"message": "data(baseline): 두뇌④ Δ가산 적용(%d건)" % len(applied),
             "content": _b64.b64encode(("\ufeff" + buf.getvalue()).encode("utf-8")).decode(),
             "sha": meta["sha"]}
     with _ur.urlopen(_ur.Request(url, method="PUT", data=_js.dumps(body).encode(), headers=h)) as r:
@@ -276,14 +321,17 @@ def _apply_baseline(updates):
 
 sel_df = v.iloc[sel_rows] if sel_rows else v.iloc[0:0]
 chg = st.toggle("기준마진율도 함께 변경 (채널마진모니터 반영)", value=False, key="mo_chg",
-                help="켜면 선택 행의 권장마진을 baseline_margin.csv에 기록 → cmm 기준마진율에 반영. 끄면 결정만 기록.")
+                help="켜면 현 기준마진율(타깃)에 변화량(Δ=권장−현재)을 더해 baseline_margin.csv 갱신 → cmm 반영. 끄면 결정만 기록.")
 if chg and len(sel_rows):
-    prv = sel_df[["관리코드", "상품명", "채널", "현재마진", "권장마진"]].copy()
-    prv["반영"] = prv["채널"].map(lambda c: "✔ cmm" if c in _BCOL else "기록만(매핑외)")
-    st.caption("↓ 이 행들의 기준마진율이 baseline_margin.csv에 **현재→권장**으로 기록됩니다. 확인 후 버튼.")
+    prv = sel_df[["관리코드", "상품명", "채널", "기준마진율"]].copy()
+    prv["변화(%p)"] = (sel_df["권장마진"] - sel_df["현재마진"]).round(1)
+    prv["새기준(%)"] = (prv["기준마진율"] + prv["변화(%p)"]).round(2)
+    prv["반영"] = ["✔ cmm" if (ch in _BCOL and pd.notna(bm)) else "기록만"
+                  for ch, bm in zip(sel_df["채널"], sel_df["기준마진율"])]
+    st.caption("↓ 현 기준마진율(타깃)에 **변화량(Δ)**을 더해 갱신합니다(기준값 없는 행은 기록만). 확인 후 버튼.")
     st.dataframe(prv, hide_index=True, use_container_width=True,
-                 column_config={"현재마진": st.column_config.NumberColumn("현재(%)", format="%.1f"),
-                                "권장마진": st.column_config.NumberColumn("권장(%)", format="%.1f")})
+                 column_config={"기준마진율": st.column_config.NumberColumn("기준(현)%", format="%.2f"),
+                                "새기준(%)": st.column_config.NumberColumn("새기준%", format="%.2f")})
 
 cA, cB = st.columns([1, 1])
 with cA:
@@ -306,19 +354,23 @@ with cB:
             n = dl.append(recs, pat, repo)
             msg = f"결정 원장 {n}건 기록(45일 숨김)."
             if chg:
-                ups = [(r["관리코드"], _BCOL[r["채널"]], float(r["권장마진"]) / 100)
-                       for _, r in sel_df.iterrows() if r["채널"] in _BCOL]
-                skip = sorted({r["채널"] for _, r in sel_df.iterrows() if r["채널"] not in _BCOL})
+                ups, skip = [], []
+                for _, r in sel_df.iterrows():
+                    col = _BCOL.get(r["채널"])
+                    if col is None:
+                        skip.append(r["채널"])
+                        continue
+                    ups.append((r["관리코드"], col, (float(r["권장마진"]) - float(r["현재마진"])) / 100))
                 res, err = _apply_baseline(ups)
                 if err:
                     st.warning("기준마진율 변경 실패: " + err + " (기록은 완료)")
                 else:
                     applied, miss_row = res
-                    msg += f" 기준마진율 {len(applied)}건 변경 → cmm 반영(최대 10분 내)."
+                    msg += f" 기준마진율 {len(applied)}건 변경(타깃+Δ) → cmm 반영(최대 10분 내)."
                     if miss_row:
-                        msg += f" · baseline 행 없음 {len(miss_row)}건(기록만)."
+                        msg += f" · 기준값 없음 {len(miss_row)}건(기록만)."
                     if skip:
-                        msg += f" · 매핑외 채널 건너뜀: {', '.join(skip)}."
+                        msg += f" · 매핑외 채널 건너뜀: {', '.join(sorted(set(skip)))}."
             st.success(msg + " 다음 사이클에 반응 측정 → 유지/되돌림.")
         except Exception as e:
             st.error(f"실패: {e}")
