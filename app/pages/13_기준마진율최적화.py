@@ -275,9 +275,9 @@ with tab_wl:
     if wl.empty:
         st.info("적재된 온라인 매출 데이터가 없습니다. (거래처 그룹에 '온라인' 지정 필요)")
     else:
-        ACT = ["↑ 절반스텝", "↓ 절반스텝", "hold-low", "↓ 회전"]
+        ACT = [mo.A_UP, mo.A_DOWN, mo.A_HOLDLOW, mo.A_TURN]
         act = wl[wl["액션"].isin(ACT)].copy()
-        queue = wl[wl["액션"] == "실험큐"]
+        queue = wl[wl["액션"] == mo.A_QUEUE]
 
         # 45일 억제: 최근 결정한 (관리코드,채널)은 측정창 동안 숨김
         _SUPPRESS_DAYS = 45
