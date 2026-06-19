@@ -414,9 +414,8 @@ with tab_wl:
             sel_rows = []
 
         sel_df = v.iloc[sel_rows] if sel_rows else v.iloc[0:0]
-        chg = st.toggle("기준마진율도 함께 변경 (채널마진모니터 반영)", value=False, key="mo_chg",
-                        help="켜면 현 기준마진율(타깃)에 변화량(Δ=권장−현재)을 더해 baseline_margin.csv 갱신 → cmm 반영. 끄면 결정만 기록.")
-        if chg and len(sel_rows):
+        chg = True  # 기록 시 항상 기준마진율(baseline) 함께 변경 → cmm 반영(토글 제거)
+        if len(sel_rows):
             prv = sel_df[["관리코드", "상품명", "채널", "기준마진율"]].copy()
             prv["변화(%p)"] = (sel_df["권장마진"] - sel_df["현재마진"]).round(1)
             prv["새기준(%)"] = (prv["기준마진율"] + prv["변화(%p)"]).round(2)
@@ -432,8 +431,7 @@ with tab_wl:
             st.download_button("작업목록 CSV", v.to_csv(index=False).encode("utf-8-sig"),
                                file_name="기준마진율_권장.csv", mime="text/csv", key="mo_dl")
         with cB:
-            _lbl = "📝 기록 + 기준마진율 변경" if chg else "📝 결정 원장에 기록"
-            if st.button(f"{_lbl} ({len(sel_rows)}건)", disabled=len(sel_rows) == 0, key="mo_rec"):
+            if st.button(f"📝 기록 + 기준마진율 변경 ({len(sel_rows)}건)", disabled=len(sel_rows) == 0, key="mo_rec"):
                 recs = []
                 for i in sel_rows:
                     r = v.iloc[i]
@@ -483,7 +481,7 @@ with tab_wl:
             "순이익가중평균. **↑/↓ 절반스텝**=베이스까지 거리의 절반만(반응 보고 또 절반/되돌림). **hold-low**=싼데 안 "
             "팔림→안 올림. **🔴**=|Δ|>3%p·신호 약함·hold-low(사람 판단). 권장변화 ▲올림(빨강)·▼내림(파랑)·한국식. "
             "v0 한계: ⑧ 시즌(명절세트) 미보정으로 월순이익 상위에 세트류 부풀려질 수 있음 · 나들=하한 참조(별도) · "
-            "'기준마진율도 함께 변경' 켜면 baseline_margin.csv에 써서 cmm 반영(끄면 기록만)·같은 결정은 45일 측정창 동안 숨김. "
+            "기록하면 baseline_margin.csv에 Δ(권장−현재)를 가산해 cmm 반영(기준값 없는 낱개/소분류 행은 기록만)·같은 결정은 45일 측정창 동안 숨김. "
             "**↓ 회전**=장기소진(소진예측>180일·두뇌②) 청산 마크다운(−2%p 캡·재고풀리면 자동복귀). **📉목표**=best 채널 월매출<100만(⑦·나들 마진까지). 택배비 2,700원 고정·나들 제외·선물세트 제외.")
 
 # ════════════════════════════════════════════════════════════════════
