@@ -66,13 +66,13 @@ TEMPLATE = r'''<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg:#E9E7DF; --card:#FCFBF8; --ink:#1A2B26; --soft:#586862; --faint:#8C968F;
-    --line:#D3D0C5; --petrol:#0E4A43;
-    --live:#2E7D5B; --liveb:#E5F1EA;
-    --partial:#A9761A; --partialb:#F4ECDA;
-    --design:#C5402A; --designb:#FBEDE9;
-    --concept:#7A8580; --conceptb:#EDEDE7;
-    --hub:#0E4A43; --hubb:#E3EEEC;
+    --bg:#FCFCFD; --card:#FFFFFF; --ink:#14161B; --soft:#5B6573; --faint:#9AA1AC;
+    --line:#E7E9EE; --petrol:#3B5BDB;
+    --live:#2F9E44; --liveb:#EBFBEE;
+    --partial:#F08C00; --partialb:#FFF4E6;
+    --design:#E03131; --designb:#FFF0F0;
+    --concept:#868E96; --conceptb:#EEEFF2;
+    --hub:#3B5BDB; --hubb:#EEF1FE;
     --mono:"JetBrains Mono",ui-monospace,monospace;
     --sans:"Pretendard",-apple-system,system-ui,sans-serif;
   }
@@ -124,8 +124,8 @@ TEMPLATE = r'''<!DOCTYPE html>
     border:1px solid var(--line);border-radius:8px;padding:6px 10px;cursor:pointer;transition:.18s;
     display:inline-flex;align-items:center;gap:7px}
   .asset .ct{font-size:10px;color:var(--faint);background:#E6E4DB;border-radius:10px;padding:1px 6px;font-weight:700}
-  .asset.hub{background:var(--hubb);border-color:#B9D2CC;color:var(--hub);font-weight:700}
-  .asset.hub .ct{background:#CADFD9;color:var(--hub)}
+  .asset.hub{background:var(--hubb);border-color:#C7D0F7;color:var(--hub);font-weight:700}
+  .asset.hub .ct{background:#DCE3FB;color:var(--hub)}
   .asset:hover{border-color:var(--petrol)}
   .cluster{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:16px}
   .cl-h{display:flex;align-items:baseline;gap:10px;margin-bottom:14px}
@@ -149,9 +149,9 @@ TEMPLATE = r'''<!DOCTYPE html>
   .node .nrm{margin-top:8px;font-family:var(--mono);font-size:10px;font-weight:700;color:var(--faint);
     display:inline-flex;align-items:center;gap:5px}
   .node .nrm .pip{width:6px;height:6px;border-radius:50%;background:var(--design)}
-  .node.brain{border-width:2px;border-color:#E0B3AA;background:var(--designb)}
+  .node.brain{border-width:2px;border-color:#C7D0F7;background:var(--hubb)}
   .node.brain::before{content:"두뇌";position:absolute;top:-9px;right:12px;font-family:var(--mono);
-    font-size:9px;font-weight:700;letter-spacing:.08em;background:var(--design);color:#fff;padding:2px 8px;border-radius:20px}
+    font-size:9px;font-weight:700;letter-spacing:.08em;background:var(--hub);color:#fff;padding:2px 8px;border-radius:20px}
   .node.sel{border-color:var(--ink);box-shadow:0 0 0 3px rgba(26,43,38,.1),0 8px 20px rgba(26,43,38,.1)}
   .dimmable.dim{opacity:.32;filter:saturate(.5)}
   .asset.rel,.node.rel{box-shadow:0 0 0 2px var(--petrol)}
@@ -211,7 +211,7 @@ TEMPLATE = r'''<!DOCTYPE html>
   .rmcard h4{font-size:14px;font-weight:800;letter-spacing:-.01em;margin-bottom:4px}
   .rmcard h4 .st{color:var(--design)}
   .rmcard p{font-size:12.5px;color:var(--soft);line-height:1.45}
-  .rmcard.lift{border-color:#E0B3AA;box-shadow:0 4px 14px rgba(197,64,42,.12)}
+  .rmcard.lift{border-color:#C7D0F7;box-shadow:0 4px 14px rgba(59,91,219,.14)}
   .bl-h{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
     color:var(--faint);padding:14px 14px 6px;margin-top:6px;border-top:1px dashed var(--line)}
 
@@ -434,9 +434,6 @@ document.addEventListener('click',e=>{
 </html>
 '''
 
-
-st.title("🗺️ 시스템 지도 · 로드맵")
-st.caption("출처 = systemmap.json (KB). 노드/자산을 누르면 연결이, 로드맵 카드 칩을 누르면 해당 업무가 보입니다.")
 
 _sm, _err = _fetch_systemmap()
 if _err:
