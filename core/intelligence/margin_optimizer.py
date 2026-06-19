@@ -23,6 +23,8 @@ BIG_MOVE = 0.03         # |Δ| > 3%p = 🔴 사람 판단 필수(노브3)
 MIN_DELTA = 0.003       # |Δ| < 0.3%p = 미세 → 유지(작업목록서 제외)
 MIN_MONTHS = 6          # 신호 판단 최소 개월
 FLAT_STD = 0.015        # 월 마진 표준편차 < 1.5%p = "거의 안 흔듦" = 신호 없음
+TARGET_FLOOR = 1_000_000  # ⑦ 월매출 목표 floor(원) — best 관리채널 월매출 < 이 값이면 "매출목표 미달"
+TEST_CAP = 0.01         # ⑦ 나들 마진 없을 때 fallback 테스트 인하폭(−1%p)
 
 
 def _nfc(s) -> str:
@@ -85,14 +87,21 @@ def base_margin(cells: pd.DataFrame) -> tuple[float, list[str]]:
     return base, list(proven["채널"])
 
 
-def recommend_code(cells_code: pd.DataFrame) -> pd.DataFrame:
+def recommend_code(cells_code: pd.DataFrame, nadl_margin=None) -> pd.DataFrame:
     """한 관리코드의 채널별 권장 기준마진율 + 플래그 + 사유.
 
-    cells_code = cell_stats 중 한 관리코드. return 채널별 추천 행.
+    cells_code = cell_stats 중 한 관리코드. nadl_margin = 그 상품 나들 순마진(분수·하한 anchor) or None.
+    ⑦ 매출목표: best 관리채널 월매출 < TARGET_FLOOR면 "미달" → 볼륨 푸시.
+      고마진/베이스근처/proven → 나들 마진까지 절반스텝 인하(없으면 −TEST_CAP 테스트) / 저마진 → 🔴 사람판단.
+    return 채널별 추천 행(+목표 컬럼).
     """
     cells_code = cells_code.copy()
     base, proven = base_margin(cells_code)
     tot_profit = cells_code["월순이익"].clip(lower=0).sum()
+    best_monthly = (float((cells_code["매출"] / cells_code["개월"].clip(lower=1)).max())
+                    if len(cells_code) else 0.0)
+    small = best_monthly < TARGET_FLOOR   # ⑦ 매출목표 미달 상품
+    _fmt_floor = int(TARGET_FLOOR / 10000)
     out = []
     for _, r in cells_code.iterrows():
         ch, m, vol = r["채널"], r["순마진"], r["수량"]
@@ -130,6 +139,24 @@ def recommend_code(cells_code: pd.DataFrame) -> pd.DataFrame:
             reason = f"이미 싼데 안 팔림(<베이스 {base*100:.1f}%) → 낮게 유지·안 올림(팔리면 재평가)"
             flag = "🔴"
 
+        # ⑦ 매출목표 미달(small) override — 나들 floor까지 절반스텝(볼륨 푸시) / 저마진은 🔴
+        if small and action != "실험큐":
+            if m < base - 0.005:
+                action, target, flag = "hold-low", m, "🔴"
+                reason = (f"📉매출목표 미달(best<{_fmt_floor}만)인데 이미 저마진(<베이스 "
+                          f"{base*100:.1f}%) → 가격 외 요인 의심(노출·핏) → 사람판단")
+            else:
+                if nadl_margin is not None and nadl_margin < m - 0.005:
+                    target = m - (m - nadl_margin) * HALF_STEP
+                    reason = (f"📉매출목표 미달(best<{_fmt_floor}만) → 나들 {nadl_margin*100:.1f}%까지 "
+                              "절반스텝 인하(볼륨↑ 테스트·측정 후 또 절반/되돌림)")
+                else:
+                    target = m - TEST_CAP
+                    reason = (f"📉매출목표 미달(best<{_fmt_floor}만)·나들 마진 없음 → "
+                              f"−{TEST_CAP*100:.0f}%p 테스트 인하(볼륨↑)")
+                target = max(target, 0.0)  # 역마진 방지(나들 anchor라 기본 보장)
+                action, flag = "↓ 절반스텝", "🟡"
+
         delta = target - m
         if action in ("↑ 절반스텝", "↓ 절반스텝") and abs(delta) < MIN_DELTA:
             action, target, delta, flag = "유지", m, 0.0, "🟢"
@@ -145,20 +172,21 @@ def recommend_code(cells_code: pd.DataFrame) -> pd.DataFrame:
             권장마진=round(target * 100, 1), Δ=round(delta * 100, 1),
             월순이익=int(round(r["순이익"] / max(r["개월"], 1))),
             월볼륨=int(round(vol / max(r["개월"], 1))),
-            수량=int(vol), 액션=action, 플래그=flag, 사유=reason))
+            수량=int(vol), 액션=action, 플래그=flag, 목표=("📉미달" if small else ""), 사유=reason))
     df = pd.DataFrame(out)
     # 임팩트(월순이익) 순
     return df.sort_values("월순이익", ascending=False).reset_index(drop=True)
 
 
-def worklist(cells: pd.DataFrame, codes=None) -> pd.DataFrame:
-    """여러 관리코드 → 전체 작업목록. 유지/실험큐 제외하고 '손볼 것'만(플래그 있는 변경)."""
+def worklist(cells: pd.DataFrame, codes=None, nadl_map=None) -> pd.DataFrame:
+    """여러 관리코드 → 전체 작업목록. nadl_map={관리코드(NFC): 나들 순마진} = ⑦ 하한 anchor."""
+    nadl_map = nadl_map or {}
     res = []
     grp = cells.groupby("관리코드", observed=True)
     for code, g in grp:
         if codes is not None and code not in codes:
             continue
-        res.append(recommend_code(g))
+        res.append(recommend_code(g, nadl_margin=nadl_map.get(_nfc(code))))
     if not res:
         return pd.DataFrame()
     df = pd.concat(res, ignore_index=True)
