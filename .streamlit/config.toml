@@ -2,4 +2,11 @@
 maxUploadSize = 50
 
 [theme]
-primaryColor = "#1f77b4"
+base = "light"
+primaryColor = "#3B5BDB"
+backgroundColor = "#FBFBFD"
+secondaryBackgroundColor = "#F4F6F9"
+textColor = "#181B22"
+borderColor = "#E6E8EC"
+baseRadius = "0.5rem"
+font = "Pretendard:https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css"
