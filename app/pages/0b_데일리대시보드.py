@@ -480,12 +480,17 @@ else:
         st.success("현재 품절(미입고) 상품이 없습니다. 발주 품절목록에 뜨면 여기 자동 등록됩니다.")
     else:
         st.caption(f"품절 {len(_bdf)}건 — 발주 품절목록 자동 등록 · 박스재고>0 들어오면 자동 입고처리. 최근입고·평균주기·입고횟수=최근 1년 매입현황. 🗑=수동 제거(로그 없음)")
+        st.markdown(
+            '<style>.st-key-sb_board [data-testid="stHorizontalBlock"]'
+            '{border-bottom:1px solid #ECEEF2;padding:6px 0;align-items:center}</style>',
+            unsafe_allow_html=True)
         _w = [2, 4, 3, 1.4, 2, 1.4, 1.4, 1]
-        _h = st.columns(_w)
+        _board_box = st.container(key="sb_board")
+        _h = _board_box.columns(_w)
         for _col, _t in zip(_h, ["관리코드", "상품명", "품절", "현재박스", "최근입고", "평균주기", "입고(1년)", ""]):
             _col.markdown(f"**{_t}**")
         for _r in _bdf.to_dict("records"):
-            _cc = st.columns(_w)
+            _cc = _board_box.columns(_w)
             _cc[0].write(_r["관리코드"])
             _cc[1].write(_r["상품명"])
             _since, _n = _r["품절시작일"], _r["N일째"]
