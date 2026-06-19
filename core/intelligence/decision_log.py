@@ -98,3 +98,30 @@ def init_empty(pat: str, repo: str):
         return False
     _put(pat, repo, pd.DataFrame(columns=COLS), "decisions: 빈 원장 생성(두뇌④ Gate3)")
     return True
+
+
+def update(records: list[dict], pat: str, repo: str) -> int:
+    """decision_id 로 기존 행 in-place 갱신(측정/조치). records 각 dict = decision_id + 덮어쓸 COLS 키.
+    예 측정: {"decision_id":..,"측정일":..,"측정후_월볼륨":..,"측정후_월순이익":..,"결과":..,"status":"measured"}.
+    예 조치: {"decision_id":..,"status":"closed"|"reverted"}. 없는 id/키는 무시.
+    """
+    if not records:
+        return 0
+    cur = read_all(pat, repo)
+    if cur.empty:
+        return 0
+    cur = cur.set_index("decision_id")
+    n = 0
+    for r in records:
+        did = r.get("decision_id")
+        if did is None or did not in cur.index:
+            continue
+        for k, v in r.items():
+            if k == "decision_id" or k not in cur.columns:
+                continue
+            cur.loc[did, k] = v
+        n += 1
+    cur = cur.reset_index()
+    if n:
+        _put(pat, repo, cur, "decisions: 측정/조치 갱신 %d건" % n)
+    return n
