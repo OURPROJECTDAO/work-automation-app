@@ -103,7 +103,7 @@ CHANNEL_CONFIG = {
         "addr_col": "주소",
         "recv_col": "수령인",
         "has_guide_row": False,
-        "invoice_cell_format": "@",  # 값은 숫자(int) 유지, 셀 '서식'만 텍스트(@). 올웨이즈 업로드 요건(2026-06-11)
+        # 운송장번호 = 숫자(int)값 + 일반(General) 서식. (서식 이력: 0608 문자열 → 0610 int+General → 0611 @서식 → 0619 다시 General. 골든 올웨이즈20260619배송 5/5 대조)
     },
     "배민상회": {
         "format": "xlsx",
