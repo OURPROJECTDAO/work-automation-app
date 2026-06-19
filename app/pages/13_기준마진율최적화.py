@@ -158,6 +158,10 @@ if q:
     v = v[v["상품명"].astype(str).map(_nfc).str.contains(qn, case=False, na=False)
           | v["관리코드"].astype(str).str.contains(qn, case=False, na=False)]
 v = v.reset_index(drop=True)
+_rev = cells.copy()
+_rev["월매출"] = (_rev["매출"] / _rev["개월"].clip(lower=1)).round().astype("int64")
+v = v.merge(_rev[["관리코드", "채널", "월매출"]], on=["관리코드", "채널"], how="left")
+v["월매출"] = v["월매출"].fillna(0).astype("int64")
 
 # ── KPI ────────────────────────────────────────────────
 k1, k2, k3, k4 = st.columns(4)
@@ -169,22 +173,34 @@ st.caption(f"실험큐(관망·저우선) {len(queue):,}건 · 전체 셀 {len(w
            "표에서 행 선택 → 아래 [결정 원장에 기록].")
 
 # ── 작업목록 ────────────────────────────────────────────
-show = v[["플래그", "상품명", "채널", "현재마진", "베이스", "권장마진", "Δ",
-          "월순이익", "월볼륨", "액션", "사유", "관리코드"]]
+show = v[["플래그", "관리코드", "상품명", "채널", "현재마진", "베이스", "권장마진", "Δ",
+          "월매출", "월순이익", "월볼륨", "액션", "사유"]]
+
+
+def _color_delta(val):
+    if val > 0:
+        return "color:#1a7f37;font-weight:700"   # ↑ 상향 = 초록
+    if val < 0:
+        return "color:#cf222e;font-weight:700"   # ↓ 인하 = 빨강
+    return "color:#8c959f"                       # 유지/hold = 회색
+
+
+styled = show.style.map(_color_delta, subset=["Δ"])
 ev = st.dataframe(
-    show, use_container_width=True, hide_index=True,
+    styled, use_container_width=True, hide_index=True,
     on_select="rerun", selection_mode="multi-row",
     column_config={
         "플래그": st.column_config.TextColumn(width="small"),
+        "관리코드": st.column_config.TextColumn(width="small"),
         "상품명": st.column_config.TextColumn(width="medium"),
         "현재마진": st.column_config.NumberColumn("현재(%)", format="%.1f"),
         "베이스": st.column_config.NumberColumn("베이스(%)", format="%.1f"),
         "권장마진": st.column_config.NumberColumn("권장(%)", format="%.1f"),
         "Δ": st.column_config.NumberColumn("Δ(%p)", format="%+.1f"),
+        "월매출": st.column_config.NumberColumn("월매출", format="localized"),
         "월순이익": st.column_config.NumberColumn("월순이익", format="localized"),
         "월볼륨": st.column_config.NumberColumn("월볼륨", format="localized"),
         "사유": st.column_config.TextColumn(width="large"),
-        "관리코드": st.column_config.TextColumn(width="small"),
     },
     height=min(620, 80 + 36 * min(len(show), 15)), key="mo_tbl")
 
