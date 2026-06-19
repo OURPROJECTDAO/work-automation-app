@@ -31,6 +31,7 @@ from core.intelligence import purchases as _buy
 from core.intelligence import stock_history as shh
 from core.workflows import channel_margin_monitor as cmm
 from core.workflows import upload_monitor as um
+from core import ui
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_API = "https://api.github.com/repos/OURPROJECTDAO/work-automation-app/contents"
@@ -450,13 +451,13 @@ def _slot_ui(slot: str, label: str, key: str):
 
 
 # ─────────────────────────────────────────────────────────
-st.title("📅 데일리 대시보드")
+ui.page_header("데일리 대시보드", icon="📅")
 st.caption("매일 반복 업무 산출물로 **오늘의 마진을 즉시 점검**합니다. "
            "파일처리에서 **오픈마켓(송장출력)·천년경영(output)**을 실행하면 이 세션에서 자동 인계돼 "
            "재업로드가 필요 없습니다. (상품관리는 reference 라이브 — 항상 최신)")
 
 # ── 🚨 품절 알림판 (발주 품절목록 → 재입고 박스재고>0 자동해제 + 수동삭제) ──
-st.subheader("🚨 품절 알림판")
+ui.section_head("품절 알림판", icon="🚨")
 _pat_d, _repo_d = _data_secret()
 if not _pat_d:
     st.info("data repo 시크릿([data] pat)이 없어 품절 알림판을 쓸 수 없습니다.")
@@ -507,8 +508,7 @@ else:
         else:
             st.dataframe(_log.tail(50).iloc[::-1], hide_index=True, use_container_width=True)
 
-st.divider()
-st.subheader("🆕 신규 업로드 대상")
+ui.section_head("신규 업로드 대상", icon="🆕")
 st.caption("최근 재고가 **새로 들어왔는데(입고·신규등재) 아직 어느 채널에도 안 올라간** 상품 — 신규 업로드 후보. "
            "재고 스냅샷(2026-06-15~ 적립)으로 감지 · 채널 등록현황은 업로드감시와 동일 기준(업로드감시의 *최근 입고* 서브셋).")
 if not _pat_d:
@@ -542,8 +542,7 @@ else:
                            "신규업로드대상.xlsx", key="nu_dl")
         st.caption("→ 채널별 상세 업로드 현황·등록 인계는 **업로드감시** 페이지에서.")
 
-st.divider()
-st.subheader("💲 가격 변동 알림")
+ui.section_head("가격 변동 알림", icon="💲")
 if not _pat_d:
     st.info("data repo 시크릿([data] pat)이 없어 가격 변동 알림을 쓸 수 없습니다.")
 else:
@@ -598,8 +597,7 @@ else:
             st.download_button("📥 XLSX", _to_xlsx(_chg, "가격변동"),
                                "가격변동알림.xlsx", key="pc_dl")
 
-st.divider()
-st.subheader("📊 당일 마진 점검")
+ui.section_head("당일 마진 점검", icon="📊")
 box_lookup, master_price, name_lookup = _master_lookup()
 
 st.subheader("오늘 파일")
