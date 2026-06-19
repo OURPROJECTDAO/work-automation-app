@@ -136,6 +136,22 @@ ACT = ["↑ 절반스텝", "↓ 절반스텝", "hold-low"]
 act = wl[wl["액션"].isin(ACT)].copy()
 queue = wl[wl["액션"] == "실험큐"]
 
+# 45일 억제: 최근 결정한 (관리코드,채널)은 측정창 동안 숨김(데이터 갱신마다 또 뜨는 것 방지)
+import datetime as _dt
+_SUPPRESS_DAYS = 45
+_sup = set()
+try:
+    _led = dl.read_all(pat, repo)
+    if not _led.empty and "ts" in _led.columns:
+        _cut = (_dt.date.today() - _dt.timedelta(days=_SUPPRESS_DAYS)).isoformat()
+        _r = _led[_led["ts"].astype(str) >= _cut]
+        _sup = set(zip(_r["관리코드"].astype(str), _r["채널"].astype(str)))
+except Exception:
+    _sup = set()
+act["_k"] = list(zip(act["관리코드"].astype(str), act["채널"].astype(str)))
+_n_sup_shown = int(act["_k"].isin(_sup).sum()) if _sup else 0
+act = act[~act["_k"].isin(_sup)].drop(columns="_k").copy()
+
 # ── 필터 ───────────────────────────────────────────────
 f1, f2, f3 = st.columns([1.4, 1.4, 2])
 with f1:
@@ -169,8 +185,8 @@ k1.metric("손볼 것", f"{len(act):,}")
 k2.metric("🟢 수락", f"{(act['플래그']=='🟢').sum():,}")
 k3.metric("🟡 검토", f"{(act['플래그']=='🟡').sum():,}")
 k4.metric("🔴 필수", f"{(act['플래그']=='🔴').sum():,}")
-st.caption(f"실험큐(관망·저우선) {len(queue):,}건 · 전체 셀 {len(wl):,} — 임팩트(월순이익)순. "
-           "표에서 행 선택 → 아래 [결정 원장에 기록].")
+st.caption(f"실험큐(관망) {len(queue):,} · 측정중(45일 숨김) {_n_sup_shown:,} · 전체 셀 {len(wl):,} "
+           "— 임팩트(월순이익)순. 행 선택 → 아래에서 기록/적용.")
 
 # ── 작업목록 ────────────────────────────────────────────
 disp = v.copy()
@@ -214,26 +230,98 @@ try:
 except Exception:
     sel_rows = []
 
+# 두뇌④ 채널 라벨 → baseline_margin.csv 컬럼 (ESM 라벨만 다름)
+_BCOL = {"스마트스토어": "스마트스토어", "ESM(G마켓·옥션)": "ESM", "식봄": "식봄",
+         "캐시노트": "캐시노트", "알리": "알리", "쿠팡": "쿠팡",
+         "배민상회": "배민상회", "올웨이즈": "올웨이즈"}
+_BASELINE_PATH = "reference/baseline_margin.csv"
+_APP_REPO = "OURPROJECTDAO/work-automation-app"
+
+
+def _apply_baseline(updates):
+    """updates=[(관리코드, baseline컬럼, 분수)]. baseline_margin.csv 갱신 → cmm 반영.
+    return ((applied, miss_row), None) | (None, err). 앱 repo 쓰기 = GITHUB_PAT."""
+    import base64 as _b64, io as _io, json as _js, urllib.parse as _uq, urllib.request as _ur
+    pat_app = st.secrets.get("GITHUB_PAT", "")
+    if not pat_app:
+        return None, "GITHUB_PAT(앱 repo 쓰기) secrets 없음"
+    url = "https://api.github.com/repos/%s/contents/%s" % (
+        _APP_REPO, "/".join(_uq.quote(s) for s in _BASELINE_PATH.split("/")))
+    h = {"Authorization": "Bearer " + pat_app, "Accept": "application/vnd.github+json",
+         "User-Agent": "mo"}
+    with _ur.urlopen(_ur.Request(url, headers=h)) as r:
+        meta = _js.load(r)
+    bdf = pd.read_csv(_io.StringIO(_b64.b64decode(meta["content"]).decode("utf-8-sig")), dtype=str)
+    code_col = bdf.columns[0]
+    bdf = bdf.set_index(code_col)
+    idx = set(bdf.index.astype(str))
+    applied, miss_row = [], []
+    for code, col, frac in updates:
+        if col not in bdf.columns:
+            continue
+        if str(code) not in idx:
+            miss_row.append(code)
+            continue
+        bdf.loc[str(code), col] = (f"{frac:.4f}").rstrip("0").rstrip(".")
+        applied.append((code, col))
+    buf = _io.StringIO()
+    bdf.reset_index().to_csv(buf, index=False, lineterminator="\r\n")
+    body = {"message": "data(baseline): 두뇌④ 권장 적용(%d건)" % len(applied),
+            "content": _b64.b64encode(("\ufeff" + buf.getvalue()).encode("utf-8")).decode(),
+            "sha": meta["sha"]}
+    with _ur.urlopen(_ur.Request(url, method="PUT", data=_js.dumps(body).encode(), headers=h)) as r:
+        _js.load(r)
+    return (applied, miss_row), None
+
+
+sel_df = v.iloc[sel_rows] if sel_rows else v.iloc[0:0]
+chg = st.toggle("기준마진율도 함께 변경 (채널마진모니터 반영)", value=False, key="mo_chg",
+                help="켜면 선택 행의 권장마진을 baseline_margin.csv에 기록 → cmm 기준마진율에 반영. 끄면 결정만 기록.")
+if chg and len(sel_rows):
+    prv = sel_df[["관리코드", "상품명", "채널", "현재마진", "권장마진"]].copy()
+    prv["반영"] = prv["채널"].map(lambda c: "✔ cmm" if c in _BCOL else "기록만(매핑외)")
+    st.caption("↓ 이 행들의 기준마진율이 baseline_margin.csv에 **현재→권장**으로 기록됩니다. 확인 후 버튼.")
+    st.dataframe(prv, hide_index=True, use_container_width=True,
+                 column_config={"현재마진": st.column_config.NumberColumn("현재(%)", format="%.1f"),
+                                "권장마진": st.column_config.NumberColumn("권장(%)", format="%.1f")})
+
 cA, cB = st.columns([1, 1])
 with cA:
     st.download_button("작업목록 CSV", v.to_csv(index=False).encode("utf-8-sig"),
                        file_name="기준마진율_권장.csv", mime="text/csv", key="mo_dl")
 with cB:
-    disabled = len(sel_rows) == 0
-    if st.button(f"📝 선택 {len(sel_rows)}건 결정 원장에 기록", disabled=disabled, key="mo_rec"):
+    _lbl = "📝 기록 + 기준마진율 변경" if chg else "📝 결정 원장에 기록"
+    if st.button(f"{_lbl} ({len(sel_rows)}건)", disabled=len(sel_rows) == 0, key="mo_rec"):
         recs = []
         for i in sel_rows:
             r = v.iloc[i]
+            _bef = float(r["현재마진"]) / 100
+            _rec = float(r["권장마진"]) / 100
             recs.append(dict(
                 관리코드=r["관리코드"], 채널=r["채널"], 액션=r["액션"],
-                마진_before=float(r["현재마진"]) / 100, 마진_권장=float(r["권장마진"]) / 100,
+                마진_before=_bef, 마진_권장=_rec, 마진_적용=(_rec if chg else _bef),
                 베이스=float(r["베이스"]) / 100, 플래그=r["플래그"], 사유=r["사유"],
                 측정전_월볼륨=int(r["월볼륨"]), 측정전_월순이익=int(r["월순이익"])))
         try:
             n = dl.append(recs, pat, repo)
-            st.success(f"결정 원장에 {n}건 기록(status=pending). 다음 사이클에 반응 측정 → 유지/되돌림.")
+            msg = f"결정 원장 {n}건 기록(45일 숨김)."
+            if chg:
+                ups = [(r["관리코드"], _BCOL[r["채널"]], float(r["권장마진"]) / 100)
+                       for _, r in sel_df.iterrows() if r["채널"] in _BCOL]
+                skip = sorted({r["채널"] for _, r in sel_df.iterrows() if r["채널"] not in _BCOL})
+                res, err = _apply_baseline(ups)
+                if err:
+                    st.warning("기준마진율 변경 실패: " + err + " (기록은 완료)")
+                else:
+                    applied, miss_row = res
+                    msg += f" 기준마진율 {len(applied)}건 변경 → cmm 반영(최대 10분 내)."
+                    if miss_row:
+                        msg += f" · baseline 행 없음 {len(miss_row)}건(기록만)."
+                    if skip:
+                        msg += f" · 매핑외 채널 건너뜀: {', '.join(skip)}."
+            st.success(msg + " 다음 사이클에 반응 측정 → 유지/되돌림.")
         except Exception as e:
-            st.error(f"기록 실패: {e}")
+            st.error(f"실패: {e}")
 
 st.divider()
 st.caption(
@@ -241,5 +329,5 @@ st.caption(
     "순이익가중평균. **↑/↓ 절반스텝**=베이스까지 거리의 절반만(반응 보고 또 절반/되돌림). **hold-low**=싼데 안 "
     "팔림→안 올림. **🔴**=|Δ|>3%p·신호 약함·hold-low(사람 판단). 권장변화 ▲올림(빨강)·▼내림(파랑)·한국식. "
     "v0 한계: ⑧ 시즌(명절세트) 미보정으로 월순이익 상위에 세트류 부풀려질 수 있음 · 나들=하한 참조(별도) · "
-    "cmm 편집창 직접 prefill은 후속(현재는 권장값·결정 기록까지). 택배비 2,700원 고정(실택배비 표준)·나들 제외(데이터 확인용 채널)."
+    "'기준마진율도 함께 변경' 켜면 baseline_margin.csv에 써서 cmm 반영(끄면 기록만)·같은 결정은 45일 측정창 동안 숨김. 택배비 2,700원 고정·나들 제외."
 )
