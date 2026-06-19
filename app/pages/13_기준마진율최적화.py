@@ -115,6 +115,7 @@ def build_worklist(pat: str, repo: str, unit: float) -> tuple[pd.DataFrame, pd.D
     ship = load_ship_rate(pat, repo)
     prod = cc.compute_online_margin(view, ship, unit, use_actual=True)
     prod["채널"] = prod["상호명"].astype(str).map(cc.label)
+    prod = prod[~prod["채널"].astype(str).str.contains("나들", na=False)]  # 나들=데이터 확인용·미관리 채널 → 제외
     cells = mo.cell_stats(prod)
     return mo.worklist(cells), cells
 
@@ -124,10 +125,7 @@ if not pat:
     st.warning("저장소 접근 정보(secrets `[data] pat`)가 설정되지 않았습니다.")
     st.stop()
 
-c0, c1 = st.columns([1, 3])
-with c0:
-    fee_label = st.radio("택배비 단가", ["3,000원", "2,500원"], horizontal=True, key="mo_fee")
-unit = 2500.0 if "2,500" in fee_label else 3000.0
+unit = 2700.0  # 실택배비 표준(daily_margin.DEFAULT_FLAT·채널마진모니터와 동일)
 
 wl, cells = build_worklist(pat, repo, unit)
 if wl.empty:
@@ -223,5 +221,5 @@ st.caption(
     "순이익가중평균. **↑/↓ 절반스텝**=베이스까지 거리의 절반만(반응 보고 또 절반/되돌림). **hold-low**=싼데 안 "
     "팔림→안 올림. **🔴**=|Δ|>3%p·신호 약함·hold-low(사람 판단). "
     "v0 한계: ⑧ 시즌(명절세트) 미보정으로 월순이익 상위에 세트류 부풀려질 수 있음 · 나들=하한 참조(별도) · "
-    "cmm 편집창 직접 prefill은 후속(현재는 권장값·결정 기록까지)."
+    "cmm 편집창 직접 prefill은 후속(현재는 권장값·결정 기록까지). 택배비 2,700원 고정(실택배비 표준)·나들 제외(데이터 확인용 채널)."
 )
