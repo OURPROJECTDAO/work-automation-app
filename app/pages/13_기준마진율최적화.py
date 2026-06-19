@@ -100,6 +100,16 @@ def load_group_map(pat: str, repo: str) -> dict:
     return out
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_giftset_codes() -> set:
+    """product_attributes.csv 식품음료=='선물세트' 관리코드 — 명절세트는 별도관리(시즌·부분월) → 작업목록/측정 노이즈 제외(⑧)."""
+    try:
+        a = pd.read_csv(_REF / "product_attributes.csv", dtype=str, encoding="utf-8-sig")
+        return {_nfc(c) for c, k in zip(a["관리코드"], a["식품음료"]) if _nfc(k) == "선물세트"}
+    except Exception:
+        return set()
+
+
 @st.cache_data(ttl=1800, show_spinner="온라인 매출 정제 중...")
 def build_prod(pat: str, repo: str, unit: float) -> pd.DataFrame:
     """온라인 18개월 매출 → 택배 실배분·채널 라벨·나들 제외. 작업목록·측정 공용 토대."""
@@ -119,6 +129,9 @@ def build_prod(pat: str, repo: str, unit: float) -> pd.DataFrame:
     prod = cc.compute_online_margin(view, ship, unit, use_actual=True)
     prod["채널"] = prod["상호명"].astype(str).map(cc.label)
     prod = prod[~prod["채널"].astype(str).str.contains("나들", na=False)]  # 나들=데이터 확인용·미관리
+    _gs = load_giftset_codes()  # ⑧ 선물세트(명절세트) 제외 — 별도관리·시즌 노이즈
+    if _gs:
+        prod = prod[~prod["관리코드"].astype(str).map(_nfc).isin(_gs)]
     return prod
 
 
@@ -288,7 +301,8 @@ with tab_wl:
         k2.metric("🟢 수락", f"{(act['플래그']=='🟢').sum():,}")
         k3.metric("🟡 검토", f"{(act['플래그']=='🟡').sum():,}")
         k4.metric("🔴 필수", f"{(act['플래그']=='🔴').sum():,}")
-        st.caption(f"실험큐(관망) {len(queue):,} · 측정중(45일 숨김) {_n_sup_shown:,} · 전체 셀 {len(wl):,} "
+        st.caption(f"실험큐(관망) {len(queue):,} · 측정중(45일 숨김) {_n_sup_shown:,} · 전체 셀 {len(wl):,} · "
+                   f"선물세트 {len(load_giftset_codes()):,}종 제외(명절세트 별도관리·⑧) "
                    "— 임팩트(월순이익)순. 행 선택 → 아래에서 기록/적용.")
 
         # ── 작업목록 ────────────────────────────────────────
