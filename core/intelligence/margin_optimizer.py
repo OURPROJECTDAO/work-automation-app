@@ -117,7 +117,7 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=Non
         if share < IGNORE_SHARE and not is_proven:
             # 관망(저우선 실험큐) — 영구배제 아님, 테스트 큐
             action, target = "실험큐", m
-            reason = f"순이익 비중 {share*100:.1f}% (저우선) — 가격 테스트 큐, 무반응 2회 시 park"
+            reason = f"이익에서 차지하는 비중이 작음({share*100:.1f}%) → 가격 한번 테스트(반응 보기), 두 번 반응 없으면 잠시 보류"
             flag = "⚪"
         elif is_proven:
             # 베이스 정의·유지. 베이스보다 낮으면 절반스텝 올림(가격둔감 여지)
@@ -129,35 +129,35 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=Non
         elif m > base + 0.005:
             # 저볼륨·고마진 → 베이스로 절반스텝 인하
             target = m - (m - base) * HALF_STEP
-            action, reason = "↓ 절반스텝", f"저볼륨·고마진(>베이스 {base*100:.1f}%) → 절반스텝 인하 테스트"
+            action, reason = "↓ 절반스텝", f"적게 팔리는데 마진은 기준({base*100:.1f}%)보다 높음 → 기준 쪽으로 절반만 내려 반응 보기"
             flag = "🟡"
             if signal_weak:
-                flag, reason = "🔴", reason + " · 마진 흔든 이력 약함=실험 성격"
+                flag, reason = "🔴", reason + " · 가격 바꿔본 적 거의 없어 실험 성격(확신 낮음)"
         elif share >= IGNORE_SHARE * 10:
             # 비proven이지만 큰 채널(비중≥10%) 베이스 미만 → 상향 여지(가격둔감)
             target = m + (base - m) * HALF_STEP
-            action, reason, flag = "↑ 절반스텝", f"주력급(비중 {share*100:.0f}%)인데 베이스 미만 → 절반스텝 상향", "🟡"
+            action, reason, flag = "↑ 절반스텝", f"많이 파는 채널({share*100:.0f}%)인데 마진이 기준보다 낮음 → 기준 쪽으로 절반만 올려보기", "🟡"
         else:
             # 저볼륨·저마진(<베이스) → hold-low
             action, target = "hold-low", m
-            reason = f"이미 싼데 안 팔림(<베이스 {base*100:.1f}%) → 낮게 유지·안 올림(팔리면 재평가)"
+            reason = f"이미 싼데도 안 팔림(기준 {base*100:.1f}%보다 낮음) → 더 안 내리고 그대로 둠(팔리기 시작하면 다시 봄)"
             flag = "🔴"
 
         # ⑦ 매출목표 미달(small) override — 나들 floor까지 절반스텝(볼륨 푸시) / 저마진은 🔴
         if small and action != "실험큐":
             if m < base - 0.005:
                 action, target, flag = "hold-low", m, "🔴"
-                reason = (f"📉매출목표 미달(best<{_fmt_floor}만)인데 이미 저마진(<베이스 "
-                          f"{base*100:.1f}%) → 가격 외 요인 의심(노출·핏) → 사람판단")
+                reason = (f"매출목표 미달(가장 잘 파는 채널도 월 {_fmt_floor}만 미만)인데 마진이 이미 낮음 "
+                          "→ 가격 문제 아닐 수 있음(노출·상품성) → 사람이 판단")
             else:
                 if nadl_margin is not None and nadl_margin < m - 0.005:
                     target = m - (m - nadl_margin) * HALF_STEP
-                    reason = (f"📉매출목표 미달(best<{_fmt_floor}만) → 나들 {nadl_margin*100:.1f}%까지 "
-                              "절반스텝 인하(볼륨↑ 테스트·측정 후 또 절반/되돌림)")
+                    reason = (f"매출목표 미달(월 {_fmt_floor}만 미만) → 더 팔리게 나들 마진({nadl_margin*100:.1f}%)까지 "
+                              "절반만 내려 테스트(반응 보고 또 절반/되돌림)")
                 else:
                     target = m - TEST_CAP
-                    reason = (f"📉매출목표 미달(best<{_fmt_floor}만)·나들 마진 없음 → "
-                              f"−{TEST_CAP*100:.0f}%p 테스트 인하(볼륨↑)")
+                    reason = (f"매출목표 미달(월 {_fmt_floor}만 미만)·나들 기준 없음 → "
+                              f"더 팔리게 {TEST_CAP*100:.0f}%p만 내려 테스트")
                 target = max(target, 0.0)  # 역마진 방지(나들 anchor라 기본 보장)
                 action, flag = "↓ 절반스텝", "🟡"
 
@@ -172,13 +172,13 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=Non
                 if (m < base - 0.005) or (turn_target <= floor_anchor + 1e-9):
                     target = max(turn_target, floor_anchor)
                     flag = "🔴"
-                    reason = (f"⚪장기소진({turnover_days:.0f}일) 청산 필요인데 이미 저마진/바닥 근처 "
-                              "→ 사람판단 · " + reason)
+                    reason = (f"재고가 오래 안 빠짐({turnover_days:.0f}일)인데 마진이 이미 낮아 더 못 내림 "
+                              "→ 사람이 판단 · " + reason)
                 else:
                     target = max(turn_target, floor_anchor, 0.0)
                     action = "↓ 회전"
-                    _mdr = (f"⚪장기소진({turnover_days:.0f}일) → −{md*100:.1f}%p 마크다운"
-                            "(청산·재고 풀리면 자동복귀)")
+                    _mdr = (f"재고가 오래 안 빠짐({turnover_days:.0f}일) → 재고 정리용으로 {md*100:.1f}%p 내림"
+                            "(재고 풀리면 자동 원복)")
                     reason = _mdr + (" · " + reason if reason else "")
                     if flag != "🔴":
                         flag = "🟡"
@@ -186,7 +186,7 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=Non
         delta = target - m
         if action in ("↑ 절반스텝", "↓ 절반스텝", "↓ 회전") and abs(delta) < MIN_DELTA:
             action, target, delta, flag = "유지", m, 0.0, "🟢"
-            reason = "베이스와 거의 일치(미세) → 유지"
+            reason = "기준과 거의 같음(차이 미미) → 그대로 둠"
         if abs(delta) > BIG_MOVE:
             flag = "🔴"
         if (action.startswith("↑") or action.startswith("↓")) and signal_weak and flag != "🔴":
