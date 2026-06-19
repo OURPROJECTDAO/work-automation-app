@@ -111,7 +111,7 @@ def load_giftset_codes() -> set:
 
 
 @st.cache_data(ttl=1800, show_spinner="온라인 매출 정제 중...")
-def build_prod(pat: str, repo: str, unit: float) -> pd.DataFrame:
+def build_prod(pat: str, repo: str, unit: float) -> tuple[pd.DataFrame, dict]:
     """온라인 18개월 매출 → 택배 실배분·채널 라벨·나들 제외. 작업목록·측정 공용 토대."""
     df = load_sales_min(pat, repo)
     if df.empty:
@@ -128,20 +128,27 @@ def build_prod(pat: str, repo: str, unit: float) -> pd.DataFrame:
     ship = load_ship_rate(pat, repo)
     prod = cc.compute_online_margin(view, ship, unit, use_actual=True)
     prod["채널"] = prod["상호명"].astype(str).map(cc.label)
-    prod = prod[~prod["채널"].astype(str).str.contains("나들", na=False)]  # 나들=데이터 확인용·미관리
+    # ⑦ 나들 floor anchor — 나들 순마진(분수) per 관리코드, 제외 전에 1패스 계산
+    _nd = prod[prod["채널"].astype(str).str.contains("나들", na=False)]
+    nadl_map = {}
+    if not _nd.empty:
+        _g = (_nd.assign(_c=_nd["관리코드"].astype(str).map(_nfc))
+                 .groupby("_c").agg(_s=("_순", "sum"), _r=("판매금액", "sum")))
+        nadl_map = {c: float(r._s / r._r) for c, r in _g.iterrows() if r._r > 0}
+    prod = prod[~prod["채널"].astype(str).str.contains("나들", na=False)]  # 나들=미관리(작업목록 제외)
     _gs = load_giftset_codes()  # ⑧ 선물세트(명절세트) 제외 — 별도관리·시즌 노이즈
     if _gs:
         prod = prod[~prod["관리코드"].astype(str).map(_nfc).isin(_gs)]
-    return prod
+    return prod, nadl_map
 
 
 @st.cache_data(ttl=1800, show_spinner="권장 기준마진율 계산 중...")
 def build_worklist(pat: str, repo: str, unit: float) -> tuple[pd.DataFrame, pd.DataFrame]:
-    prod = build_prod(pat, repo, unit)
+    prod, nadl_map = build_prod(pat, repo, unit)
     if prod.empty:
         return pd.DataFrame(), pd.DataFrame()
     cells = mo.cell_stats(prod)
-    return mo.worklist(cells), cells
+    return mo.worklist(cells, nadl_map=nadl_map), cells
 
 
 # 두뇌④ 채널 라벨 → baseline_margin.csv 컬럼 (ESM 라벨만 다름)
@@ -302,6 +309,7 @@ with tab_wl:
         k3.metric("🟡 검토", f"{(act['플래그']=='🟡').sum():,}")
         k4.metric("🔴 필수", f"{(act['플래그']=='🔴').sum():,}")
         st.caption(f"실험큐(관망) {len(queue):,} · 측정중(45일 숨김) {_n_sup_shown:,} · 전체 셀 {len(wl):,} · "
+                   f"📉매출목표 미달 {int((act['목표']=='📉미달').sum()):,} · "
                    f"선물세트 {len(load_giftset_codes()):,}종 제외(명절세트 별도관리·⑧) "
                    "— 임팩트(월순이익)순. 행 선택 → 아래에서 기록/적용.")
 
@@ -309,7 +317,7 @@ with tab_wl:
         disp = v.copy()
         disp["변화"] = disp["Δ"].map(
             lambda x: f"▲ +{x:.1f}" if x > 0 else (f"▼ {x:.1f}" if x < 0 else "—"))
-        show = disp[["플래그", "관리코드", "상품명", "채널", "현재마진", "베이스", "권장마진",
+        show = disp[["플래그", "목표", "관리코드", "상품명", "채널", "현재마진", "베이스", "권장마진",
                      "변화", "기준마진율", "월매출", "월순이익", "월볼륨", "액션", "사유"]]
 
         def _color_dir(s):
@@ -325,6 +333,7 @@ with tab_wl:
             on_select="rerun", selection_mode="multi-row",
             column_config={
                 "플래그": st.column_config.TextColumn(width="small"),
+                "목표": st.column_config.TextColumn(width="small", help="best 관리채널 월매출<100만 = 매출목표 미달(⑦) → 나들 마진까지 절반스텝 인하·저마진은 🔴"),
                 "관리코드": st.column_config.TextColumn(width="small"),
                 "상품명": st.column_config.TextColumn(width="medium"),
                 "현재마진": st.column_config.NumberColumn("현재(%)", format="%.1f"),
@@ -420,7 +429,7 @@ with tab_ms:
     if led is None or led.empty:
         st.info("기록된 결정이 없습니다. **작업목록** 탭에서 결정을 기록하면 여기서 측정합니다.")
     else:
-        prod = build_prod(pat, repo, unit)
+        prod, _ = build_prod(pat, repo, unit)
         pend = led[led["status"].astype(str) == "pending"].copy()
         meas = led[led["status"].astype(str) == "measured"].copy()
         closed_n = int((led["status"].astype(str).isin(["closed", "reverted"])).sum())
