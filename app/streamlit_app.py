@@ -41,6 +41,7 @@ pg = st.navigation({
         st.Page(_P / "10_가격AB.py", title="가격 A/B", icon="🧪"),
         st.Page(_P / "11_상품360.py", title="상품 360", icon="🪪"),
         st.Page(_P / "12_시장가매칭.py", title="시장가 매칭", icon="🛒"),
+        st.Page(_P / "13_기준마진율최적화.py", title="기준마진율 최적화", icon="🎯"),
     ],
 })
 pg.run()
