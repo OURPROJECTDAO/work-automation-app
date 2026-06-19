@@ -163,3 +163,95 @@ def worklist(cells: pd.DataFrame, codes=None) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.concat(res, ignore_index=True)
     return df.sort_values("월순이익", ascending=False).reset_index(drop=True)
+
+
+# ── 측정 루프 (Gate 3 닫기) ───────────────────────────────────────────
+MEASURE_MIN_DAYS = 30   # 결정 후 측정 대상 최소 경과일(사용자 확정: 빠른 피드백)
+RESP_BAND = 0.10        # ±10% 월순이익 변화 밴드(밖 = 개선/악화)
+
+
+def _verdict(action, before, after, ready: bool) -> tuple[str, str]:
+    """월순이익 before→after 로 결과·제안. action=기록 당시 액션."""
+    if (not ready) or after is None or (isinstance(after, float) and pd.isna(after)):
+        return "측정대기", ""
+    before = float(before or 0.0)
+    after = float(after)
+    if before > 0:
+        hi, lo = before * (1 + RESP_BAND), before * (1 - RESP_BAND)
+        v = "개선" if after > hi else ("악화" if after < lo else "무변화")
+    else:
+        d = after - before
+        thr = max(abs(before) * RESP_BAND, 1000.0)
+        v = "개선" if d > thr else ("악화" if d < -thr else "무변화")
+    if v == "개선":
+        s = "유지" + (" · 추가 인하 후보" if str(action).startswith("↓") else "")
+    elif v == "악화":
+        s = "되돌림"
+    else:
+        s = "유지(관찰)"
+    return v, s
+
+
+def measure(prod: pd.DataFrame, pending: pd.DataFrame, today=None,
+            min_days: int = MEASURE_MIN_DAYS) -> pd.DataFrame:
+    """pending 결정들의 *결정일(ts) 이후* 실적으로 측정후 월 run-rate + 결과 판정.
+
+    prod = compute_online_margin 결과(거래일자·수량·판매금액·_순·관리코드·채널·상품명).
+    pending = 원장 status=pending 행(decision_id·관리코드·채널·ts·액션·마진_before·마진_적용·
+              측정전_월볼륨·측정전_월순이익·베이스·플래그).
+    return 행별: 측정전/측정후(월순이익·월볼륨)·측정후마진·post_개월·경과일·ready·결과·제안.
+    같은 (관리코드,채널)의 ts 이후 거래만 → 월수(YYYY-MM nunique)로 run-rate. 동일 마진정의(순/매출).
+    """
+    import datetime as _dt
+    today = today or _dt.date.today()
+    cols_out = ["decision_id", "관리코드", "상품명", "채널", "액션", "ts", "경과일",
+                "post_개월", "측정전_월순이익", "측정후_월순이익", "측정전_월볼륨",
+                "측정후_월볼륨", "측정후마진", "마진_before", "마진_적용", "베이스",
+                "플래그", "ready", "결과", "제안"]
+    if pending is None or len(pending) == 0 or prod is None or prod.empty:
+        return pd.DataFrame(columns=cols_out)
+    df = prod.copy()
+    df["_code"] = df["관리코드"].astype(str).map(_nfc)
+    df["_ch"] = df["채널"].astype(str).map(_nfc)
+    df["_dt"] = pd.to_datetime(df["거래일자"])
+    df["_ym"] = df["_dt"].dt.strftime("%Y-%m")
+    name_by = (df.dropna(subset=["상품명"]).groupby("_code")["상품명"].first().to_dict()
+               if "상품명" in df.columns else {})
+    out = []
+    for _, r in pending.iterrows():
+        code = _nfc(r.get("관리코드"))
+        ch = _nfc(r.get("채널"))
+        ts = str(r.get("ts") or "")
+        try:
+            ts_d = _dt.date.fromisoformat(ts[:10])
+        except Exception:
+            ts_d = today
+        elapsed = (today - ts_d).days
+        sub = df[(df["_code"] == code) & (df["_ch"] == ch)
+                 & (df["_dt"] > pd.Timestamp(ts_d))]
+        post_m = int(sub["_ym"].nunique())
+        if post_m > 0:
+            매출 = float(sub["판매금액"].sum())
+            순 = float(sub["_순"].sum())
+            수량 = float(sub["수량"].sum())
+            월순 = 순 / post_m
+            월볼 = 수량 / post_m
+            마진 = (순 / 매출) if 매출 > 0 else float("nan")
+        else:
+            월순 = 월볼 = 마진 = float("nan")
+        ready = (elapsed >= min_days) and (post_m > 0)
+        before = float(r.get("측정전_월순이익") or 0)
+        v, s = _verdict(r.get("액션"), before, (월순 if post_m > 0 else None), ready)
+        out.append(dict(
+            decision_id=r.get("decision_id"), 관리코드=r.get("관리코드"),
+            상품명=name_by.get(code, ""), 채널=r.get("채널"), 액션=r.get("액션"),
+            ts=ts[:10], 경과일=elapsed, post_개월=post_m,
+            측정전_월순이익=int(round(before)),
+            측정후_월순이익=(int(round(월순)) if post_m > 0 else None),
+            측정전_월볼륨=int(r.get("측정전_월볼륨") or 0),
+            측정후_월볼륨=(int(round(월볼)) if post_m > 0 else None),
+            측정후마진=(round(마진 * 100, 1) if (post_m > 0 and pd.notna(마진)) else None),
+            마진_before=r.get("마진_before"), 마진_적용=r.get("마진_적용"),
+            베이스=r.get("베이스"), 플래그=r.get("플래그"),
+            ready=ready, 결과=v, 제안=s))
+    return pd.DataFrame(out, columns=cols_out)
