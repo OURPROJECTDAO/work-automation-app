@@ -317,6 +317,9 @@ with tab_wl:
         act["_k"] = list(zip(act["관리코드"].astype(str), act["채널"].astype(str)))
         _n_sup_shown = int(act["_k"].isin(_sup).sum()) if _sup else 0
         act = act[~act["_k"].isin(_sup)].drop(columns="_k").copy()
+        # 변화 없음(권장=현재 · 주로 '낮게 유지' 🔴 = 가격 외 요인) → 작업목록서 빼고 별도 묶음
+        act_none = act[act["Δ"].abs() < 0.05].copy()
+        act = act[act["Δ"].abs() >= 0.05].copy()
 
         # ── 필터 ───────────────────────────────────────────
         chans = sorted(act["채널"].unique())
@@ -339,15 +342,20 @@ with tab_wl:
         with f3:
             q = st.text_input("상품명 / 관리코드 검색", key="mo_q", placeholder="예: 스팸 · 15-04").strip()
 
-        v = act.copy()
-        if pick_ch:
-            v = v[v["채널"].isin(pick_ch)]
+        def _apply_chq(df):
+            d = df
+            if pick_ch:
+                d = d[d["채널"].isin(pick_ch)]
+            if q:
+                qn = _nfc(q)
+                d = d[d["상품명"].astype(str).map(_nfc).str.contains(qn, case=False, na=False)
+                      | d["관리코드"].astype(str).str.contains(qn, case=False, na=False)]
+            return d
+        scoped = _apply_chq(act)        # KPI 기준 = 채널+검색(플래그 무관)
+        none_v = _apply_chq(act_none)   # 변화없음 묶음도 채널+검색 따라감
+        v = scoped.copy()
         if pick_fl:
             v = v[v["플래그"].isin(pick_fl)]
-        if q:
-            qn = _nfc(q)
-            v = v[v["상품명"].astype(str).map(_nfc).str.contains(qn, case=False, na=False)
-                  | v["관리코드"].astype(str).str.contains(qn, case=False, na=False)]
         v = v.reset_index(drop=True)
         _rev = cells.copy()
         _rev["월매출"] = (_rev["매출"] / _rev["개월"].clip(lower=1)).round().astype("int64")
@@ -362,14 +370,26 @@ with tab_wl:
 
         # ── KPI ────────────────────────────────────────────
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("손볼 것", f"{len(act):,}")
-        k2.metric("🟢 수락", f"{(act['플래그']=='🟢').sum():,}")
-        k3.metric("🟡 검토", f"{(act['플래그']=='🟡').sum():,}")
-        k4.metric("🔴 필수", f"{(act['플래그']=='🔴').sum():,}")
-        st.caption(f"실험큐(관망) {len(queue):,} · 측정중(45일 숨김) {_n_sup_shown:,} · 전체 셀 {len(wl):,} · "
-                   f"📉매출목표 미달 {int((act['목표']=='📉미달').sum()):,} · "
-                   f"선물세트 {len(load_giftset_codes()):,}종 제외(명절세트 별도관리·⑧) "
-                   "— 임팩트(월순이익)순. 행 선택 → 아래에서 기록/적용.")
+        k1.metric("손볼 것", f"{len(scoped):,}")
+        k2.metric("🟢 수락", f"{(scoped['플래그']=='🟢').sum():,}")
+        k3.metric("🟡 검토", f"{(scoped['플래그']=='🟡').sum():,}")
+        k4.metric("🔴 필수", f"{(scoped['플래그']=='🔴').sum():,}")
+        st.caption(f"숫자판=채널·검색 필터 반영 · 변화없음(검토만) {len(none_v):,} · 실험큐(관망) {len(queue):,} · "
+                   f"측정중(45일 숨김) {_n_sup_shown:,} · 📉매출목표 미달 {int((scoped['목표']=='📉미달').sum()):,} · "
+                   f"선물세트 {len(load_giftset_codes()):,}종 제외(⑧) — 임팩트(월순이익)순. 행 선택 → 아래에서 기록/적용.")
+
+        if len(none_v):
+            with st.expander(f"🔴 변화 없음 · 가격 외 요인 {len(none_v):,}건 — 이미 싼데 안 팔림(노출·상세·광고/단종 판단)"):
+                _nshow = none_v.sort_values("월순이익", ascending=False)[
+                    ["플래그", "목표", "관리코드", "상품명", "채널", "현재마진", "베이스", "월순이익", "사유"]]
+                st.dataframe(_nshow, use_container_width=True, hide_index=True,
+                             column_config={
+                                 "현재마진": st.column_config.NumberColumn("현재(%)", format="%.1f"),
+                                 "베이스": st.column_config.NumberColumn("베이스(%)", format="%.1f"),
+                                 "월순이익": st.column_config.NumberColumn("월순이익", format="localized"),
+                                 "사유": st.column_config.TextColumn(width="large")},
+                             height=min(400, 80 + 36 * min(len(_nshow), 10)))
+                st.caption("가격을 더 내려도 효과 적다고 본 행(권장=현재) → 기준마진율 변경 대상 아님. 노출/상세/광고/단종 등 가격 외 레버로 판단.")
 
         # ── 작업목록 ────────────────────────────────────────
         disp = v.copy()
