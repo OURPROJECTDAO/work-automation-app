@@ -4,12 +4,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
+from core.ui import inject_css
 
 st.set_page_config(
     page_title="업무 자동화",
     page_icon="⚙️",
     layout="wide",
 )
+
+# 전역 UI 폴리시 (전 페이지 적용 — 엔트리는 매 로드마다 먼저 실행)
+inject_css()
+
+# 사이드바 브랜드 (네비 위)
+with st.sidebar:
+    st.markdown(
+        '<div class="ui-brand"><span class="logo">⚙️</span> 업무 자동화</div>',
+        unsafe_allow_html=True,
+    )
 
 _P = Path(__file__).parent / "pages"
 _M = _P / "2_기준데이터관리"
@@ -32,7 +43,7 @@ pg = st.navigation({
         st.Page(_N / "1_상품관리.py", title="상품관리", icon="🔗"),
         st.Page(_N / "2_데이터현황.py", title="데이터현황", icon="📚"),
     ],
-    " ": [
+    "분석·지능": [
         st.Page(_P / "3_대시보드.py", title="대시보드", icon="📊"),
         st.Page(_P / "6_채널마진모니터.py", title="채널마진모니터", icon="💹"),
         st.Page(_P / "7_업로드감시.py", title="업로드감시", icon="📦"),
