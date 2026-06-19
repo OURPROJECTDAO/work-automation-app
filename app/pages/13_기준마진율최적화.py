@@ -130,6 +130,11 @@ def load_turnover(pat: str, repo: str) -> dict:
         return {}
 
 
+# 8개 관리채널(기준마진율 baseline 컬럼 보유) — 그 외(나들·제이티유통·11번가·셀러허브·리테일앤인사이트·멸치 등
+# 미관리/유통 상호명)는 작업목록 스코프에서 제외(기준마진율 적용 대상 아님)
+_MANAGED = {"스마트스토어", "ESM(G마켓·옥션)", "식봄", "캐시노트", "알리", "쿠팡", "배민상회", "올웨이즈"}
+
+
 @st.cache_data(ttl=1800, show_spinner="온라인 매출 정제 중...")
 def build_prod(pat: str, repo: str, unit: float) -> tuple[pd.DataFrame, dict]:
     """온라인 18개월 매출 → 택배 실배분·채널 라벨·나들 제외. 작업목록·측정 공용 토대."""
@@ -155,7 +160,7 @@ def build_prod(pat: str, repo: str, unit: float) -> tuple[pd.DataFrame, dict]:
         _g = (_nd.assign(_c=_nd["관리코드"].astype(str).map(_nfc))
                  .groupby("_c").agg(_s=("_순", "sum"), _r=("판매금액", "sum")))
         nadl_map = {c: float(r._s / r._r) for c, r in _g.iterrows() if r._r > 0}
-    prod = prod[~prod["채널"].astype(str).str.contains("나들", na=False)]  # 나들=미관리(작업목록 제외)
+    prod = prod[prod["채널"].astype(str).isin(_MANAGED)]  # 8 관리채널만(나들·제이티·11번가·셀러허브·리테일·멸치 등 제외)
     _gs = load_giftset_codes()  # ⑧ 선물세트(명절세트) 제외 — 별도관리·시즌 노이즈
     if _gs:
         prod = prod[~prod["관리코드"].astype(str).map(_nfc).isin(_gs)]
@@ -292,18 +297,22 @@ with tab_wl:
 
         # ── 필터 ───────────────────────────────────────────
         chans = sorted(act["채널"].unique())
-        st.caption("**채널** — 체크 해제로 제외 (전부 켜짐 = 전체)")
-        _ccols = st.columns(len(chans)) if chans else [st]
-        pick_ch = []
-        for i, c in enumerate(chans):
-            if _ccols[i].checkbox(c, value=True, key=f"mo_ch_{c}"):
-                pick_ch.append(c)
-        if len(pick_ch) == len(chans):
-            pick_ch = []  # 전부 켜짐 = 필터 없음(전체)
-        f2, f3 = st.columns([1.4, 2.6])
+        # 채널 — 칩(pills) 다중선택. 전부 선택(기본)=전체. 칩 없는 구버전이면 멀티셀렉트 폴백.
+        if hasattr(st, "pills"):
+            _sel = st.pills("채널", chans, selection_mode="multi", default=chans, key="mo_ch_pills")
+            pick_ch = list(_sel) if _sel else []
+        else:
+            pick_ch = st.multiselect("채널", chans, default=[], key="mo_ch", placeholder="전체")
+        if pick_ch and len(pick_ch) >= len(chans):
+            pick_ch = []  # 전부 선택 = 필터 없음(전체)
+        f2, f3 = st.columns([1.2, 2.8])
         with f2:
             flags = ["🟢", "🟡", "🔴"]
-            pick_fl = st.multiselect("플래그", flags, default=flags, key="mo_fl")
+            pick_fl = st.pills("플래그", flags, selection_mode="multi", default=flags,
+                               key="mo_fl_pills") if hasattr(st, "pills") else \
+                st.multiselect("플래그", flags, default=flags, key="mo_fl")
+            if not pick_fl:
+                pick_fl = flags  # 전부 해제 = 전체
         with f3:
             q = st.text_input("상품명 / 관리코드 검색", key="mo_q", placeholder="예: 스팸 · 15-04").strip()
 
