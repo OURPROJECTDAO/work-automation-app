@@ -25,7 +25,7 @@ _CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
 /* ===== 본문 간격·타이포 ===== */
-.block-container { padding-top: 2.2rem; padding-bottom: 4rem; max-width: 1180px; }
+.block-container { padding-top: 2.2rem; padding-bottom: 4rem; max-width: none; }
 h1 { letter-spacing: -0.02em; font-weight: 700; }
 h2, h3 { letter-spacing: -0.01em; }
 
