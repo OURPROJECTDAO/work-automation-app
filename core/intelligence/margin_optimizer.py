@@ -27,6 +27,7 @@ TARGET_FLOOR = 1_000_000  # ⑦ 월매출 목표 floor(원) — best 관리채�
 TEST_CAP = 0.01         # ⑦ 나들 마진 없을 때 fallback 테스트 인하폭(−1%p)
 TURN_LONG_DAYS = 180    # ② 소진예측일 ≥ 이 값 = 장기소진(과잉재고) → 회전 마크다운 고려
 TURN_CAP_PP = 0.02      # ② 한 사이클 회전 마크다운 캡(−2%p). 360일=full·270일=1%p 램프
+MIN_SELL_MARGIN = 0.03  # 절대 하한 — 어떤 경우에도 마진 3% 미만 권장 금지(나들·회전 포함). 미만 권장이면 유지+작업목록 제외
 
 # 액션 라벨(평어) — 작업목록 '액션' 컬럼
 A_HOLD = "유지"
@@ -192,6 +193,12 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=Non
                     reason = _mdr + (" · " + reason if reason else "")
                     if flag != "🔴":
                         flag = "🟡"
+
+        # 3% 절대 하한 — 어떤 경로로도(베이스·⑦·회전·hold-low) 마진 3% 미만은 권장하지 않음.
+        # 미만이면 유지로 두고 작업목록·KPI·실험큐에서 제외(A_HOLD → 페이지 ACT 필터 밖, 결정할 게 없음).
+        if target < MIN_SELL_MARGIN - 1e-9:
+            action, target, flag = A_HOLD, m, "🟢"
+            reason = "마진 3% 미만 → 더 못 내림(3% 절대 하한) · 유지 · 작업목록 제외"
 
         delta = target - m
         if action in _MOVE_ACTIONS and abs(delta) < MIN_DELTA:
