@@ -565,9 +565,7 @@ else:
         _, _, _nm = _master_lookup()
         _chg = _chg.copy()
         _chg["상품명"] = _chg["관리코드"].map(lambda x: _nm.get(_nfc(x), ""))
-        _kinds = st.multiselect("구분", ["판매가", "매입가"], default=["판매가", "매입가"],
-                                key="pc_kind")
-        _chg = _chg[_chg["구분"].isin(_kinds)].reset_index(drop=True)
+        _chg = _chg[_chg["구분"] == "매입가"].reset_index(drop=True)
         _up = int((_chg["방향"] == "인상").sum())
         _dn = int((_chg["방향"] == "인하").sum())
         _m = st.columns(3)
@@ -575,7 +573,7 @@ else:
         _m[1].metric("🔺 인상", f"{_up} 건")
         _m[2].metric("🔻 인하", f"{_dn} 건")
         if _chg.empty:
-            st.caption("선택한 구분에 해당하는 변동이 없습니다.")
+            st.caption("매입가 변동이 없습니다.")
         else:
             _bs = _box_stock_lookup()
             _chg["박스재고"] = _chg["관리코드"].map(lambda x: _bs.get(_nfc(x)))
@@ -583,7 +581,7 @@ else:
             _disp["방향"] = _disp["방향"].map({"인상": "▲ 인상", "인하": "▼ 인하"})
             _disp["변동일"] = pd.to_datetime(_disp["금일"]).dt.strftime("%m-%d")
             _disp = _disp.rename(columns={"변동률": "변동률(%)"})
-            _disp = _disp[["관리코드", "상품명", "박스재고", "구분", "방향",
+            _disp = _disp[["관리코드", "상품명", "박스재고", "방향",
                            "전일가", "금일가", "변동률(%)", "변동일"]]
 
             def _dir_color(v):
