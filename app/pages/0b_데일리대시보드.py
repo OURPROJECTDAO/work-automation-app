@@ -57,7 +57,7 @@ def _recent_month_sales(n: int = 2):
     """최근 적재 n개월의 (채널 x 관리코드) 정산 매출(판매금액 합) — master 매출자료(데이터repo).
     채널 = 상호명 -> cc.label 후 괄호 앞만('ESM(G마켓.옥션)'->'ESM' 데일리 채널명과 정렬).
     달력월이 아니라 *실제 적재된* 최신 n개월을 잡아 미적재(빈) 달 함정을 피한다.
-    반환: (labels['M월매출' 순서], months[YYYY-MM 순서], lk{(채널, 관리코드NFC): {YYYY-MM: 매출}})."""
+    반환: (labels['M월' 순서], months[YYYY-MM 순서], lk{(채널, 관리코드NFC): {YYYY-MM: (매출, 판매이익gross)}})."""
     pat, repo = _data_secret()
     if not pat:
         return [], [], {}
@@ -76,10 +76,11 @@ def _recent_month_sales(n: int = 2):
         part = part.copy()
         part["_ch"] = part["상호명"].map(lambda s: cc.label(s).split("(")[0].strip())
         part["_mc"] = part["관리코드"].map(_nfc)
-        g = part.groupby(["_ch", "_mc"], observed=True)["판매금액"].sum()
-        for (ch, mc), v in g.items():
-            lk.setdefault((ch, mc), {})[ym] = float(v)
-    labels = [f"{int(ym[5:7])}월매출" for ym in months]
+        g = part.groupby(["_ch", "_mc"], observed=True).agg(
+            rev=("판매금액", "sum"), gp=("판매이익", "sum"))
+        for (ch, mc), row in g.iterrows():
+            lk.setdefault((ch, mc), {})[ym] = (float(row["rev"]), float(row["gp"]))
+    labels = [f"{int(ym[5:7])}월" for ym in months]   # 기본 월라벨 — 컬럼명은 호출부에서 조합
     return labels, months, lk
 
 
@@ -485,6 +486,8 @@ def _slot_ui(slot: str, label: str, key: str):
 
 # ─────────────────────────────────────────────────────────
 ui.page_header("데일리 대시보드", icon="📅")
+# 컬럼 많은 표 → 이 페이지만 본문 폭 제한(ui.py .block-container 1180px) 해제
+st.markdown("<style>.block-container{max-width:none;}</style>", unsafe_allow_html=True)
 st.caption("매일 반복 업무 산출물로 **오늘의 마진을 즉시 점검**합니다. "
            "파일처리에서 **오픈마켓(송장출력)·천년경영(output)**을 실행하면 이 세션에서 자동 인계돼 "
            "재업로드가 필요 없습니다. (상품관리는 reference 라이브 — 항상 최신)")
@@ -714,41 +717,59 @@ else:
                            for ch, mc in zip(_show["채널"], _show["관리코드"])]
             for col in ("마진율", "기준마진"):
                 _disp[col] = (_disp[col].astype(float) * 100).round(1)
-            _ms_labels, _ms_months, _ms_lk = _recent_month_sales()
-            for _lab, _ym in zip(_ms_labels, _ms_months):
-                _disp[_lab] = [int(round(_ms_lk.get((str(ch).split("(")[0].strip(), _nfc(mc)), {}).get(_ym, 0)))
-                               for ch, mc in zip(_show["채널"], _show["관리코드"])]
-            _order = (["채널", "관리코드", "상품명"] + _ms_labels +
+            _mlabels, _ms_months, _ms_lk = _recent_month_sales()
+            _rev_cols, _mr_cols = [], []
+            for _lab, _ym in zip(_mlabels, _ms_months):
+                _rc, _mrc = f"{_lab}매출", f"{_lab}마진%"
+                _rev_cols.append(_rc); _mr_cols.append(_mrc)
+                _revs, _mrs = [], []
+                for ch, mc in zip(_show["채널"], _show["관리코드"]):
+                    _t = _ms_lk.get((str(ch).split("(")[0].strip(), _nfc(mc)), {}).get(_ym)
+                    if _t and _t[0] > 0:
+                        _revs.append(int(round(_t[0]))); _mrs.append(round(_t[1] / _t[0] * 100, 1))
+                    else:
+                        _revs.append(0); _mrs.append(None)   # 매출 0 → 마진율 의미없음(—)
+                _disp[_rc] = _revs
+                _disp[_mrc] = _mrs
+            _order = (["채널", "관리코드", "상품명"] + _rev_cols + _mr_cols +
                       ["매출", "낱개수량", "박스", "원가", "택배",
                        "마진", "마진율", "기준마진", "현재가", "권장가", "listing마진", "판정",
                        "역마진", "미달"])
-            _ms_note = (f"**{' · '.join(_ms_labels)}** = 그 채널·상품의 정산 매출 월합계(최근 적재 2개월·~{_ms_months[-1]}) — "
-                        "0=그달 정산매출 없음, 매출(net)은 오늘분. " if _ms_labels else "")
+            _ms_note = (f"**{' · '.join(_rev_cols + _mr_cols)}** = 그 채널·상품의 정산 매출·총마진율(최근 적재 2개월·~{_ms_months[-1]}). "
+                        "마진%는 판매이익÷판매금액(택배 전 총마진)이라 오늘 마진%(net)보다 수준이 높음 — 월 추세 비교용. "
+                        "매출 0인 달은 '—'. " if _rev_cols else "")
             st.caption(_ms_note + "왼쪽 체크박스로 상품 선택 → 아래에서 **그 채널** 가격변경 시트 다운로드. "
                        "권장가 = 채널 기준마진율 달성 판매가(매입가 기준 역산 — 항상 표시). "
                        "현재가 = 채널 저장 listing 기준(미등재면 빈칸). "
                        "**판정(이중검수)**: 당일 미달이라도 listing 마진이 기준 이상이면 '일시적'(쿠폰·실박스 택배 등 — 가격 손댈 필요 없음), "
                        "listing도 미달이면 '구조적'(가격 조정 검토).")
+            _ccfg = {
+                "매출": st.column_config.NumberColumn("매출(net)", format="localized"),
+                "낱개수량": st.column_config.NumberColumn("낱개", format="%d"),
+                "박스": st.column_config.NumberColumn("박스(송장배분)", format="%.1f"),
+                "원가": st.column_config.NumberColumn(format="localized"),
+                "택배": st.column_config.NumberColumn(format="localized"),
+                "마진": st.column_config.NumberColumn(format="localized"),
+                "마진율": st.column_config.NumberColumn("마진%", format="%.1f"),
+                "기준마진": st.column_config.NumberColumn("기준%", format="%.1f"),
+                "현재가": st.column_config.TextColumn("현재가"),
+                "권장가": st.column_config.TextColumn("권장가(채널기준)"),
+                "listing마진": st.column_config.TextColumn("listing마진"),
+                "판정": st.column_config.TextColumn(
+                    "판정", help="당일 미달 + listing도 미달 = 구조적(가격조정). "
+                    "당일만 미달 = 일시적(쿠폰·택배 등, 가격 OK)."),
+                "역마진": st.column_config.CheckboxColumn("역마진"),
+                "미달": st.column_config.CheckboxColumn("미달"),
+            }
+            for _rc in _rev_cols:
+                _ccfg[_rc] = st.column_config.NumberColumn(
+                    _rc, format="localized", help="그 채널·상품의 정산 매출 월합계(택배 전).")
+            for _mrc in _mr_cols:
+                _ccfg[_mrc] = st.column_config.NumberColumn(
+                    _mrc, format="%.1f", help="정산 총마진율(판매이익÷판매금액·택배 전). 월 추세 비교용.")
             _ev = st.dataframe(_disp[_order], hide_index=True, use_container_width=True, height=460,
                                on_select="rerun", selection_mode="multi-row", key="d_table",
-                               column_config={
-                                   "매출": st.column_config.NumberColumn("매출(net)", format="%d"),
-                                   "낱개수량": st.column_config.NumberColumn("낱개", format="%d"),
-                                   "박스": st.column_config.NumberColumn("박스(송장배분)", format="%.1f"),
-                                   "원가": st.column_config.NumberColumn(format="%d"),
-                                   "택배": st.column_config.NumberColumn(format="%d"),
-                                   "마진": st.column_config.NumberColumn(format="%d"),
-                                   "마진율": st.column_config.NumberColumn("마진%", format="%.1f"),
-                                   "기준마진": st.column_config.NumberColumn("기준%", format="%.1f"),
-                                   "현재가": st.column_config.TextColumn("현재가"),
-                                   "권장가": st.column_config.TextColumn("권장가(채널기준)"),
-                                   "listing마진": st.column_config.TextColumn("listing마진"),
-                                   "판정": st.column_config.TextColumn(
-                                       "판정", help="당일 미달 + listing도 미달 = 구조적(가격조정). "
-                                       "당일만 미달 = 일시적(쿠폰·택배 등, 가격 OK)."),
-                                   "역마진": st.column_config.CheckboxColumn("역마진"),
-                                   "미달": st.column_config.CheckboxColumn("미달"),
-                               })
+                               column_config=_ccfg)
             st.download_button("📥 XLSX (전체 이상치)", _to_xlsx(anom, "당일마진이상"),
                                "당일마진_이상.xlsx", key="d_dl")
             try:
