@@ -433,8 +433,11 @@ _canon = df["관리코드"].map(lambda c: cmm.canonical_code(c, _refs_canon))
 df["전월매출"] = _canon.map(lambda c: _ch_sales.get(c))
 df["전월매출(전체)"] = _canon.map(lambda c: _sales_total.get(c))
 
-search = st.text_input("🔍 검색", placeholder="상품번호 · 관리코드 · 상품명 (부분일치)",
-                       label_visibility="collapsed")
+sc1, sc2 = st.columns(2)
+search = sc1.text_input("🔍 검색", placeholder="상품번호 · 관리코드 · 상품명 (부분일치)",
+                        label_visibility="collapsed")
+exclude_kw = sc2.text_input("🚫 제외", placeholder="상품명에서 제외할 키워드 (쉼표, 예: 일화,피클)",
+                            label_visibility="collapsed")
 q = cmm._nfc(search).lower() if search else ""
 
 types = sorted(df["코드유형"].unique().tolist())
@@ -444,21 +447,41 @@ with fc1:
 with fc2:
     f1, f2, f3, f4, f5 = st.columns(5)
     only_under = f1.checkbox("마진미달만", help="기준마진율보다 1%p 이상 낮은 상품")
-    min_stock = f2.number_input("재고 N개 이상", min_value=0, value=0, step=1,
-                                help="입력한 개수 이상의 재고만 표시 (0=전체)")
+    only_over = f2.checkbox("기준 초과만", help="마진율이 기준마진율보다 높은 상품")
     only_floor = f3.checkbox("제한상품만")
     only_not_floor = f4.checkbox("제한 제외", help="제한 상품이 아닌 것만 표시")
     only_miss = f5.checkbox("미매칭만")
+nc1, nc2, nc3, _nc = st.columns([1.3, 1.3, 1.3, 2])
+min_stock = nc1.number_input("재고 N개 이상", min_value=0, value=0, step=1,
+                             help="입력한 개수 이상의 재고만 표시 (0=전체)")
+sales_min = nc2.number_input("전월매출(이채널) ≥", min_value=0, value=0, step=10000,
+                             help="전월매출(이채널) 최소 (0=하한 없음)")
+sales_max = nc3.number_input("전월매출(이채널) ≤", min_value=0, value=0, step=10000,
+                             help="전월매출(이채널) 최대 (0=상한 없음)")
 
 view = df[df["코드유형"].isin(pick)].copy()
 if q:
     hay = (view["상품번호"].astype(str) + " ||| " + view["관리코드"].astype(str)
            + " ||| " + view["상품명"].astype(str)).str.lower()
     view = view[hay.str.contains(q, regex=False, na=False)]
+if exclude_kw:
+    _kws = [cmm._nfc(k).lower() for k in exclude_kw.split(",") if k.strip()]
+    if _kws:
+        _nm = view["상품명"].astype(str).str.lower()
+        _ex = pd.Series(False, index=view.index)
+        for _kw in _kws:
+            _ex = _ex | _nm.str.contains(_kw, regex=False, na=False)
+        view = view[~_ex]
 if only_under:
     view = view[view["탐지"].notna() & (view["탐지"] < cmm.MARGIN_UNDER_THRESHOLD)]
+if only_over:
+    view = view[view["탐지"].notna() & (view["탐지"] > 0)]
 if min_stock > 0:
     view = view[view["재고"].fillna(-1) >= min_stock]
+if sales_min > 0:
+    view = view[view["전월매출"].fillna(0) >= sales_min]
+if sales_max > 0:
+    view = view[view["전월매출"].fillna(0) <= sales_max]
 if only_floor:
     view = view[view["제한"].astype(str) != ""]
 if only_not_floor:
@@ -474,7 +497,7 @@ DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형"
 st.session_state.setdefault("cmm_tblver", 0)  # 저장 시 +1 → 표 선택 강제 초기화(두뇌④ mo_tblver 패턴)
 view_reset = view.reset_index(drop=True)
 # 키에 행 수 포함 → 데이터/필터로 행 수가 바뀌면 위젯 리셋(어긋난 선택 복원 방지)
-filter_sig = hash((tuple(sorted(pick)), only_under, min_stock, only_floor, only_not_floor, only_miss, q, len(view_reset)))
+filter_sig = hash((tuple(sorted(pick)), only_under, only_over, min_stock, sales_min, sales_max, only_floor, only_not_floor, only_miss, q, exclude_kw, len(view_reset)))
 
 event = st.dataframe(
     view_reset[DISPLAY],
