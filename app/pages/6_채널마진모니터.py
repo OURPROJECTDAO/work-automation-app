@@ -154,6 +154,25 @@ def _commit_baseline(new_text: str):
     _gh(_BASELINE_PATH, "PUT", payload)
 
 
+_FLOOR_PATH = "reference/margin_floor.csv"
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_floor_text() -> str:
+    """margin_floor.csv 를 GitHub 라이브로 읽음 → 제한 등록/해제 즉시 반영."""
+    code, text = _gh(_FLOOR_PATH, raw=True)
+    return text if code == 200 else ""
+
+
+def _commit_floor(new_text: str):
+    code, m = _gh(_FLOOR_PATH)
+    payload = {"message": "data(floor): 제한 상품 갱신(대시보드 편집)",
+               "content": base64.b64encode(new_text.encode("utf-8")).decode()}
+    if code == 200:
+        payload["sha"] = m["sha"]
+    _gh(_FLOOR_PATH, "PUT", payload)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _load_refs():
     """canonical_code용 reference(sobun·pm_by_prod 등). 가벼운 csv 로드."""
@@ -372,7 +391,10 @@ if _stale:
 
 _baseline_text = _load_baseline_text()
 _baseline_override = cmm.parse_baseline_dict(_baseline_text) if _baseline_text else None
-rows, stats = cmm.compute_listing(recs, channel, str(_REF), baseline_override=_baseline_override)
+_floor_text = _load_floor_text()
+_floor_override = cmm.parse_floor_dict(_floor_text) if _floor_text else None
+rows, stats = cmm.compute_listing(recs, channel, str(_REF),
+                                  baseline_override=_baseline_override, floor_override=_floor_override)
 
 # ── KPI ──────────────────────────────────────────────────────────────────────
 c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -650,3 +672,62 @@ else:
                 st.session_state.pop(f"bl_{key}", None)    # 구버전 잔여 단계 정리
                 st.success(f"기준마진율 저장 완료 — 수정 {_upd} · 신규 {_added} 관리코드 ({_bcol}). 표에 즉시 반영됩니다.")
                 st.rerun()
+
+
+# ── 제한 상품 등록 / 해제 (margin_floor — 권장가 ↔ 제한) ──
+st.divider()
+st.markdown("#### 🔒 제한 상품 등록 / 해제")
+st.caption("선택한 상품을 **제한**으로 등록하면 권장가 대신 제한 문구가 표시되고, 기준마진율 최적화(두뇌④)에서도 제외됩니다. "
+           "제한내용을 입력하면 등록, **비우고 저장하면 해제**됩니다. margin_floor.csv(전 채널 공통)에 반영되어 표에 즉시 적용됩니다.")
+if not sel_pids:
+    st.info("⬆️ 위 표에서 상품을 선택하세요.")
+elif not _pat():
+    st.warning("저장용 PAT(st.secrets GITHUB_PAT)가 없어 커밋할 수 없습니다.")
+else:
+    _floormap = cmm.parse_floor_dict(_load_floor_text())
+    _by_code = {}
+    for _r in (r for r in rows if r["상품번호"] in sel_pids):
+        _c = str(_r["관리코드"])
+        if _c and _c not in _by_code:
+            _by_code[_c] = str(_r["상품명"] or "")
+    _fdisp = []
+    for _c, _nm in sorted(_by_code.items()):
+        _cur = _floormap.get(_c, {})
+        _fdisp.append({
+            "관리코드": _c, "상품명": _nm,
+            "현재": "🔒 제한" if _cur else "—",
+            "제한내용": ((_cur.get("제한내용") or _cur.get("비고") or "") if _cur else ""),
+        })
+    _fed = st.data_editor(
+        pd.DataFrame(_fdisp),
+        column_config={
+            "관리코드": st.column_config.TextColumn(disabled=True),
+            "상품명": st.column_config.TextColumn(disabled=True),
+            "현재": st.column_config.TextColumn(disabled=True),
+            "제한내용": st.column_config.TextColumn(
+                "제한내용 ✏️ (입력=등록 · 비움=해제)",
+                help="권장가 칸에 표시될 문구. 예: 마진율 민감 상품 / 배송비 미포함 17000원. "
+                     "비우고 저장하면 제한 해제(빈 채로 두면 등록 안 함)."),
+        },
+        hide_index=True, use_container_width=True,
+        key=f"fl_editor_{key}_{st.session_state['cmm_tblver']}",
+    )
+    st.caption(f"선택 **{len(_fdisp)} 관리코드** · 제한은 전 채널 공통(margin_floor) · 입력한 행만 등록")
+    if st.button("🔒 제한 저장 (등록 / 수정 / 해제)", type="primary", key=f"fl_save_{key}"):
+        _ups, _rms = {}, set()
+        for _, _r in _fed.iterrows():
+            _c = str(_r["관리코드"])
+            _note = str(_r["제한내용"] or "").strip()
+            if _note:
+                _ups[_c] = {"상품명": str(_r["상품명"] or ""), "비고": "마진율 민감 상품", "제한내용": _note}
+            elif _c in _floormap:
+                _rms.add(_c)
+        if not _ups and not _rms:
+            st.warning("변경할 내용이 없습니다(제한내용을 입력하거나, 해제하려면 기존 제한을 비우세요).")
+        else:
+            _newtext, _na, _nr = cmm.update_floor_csv(_load_floor_text(), _ups, _rms)
+            _commit_floor(_newtext)
+            _load_floor_text.clear()
+            st.session_state["cmm_tblver"] += 1
+            st.success(f"제한 저장 완료 — 등록/수정 {_na} · 해제 {_nr} 관리코드. 표에 즉시 반영됩니다.")
+            st.rerun()
