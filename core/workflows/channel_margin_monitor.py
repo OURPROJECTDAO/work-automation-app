@@ -447,6 +447,29 @@ def resolve_code(code: str, refs: dict) -> tuple[str, float | None, float | None
     return ("박스", _num(r["박스매입단가"]), _num(r["박스"]), _nfc(r["규격"]), "")
 
 
+def canonical_code(code: str, refs: dict) -> str:
+    """관리코드를 원박스(정산 기준)로 정규화 — 박스/낱개/소분 통일.
+
+    소분 → 원코드 · PC낱개 → 그 상품코드 행의 관리코드(원박스) · 박스/합포/미매칭 → 자기 자신.
+    매출자료(천년경영 정산)는 박스코드 기준(낱개·합포·소분 0건, 실데이터 검증 2026-06-22)이므로,
+    listing 행을 이 함수로 박스코드에 맞추면 전월매출이 흩어진 코드끼리 통일 매칭된다.
+    """
+    c = _nfc(code)
+    if not c:
+        return c
+    if "-CB-" in c:                       # 합포: 여러 박스 구성 → 통일 보류(자기 자신)
+        return c
+    sobun = refs["sobun"]
+    if c in sobun:                        # 소분 → 원박스 관리코드
+        return _nfc(sobun[c]["원코드"]) or c
+    if c.upper().startswith("PC"):        # PC낱개 → 그 상품코드 행의 관리코드(원박스)
+        r = refs["pm_by_prod"].get(_nfc(c[2:]))
+        if r:
+            return _nfc(r.get("관리코드")) or c
+        return c
+    return c                             # 박스 또는 미매칭 → 자기 자신
+
+
 def _ceil100(x: float) -> int:
     return int(math.ceil(x / 100) * 100)
 
