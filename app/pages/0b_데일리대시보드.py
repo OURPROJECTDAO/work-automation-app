@@ -31,6 +31,8 @@ from core.intelligence import purchases as _buy
 from core.intelligence import stock_history as shh
 from core.workflows import channel_margin_monitor as cmm
 from core.workflows import upload_monitor as um
+from core.dashboard import store
+from core.intelligence import channel_compare as cc
 from core import ui
 
 _REF = Path(__file__).parent.parent.parent / "reference"
@@ -48,6 +50,37 @@ def _data_secret():
         return d["pat"], d.get("repo", repo)
     except Exception:
         return st.secrets.get("GITHUB_PAT", ""), repo
+
+
+@st.cache_data(ttl=3600, show_spinner="최근 월매출 불러오는 중...")
+def _recent_month_sales(n: int = 2):
+    """최근 적재 n개월의 (채널 x 관리코드) 정산 매출(판매금액 합) — master 매출자료(데이터repo).
+    채널 = 상호명 -> cc.label 후 괄호 앞만('ESM(G마켓.옥션)'->'ESM' 데일리 채널명과 정렬).
+    달력월이 아니라 *실제 적재된* 최신 n개월을 잡아 미적재(빈) 달 함정을 피한다.
+    반환: (labels['M월매출' 순서], months[YYYY-MM 순서], lk{(채널, 관리코드NFC): {YYYY-MM: 매출}})."""
+    pat, repo = _data_secret()
+    if not pat:
+        return [], [], {}
+    try:
+        months = store.list_partition_months(pat, repo)[-n:]
+    except Exception:
+        return [], [], {}
+    lk: dict = {}
+    for ym in months:
+        try:
+            part = store.read_partition(pat, repo, ym)
+        except Exception:
+            part = None
+        if part is None or part.empty:
+            continue
+        part = part.copy()
+        part["_ch"] = part["상호명"].map(lambda s: cc.label(s).split("(")[0].strip())
+        part["_mc"] = part["관리코드"].map(_nfc)
+        g = part.groupby(["_ch", "_mc"], observed=True)["판매금액"].sum()
+        for (ch, mc), v in g.items():
+            lk.setdefault((ch, mc), {})[ym] = float(v)
+    labels = [f"{int(ym[5:7])}월매출" for ym in months]
+    return labels, months, lk
 
 
 def _gh_raw(path: str):
@@ -681,10 +714,17 @@ else:
                            for ch, mc in zip(_show["채널"], _show["관리코드"])]
             for col in ("마진율", "기준마진"):
                 _disp[col] = (_disp[col].astype(float) * 100).round(1)
-            _order = ["채널", "관리코드", "상품명", "매출", "낱개수량", "박스", "원가", "택배",
-                      "마진", "마진율", "기준마진", "현재가", "권장가", "listing마진", "판정",
-                      "역마진", "미달"]
-            st.caption("왼쪽 체크박스로 상품 선택 → 아래에서 **그 채널** 가격변경 시트 다운로드. "
+            _ms_labels, _ms_months, _ms_lk = _recent_month_sales()
+            for _lab, _ym in zip(_ms_labels, _ms_months):
+                _disp[_lab] = [int(round(_ms_lk.get((str(ch).split("(")[0].strip(), _nfc(mc)), {}).get(_ym, 0)))
+                               for ch, mc in zip(_show["채널"], _show["관리코드"])]
+            _order = (["채널", "관리코드", "상품명"] + _ms_labels +
+                      ["매출", "낱개수량", "박스", "원가", "택배",
+                       "마진", "마진율", "기준마진", "현재가", "권장가", "listing마진", "판정",
+                       "역마진", "미달"])
+            _ms_note = (f"**{' · '.join(_ms_labels)}** = 그 채널·상품의 정산 매출 월합계(최근 적재 2개월·~{_ms_months[-1]}) — "
+                        "0=그달 정산매출 없음, 매출(net)은 오늘분. " if _ms_labels else "")
+            st.caption(_ms_note + "왼쪽 체크박스로 상품 선택 → 아래에서 **그 채널** 가격변경 시트 다운로드. "
                        "권장가 = 채널 기준마진율 달성 판매가(매입가 기준 역산 — 항상 표시). "
                        "현재가 = 채널 저장 listing 기준(미등재면 빈칸). "
                        "**판정(이중검수)**: 당일 미달이라도 listing 마진이 기준 이상이면 '일시적'(쿠폰·실박스 택배 등 — 가격 손댈 필요 없음), "
