@@ -442,12 +442,13 @@ fc1, fc2 = st.columns([2, 3])
 with fc1:
     pick = st.multiselect("코드유형", types, default=types)
 with fc2:
-    f1, f2, f3, f4 = st.columns(4)
+    f1, f2, f3, f4, f5 = st.columns(5)
     only_under = f1.checkbox("마진미달만", help="기준마진율보다 1%p 이상 낮은 상품")
     min_stock = f2.number_input("재고 N개 이상", min_value=0, value=0, step=1,
                                 help="입력한 개수 이상의 재고만 표시 (0=전체)")
     only_floor = f3.checkbox("제한상품만")
-    only_miss = f4.checkbox("미매칭만")
+    only_not_floor = f4.checkbox("제한 제외", help="제한 상품이 아닌 것만 표시")
+    only_miss = f5.checkbox("미매칭만")
 
 view = df[df["코드유형"].isin(pick)].copy()
 if q:
@@ -460,6 +461,8 @@ if min_stock > 0:
     view = view[view["재고"].fillna(-1) >= min_stock]
 if only_floor:
     view = view[view["제한"].astype(str) != ""]
+if only_not_floor:
+    view = view[view["제한"].astype(str) == ""]
 if only_miss:
     view = view[view["매입가"].isna()]
 
@@ -471,7 +474,7 @@ DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형"
 st.session_state.setdefault("cmm_tblver", 0)  # 저장 시 +1 → 표 선택 강제 초기화(두뇌④ mo_tblver 패턴)
 view_reset = view.reset_index(drop=True)
 # 키에 행 수 포함 → 데이터/필터로 행 수가 바뀌면 위젯 리셋(어긋난 선택 복원 방지)
-filter_sig = hash((tuple(sorted(pick)), only_under, min_stock, only_floor, only_miss, q, len(view_reset)))
+filter_sig = hash((tuple(sorted(pick)), only_under, min_stock, only_floor, only_not_floor, only_miss, q, len(view_reset)))
 
 event = st.dataframe(
     view_reset[DISPLAY],
