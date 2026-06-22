@@ -486,8 +486,6 @@ def _slot_ui(slot: str, label: str, key: str):
 
 # ─────────────────────────────────────────────────────────
 ui.page_header("데일리 대시보드", icon="📅")
-# 컬럼 많은 표 → 이 페이지만 본문 폭 제한(ui.py .block-container 1180px) 해제
-st.markdown("<style>.block-container{max-width:none;}</style>", unsafe_allow_html=True)
 st.caption("매일 반복 업무 산출물로 **오늘의 마진을 즉시 점검**합니다. "
            "파일처리에서 **오픈마켓(송장출력)·천년경영(output)**을 실행하면 이 세션에서 자동 인계돼 "
            "재업로드가 필요 없습니다. (상품관리는 reference 라이브 — 항상 최신)")
