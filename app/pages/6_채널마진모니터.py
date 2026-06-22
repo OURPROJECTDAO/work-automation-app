@@ -19,6 +19,7 @@ import streamlit as st
 
 from core.workflows import channel_margin_monitor as cmm
 from core.intelligence import listing_history
+from core.dashboard import store
 
 _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_REPO = "OURPROJECTDAO/work-automation-app"
@@ -153,7 +154,55 @@ def _commit_baseline(new_text: str):
     _gh(_BASELINE_PATH, "PUT", payload)
 
 
-def _col_config(cfg: dict) -> dict:
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_refs():
+    """canonical_code용 reference(sobun·pm_by_prod 등). 가벼운 csv 로드."""
+    return cmm.load_references(str(_REF))
+
+
+# 채널마진모니터 채널키 → 매출자료(천년경영 정산) 상호명(들). 쿠팡=윙배송+로켓창고.
+_CH_TO_SANGHO = {
+    "스마트스토어": ["오픈마켓- 스마트스토어"],
+    "esm": ["오픈마켓(ESM/옥션.지마켓.G9)"],
+    "식봄": ["오픈마켓- (주) 마켓보로"],
+    "캐시노트": ["오픈마켓 (주) 한국신용데이터"],
+    "알리": ["오픈마켓- 알리"],
+    "쿠팡": ["오픈마켓 쿠팡 (윙배송)", "쿠팡(로켓창고)"],
+    "배민상회": ["오픈마켓- (주) 우아한형제들"],
+    "올웨이즈": ["오픈마켓- 올웨이즈"],
+}
+
+
+@st.cache_data(ttl=600, show_spinner="전월 매출 불러오는 중...")
+def _load_prev_sales():
+    """적재 최신월 매출 파티션 → (ym, {코드: 전체매출}, {상호명: {코드: 매출}}). 박스코드 기준.
+
+    매출자료는 박스코드라 정규화 불요 — listing 행만 canonical_code로 맞춰 lookup.
+    """
+    pat, repo = _data_secret()
+    if not pat:
+        return None, {}, {}
+    try:
+        months = store.list_partition_months(pat, repo)
+        if not months:
+            return None, {}, {}
+        ym = months[-1]
+        sdf = store.read_partition(pat, repo, ym)
+    except Exception:
+        return None, {}, {}
+    if sdf is None or sdf.empty:
+        return ym, {}, {}
+    sdf = sdf.copy()
+    sdf["_code"] = sdf["관리코드"].map(cmm._nfc)
+    sdf["_sg"] = sdf["상호명"].astype(str).map(cmm._nfc)
+    total = {k: float(v) for k, v in sdf.groupby("_code")["판매금액"].sum().items()}
+    by_ch: dict = {}
+    for (sg, cd), v in sdf.groupby(["_sg", "_code"])["판매금액"].sum().items():
+        by_ch.setdefault(sg, {})[cd] = float(v)
+    return ym, total, by_ch
+
+
+def _col_config(cfg: dict, prev_ym=None) -> dict:
     """표 컬럼 헤더에 채널별 수식 설명(help) 부여 — 사람이 한 번 더 검증.
 
     수수료·실택배비·배송비 출처·N 출처가 채널마다 달라 cfg에서 동적 생성.
@@ -203,6 +252,13 @@ def _col_config(cfg: dict) -> dict:
                       help=(f"기준마진 달성 판매가(net 기준, 100원 올림): "
                             f"⌈((매입가+{ship:,})÷(1−기준마진율) − 배송비×{settle})÷{rate_txt}⌉. "
                             "제한상품은 제한 텍스트.")),
+        "전월매출": NC("전월매출(이채널)", format="localized",
+                    help=(f"{prev_ym or '최근 적재월'} 이 채널 판매금액(천년경영 정산). "
+                          "박스/낱개/소분 통일(원박스 기준)·쿠팡=윙배송+로켓. "
+                          "같은 상품의 박스·낱개 행은 같은 값 → 세로 합산 금지")),
+        "전월매출(전체)": NC("전월매출(전체)", format="localized",
+                        help=(f"{prev_ym or '최근 적재월'} 전 거래처 판매금액 합(B2B 포함·통일 기준). "
+                              "이 상품이 회사 전체로 얼마나 도는지")),
         "비고": TC("비고", help="미매칭·미등록 사유(정상 매칭이면 빈칸)"),
     }
 
@@ -341,6 +397,18 @@ def _rec_disp(r):
 
 df["권장가/제한"] = df.apply(_rec_disp, axis=1)
 
+# ── 전월매출 (박스/낱개/소분 통일) — 적재 최신월·이 채널/전체 ──
+_refs_canon = _load_refs()
+_prev_ym, _sales_total, _sales_by_ch = _load_prev_sales()
+_sanghos = [cmm._nfc(s) for s in _CH_TO_SANGHO.get(channel, [])]
+_ch_sales: dict = {}
+for _sg in _sanghos:
+    for _cd, _v in _sales_by_ch.get(_sg, {}).items():
+        _ch_sales[_cd] = _ch_sales.get(_cd, 0.0) + _v
+_canon = df["관리코드"].map(lambda c: cmm.canonical_code(c, _refs_canon))
+df["전월매출"] = _canon.map(lambda c: _ch_sales.get(c))
+df["전월매출(전체)"] = _canon.map(lambda c: _sales_total.get(c))
+
 search = st.text_input("🔍 검색", placeholder="상품번호 · 관리코드 · 상품명 (부분일치)",
                        label_visibility="collapsed")
 q = cmm._nfc(search).lower() if search else ""
@@ -372,7 +440,8 @@ if only_miss:
     view = view[view["매입가"].isna()]
 
 DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형", "N", "재고",
-           "매입가", "판매가", "배송비", "정산액", "마진율", "기준마진율", "탐지", "권장가/제한", "비고"]
+           "매입가", "판매가", "배송비", "정산액", "마진율", "기준마진율", "탐지", "권장가/제한",
+           "전월매출", "전월매출(전체)", "비고"]
 
 # ── 선택 — st.dataframe 다중행 선택(헤더 체크박스=전체선택 + 개별, 현재 필터/검색 기준) ──
 view_reset = view.reset_index(drop=True)
@@ -386,7 +455,7 @@ event = st.dataframe(
     on_select="rerun",
     selection_mode="multi-row",
     key=f"cmm_df_{key}_{filter_sig}",
-    column_config=_col_config(cfg),
+    column_config=_col_config(cfg, _prev_ym),
 )
 _raw_sel = event.selection.rows if event and getattr(event, "selection", None) else []
 # 데이터 변동/rerun으로 범위를 벗어난 선택 인덱스 방어(IndexError: positional indexers out-of-bounds)
