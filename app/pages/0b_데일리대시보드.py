@@ -717,6 +717,9 @@ else:
                            for ch, mc in zip(_show["채널"], _show["관리코드"])]
             for col in ("마진율", "기준마진"):
                 _disp[col] = (_disp[col].astype(float) * 100).round(1)
+            for _c in ("매출", "원가", "택배", "마진"):   # 금액=정수만(소수점 제거·콤마 유지)
+                if _c in _disp.columns:
+                    _disp[_c] = _disp[_c].round(0).astype("Int64")
             _mlabels, _ms_months, _ms_lk = _recent_month_sales()
             _rev_cols, _mr_cols = [], []
             for _lab, _ym in zip(_mlabels, _ms_months):
