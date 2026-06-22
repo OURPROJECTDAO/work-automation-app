@@ -195,7 +195,9 @@ def _load_prev_sales():
     sdf = sdf.copy()
     sdf["_code"] = sdf["관리코드"].map(cmm._nfc)
     sdf["_sg"] = sdf["상호명"].astype(str).map(cmm._nfc)
-    total = {k: float(v) for k, v in sdf.groupby("_code")["판매금액"].sum().items()}
+    _managed = {cmm._nfc(s) for v in _CH_TO_SANGHO.values() for s in v}  # 내 관리 8채널(나들·B2B 제외)
+    msdf = sdf[sdf["_sg"].isin(_managed)]
+    total = {k: float(v) for k, v in msdf.groupby("_code")["판매금액"].sum().items()}
     by_ch: dict = {}
     for (sg, cd), v in sdf.groupby(["_sg", "_code"])["판매금액"].sum().items():
         by_ch.setdefault(sg, {})[cd] = float(v)
@@ -257,8 +259,8 @@ def _col_config(cfg: dict, prev_ym=None) -> dict:
                           "박스/낱개/소분 통일(원박스 기준)·쿠팡=윙배송+로켓. "
                           "같은 상품의 박스·낱개 행은 같은 값 → 세로 합산 금지")),
         "전월매출(전체)": NC("전월매출(전체)", format="localized",
-                        help=(f"{prev_ym or '최근 적재월'} 전 거래처 판매금액 합(B2B 포함·통일 기준). "
-                              "이 상품이 회사 전체로 얼마나 도는지")),
+                        help=(f"{prev_ym or '최근 적재월'} 내 관리 8채널 합(나들·B2B 제외·통일 기준). "
+                              "이 상품이 내 채널 전체로 얼마나 도는지")),
         "비고": TC("비고", help="미매칭·미등록 사유(정상 매칭이면 빈칸)"),
     }
 
