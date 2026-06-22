@@ -194,11 +194,14 @@ def recommend_code(cells_code: pd.DataFrame, nadl_margin=None, turnover_days=Non
                     if flag != "🔴":
                         flag = "🟡"
 
-        # 3% 절대 하한 — 어떤 경로로도(베이스·⑦·회전·hold-low) 마진 3% 미만은 권장하지 않음.
-        # 미만이면 유지로 두고 작업목록·KPI·실험큐에서 제외(A_HOLD → 페이지 ACT 필터 밖, 결정할 게 없음).
+        # 3% 절대 하한 — 3%까진 내리되 그 밑은 막음(clamp). 단 이미 3% 이하라 더 못 내리면 결정에서 제외(유지+숨김).
         if target < MIN_SELL_MARGIN - 1e-9:
-            action, target, flag = A_HOLD, m, "🟢"
-            reason = "마진 3% 미만 → 더 못 내림(3% 절대 하한) · 유지 · 작업목록 제외"
+            if m > MIN_SELL_MARGIN + 1e-9:
+                target = MIN_SELL_MARGIN  # 3% 하한까지만 인하(클램프) — 인하 액션/플래그 유지
+                reason = (reason + " · " if reason else "") + "3% 하한까지만 내림(그 밑 불가)"
+            else:
+                action, target, flag = A_HOLD, m, "🟢"
+                reason = "이미 3% 이하 → 더 내릴 수 없음 · 유지 · 작업목록 제외"
 
         delta = target - m
         if action in _MOVE_ACTIONS and abs(delta) < MIN_DELTA:
