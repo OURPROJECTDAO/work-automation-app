@@ -352,7 +352,8 @@ with fc1:
 with fc2:
     f1, f2, f3, f4 = st.columns(4)
     only_under = f1.checkbox("마진미달만", help="기준마진율보다 1%p 이상 낮은 상품")
-    only_zero = f2.checkbox("재고 0")
+    min_stock = f2.number_input("재고 N개 이상", min_value=0, value=0, step=1,
+                                help="입력한 개수 이상의 재고만 표시 (0=전체)")
     only_floor = f3.checkbox("제한상품만")
     only_miss = f4.checkbox("미매칭만")
 
@@ -363,8 +364,8 @@ if q:
     view = view[hay.str.contains(q, regex=False, na=False)]
 if only_under:
     view = view[view["탐지"].notna() & (view["탐지"] < cmm.MARGIN_UNDER_THRESHOLD)]
-if only_zero:
-    view = view[view["재고"].fillna(-1) == 0]
+if min_stock > 0:
+    view = view[view["재고"].fillna(-1) >= min_stock]
 if only_floor:
     view = view[view["제한"].astype(str) != ""]
 if only_miss:
@@ -376,7 +377,7 @@ DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형"
 # ── 선택 — st.dataframe 다중행 선택(헤더 체크박스=전체선택 + 개별, 현재 필터/검색 기준) ──
 view_reset = view.reset_index(drop=True)
 # 키에 행 수 포함 → 데이터/필터로 행 수가 바뀌면 위젯 리셋(어긋난 선택 복원 방지)
-filter_sig = hash((tuple(sorted(pick)), only_under, only_zero, only_floor, only_miss, q, len(view_reset)))
+filter_sig = hash((tuple(sorted(pick)), only_under, min_stock, only_floor, only_miss, q, len(view_reset)))
 
 event = st.dataframe(
     view_reset[DISPLAY],
