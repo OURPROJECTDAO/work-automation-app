@@ -689,17 +689,22 @@ def _stats(rows: list[dict]) -> dict:
     }
 
 
-def compute_listing(recs: list[dict], channel: str, ref_dir, baseline_override=None) -> tuple[list[dict], dict]:
+def compute_listing(recs: list[dict], channel: str, ref_dir, baseline_override=None,
+                    floor_override=None) -> tuple[list[dict], dict]:
     """저장된 listing 레코드 + 채널 → (결과 레코드, 통계).
 
     baseline_override({관리코드:{채널:값}})가 주어지면 로컬 baseline_margin 대신 사용
     (대시보드에서 GitHub 라이브로 읽은 기준마진율 → 편집 즉시 반영).
+    floor_override({관리코드:{제한내용,비고,상품명}})가 주어지면 로컬 margin_floor 대신 사용
+    (제한 등록/해제 → 즉시 반영).
     """
     if channel not in CHANNEL_CONFIG:
         raise ValueError(f"지원하지 않는 채널: {channel}")
     refs = load_references(ref_dir)
     if baseline_override is not None:
         refs["baseline"] = baseline_override
+    if floor_override is not None:
+        refs["floor"] = floor_override
     rows = compute(recs, refs, CHANNEL_CONFIG[channel])
     return rows, _stats(rows)
 
@@ -857,6 +862,70 @@ def update_baseline_csv(text: str, channel_col: str, updates: dict) -> tuple[str
     csv.writer(buf, lineterminator="\r\n").writerows(out)
     res = buf.getvalue()
     return (("\ufeff" + res) if bom else res), upd, added
+
+
+# ── 제한 상품(margin_floor) 편집 — 권장가 ↔ 제한 ──────────────────────────────
+_FLOOR_FIELDS = ["상품명", "비고", "제한내용"]
+
+
+def parse_floor_dict(text: str) -> dict:
+    """margin_floor.csv 텍스트 → {관리코드(NFC): {상품명, 비고, 제한내용}}. floor_override용(라이브 read)."""
+    out = {}
+    if not text:
+        return out
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    for row in csv.DictReader(StringIO(text)):
+        code = _nfc(row.get("관리코드"))
+        if code:
+            out[code] = {k: (row.get(k) or "") for k in _FLOOR_FIELDS}
+    return out
+
+
+def update_floor_csv(text: str, upserts: dict, removes=None) -> tuple[str, int, int]:
+    """margin_floor.csv 갱신 → (새 텍스트, 등록/수정수, 해제수).
+
+    upserts={관리코드:{상품명,비고,제한내용}} = 등록/수정(있으면 그 행 갱신, 없으면 행 추가).
+    removes={관리코드,...} = 해제(행 삭제). 헤더/열순서/BOM(utf-8-sig)/CRLF 보존.
+    """
+    removes = {_nfc(c) for c in (removes or set())}
+    bom = text.startswith("\ufeff")
+    if bom:
+        text = text[1:]
+    rows = list(csv.reader(StringIO(text))) if text.strip() else []
+    header = rows[0] if rows else ["관리코드", "상품명", "비고", "제한내용"]
+    code_i = header.index("관리코드")
+    pending = {_nfc(k): v for k, v in upserts.items()}
+    upd = rm = 0
+    out = [header]
+    for row in rows[1:]:
+        if not row:
+            continue
+        code = _nfc(row[code_i]) if code_i < len(row) else ""
+        if code in removes:
+            rm += 1
+            continue
+        if code in pending:
+            while len(row) < len(header):
+                row.append("")
+            for f in _FLOOR_FIELDS:
+                if f in header:
+                    row[header.index(f)] = pending[code].get(f, row[header.index(f)])
+            pending.pop(code)
+            upd += 1
+        out.append(row)
+    for code, vals in pending.items():
+        nr = [""] * len(header)
+        nr[code_i] = code
+        for f in _FLOOR_FIELDS:
+            if f in header:
+                nr[header.index(f)] = vals.get(f, "")
+        out.append(nr)
+        upd += 1
+    buf = StringIO()
+    csv.writer(buf, lineterminator="\r\n").writerows(out)
+    res = buf.getvalue()
+    return (("\ufeff" + res) if bom else res), upd, rm
 
 
 # ── 가격 일괄변경 (할인 우선 규칙) ───────────────────────────────────────────
