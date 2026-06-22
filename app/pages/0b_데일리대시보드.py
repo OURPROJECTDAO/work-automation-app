@@ -638,7 +638,11 @@ else:
                                       buffer=float(buffer))
         anom = ddf[ddf["역마진"] | ddf["미달"]].reset_index(drop=True)
         _rev, _mar = ddf["매출"].sum(), ddf["마진"].sum()
-        c = st.columns(4)
+        st.markdown(
+            "<style>[data-testid='stMetricValue']{font-size:1.55rem;}"
+            "[data-testid='stMetricValue'] *{white-space:nowrap;overflow:visible;}</style>",
+            unsafe_allow_html=True)
+        c = st.columns([3, 3, 2, 2])
         c[0].metric("당일 매출(net)", f"{_rev:,.0f} 원")
         c[1].metric("당일 마진", f"{_mar:,.0f} 원", f"{100 * _mar / _rev:.1f}%" if _rev else None)
         c[2].metric("이상 건", f"{len(anom)} 건")
@@ -650,18 +654,14 @@ else:
               .agg(매출=("매출", "sum"), 원가=("원가", "sum"), 택배=("택배", "sum"),
                    마진=("마진", "sum"), 품목수=("관리코드", "nunique")))
         _g["마진율"] = (_g["마진"] / _g["매출"].where(_g["매출"] > 0) * 100).round(1)
+        _g["택배(박스)"] = (_g["택배"] / 2700).round().astype(int)   # 택배비 ÷ flat 2700 = 박스수
         _g = _g.sort_values("매출", ascending=False).reset_index(drop=True)
         st.markdown("**채널별 요약 (당일 매출·마진율)**")
-        st.dataframe(_g[["채널", "매출", "원가", "택배", "마진", "마진율", "품목수"]],
-                     hide_index=True, use_container_width=True,
-                     column_config={
-                         "매출": st.column_config.NumberColumn("매출(net)", format="%d"),
-                         "원가": st.column_config.NumberColumn(format="%d"),
-                         "택배": st.column_config.NumberColumn(format="%d"),
-                         "마진": st.column_config.NumberColumn(format="%d"),
-                         "마진율": st.column_config.NumberColumn("마진%", format="%.1f"),
-                         "품목수": st.column_config.NumberColumn(format="%d"),
-                     })
+        _gd = (_g[["채널", "매출", "원가", "택배(박스)", "마진", "마진율", "품목수"]]
+               .rename(columns={"매출": "매출(net)", "마진율": "마진%"}))
+        _gsty = _gd.style.format({"매출(net)": "{:,.0f}", "원가": "{:,.0f}", "마진": "{:,.0f}",
+                                  "택배(박스)": "{:,.0f}", "마진%": "{:.1f}", "품목수": "{:,.0f}"})
+        st.dataframe(_gsty, hide_index=True, use_container_width=True)
         _view = st.radio("보기", ["이상치만", "전체"], horizontal=True, key="d_view")
         _show = (anom if _view == "이상치만" else ddf).reset_index(drop=True)
         if _show.empty:
