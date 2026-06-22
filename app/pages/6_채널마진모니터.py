@@ -446,6 +446,7 @@ DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형"
            "전월매출", "전월매출(전체)", "비고"]
 
 # ── 선택 — st.dataframe 다중행 선택(헤더 체크박스=전체선택 + 개별, 현재 필터/검색 기준) ──
+st.session_state.setdefault("cmm_tblver", 0)  # 저장 시 +1 → 표 선택 강제 초기화(두뇌④ mo_tblver 패턴)
 view_reset = view.reset_index(drop=True)
 # 키에 행 수 포함 → 데이터/필터로 행 수가 바뀌면 위젯 리셋(어긋난 선택 복원 방지)
 filter_sig = hash((tuple(sorted(pick)), only_under, min_stock, only_floor, only_miss, q, len(view_reset)))
@@ -456,7 +457,7 @@ event = st.dataframe(
     hide_index=True,
     on_select="rerun",
     selection_mode="multi-row",
-    key=f"cmm_df_{key}_{filter_sig}",
+    key=f"cmm_df_{key}_{filter_sig}_{st.session_state['cmm_tblver']}",
     column_config=_col_config(cfg, _prev_ym),
 )
 _raw_sel = event.selection.rows if event and getattr(event, "selection", None) else []
@@ -580,43 +581,36 @@ if form:
 
 
 # ── 기준마진율 설정: 현재 마진율 → 기준마진율 (전 채널 공통 baseline_margin 편집) ──
+# 선택 → 바로 아래 인라인 편집 → 저장 → 표 선택 초기화 + 즉시 반영. (두뇌④와 동일 패턴·session_state 중간단계 없음)
 st.divider()
 st.markdown("#### 🎯 기준마진율 설정 (현재 마진율 → 기준)")
 _bcol = cfg["baseline_col"]
-st.caption(f"선택한 상품의 **현재 마진율**을 기본값으로 채워 드립니다. **새 기준(%)** 칸을 직접 수정할 수 있어요. "
-           f"저장하면 이 채널({channel}=`{_bcol}`) 컬럼만 갱신(다른 채널 보존)되고 표에 즉시 반영됩니다. "
+st.caption(f"위 표에서 상품을 선택하면 **현재 마진율**이 기본값으로 채워집니다. **새 기준(%)** 칸을 직접 고친 뒤 "
+           f"저장하면 이 채널({channel}=`{_bcol}`) 컬럼만 갱신(다른 채널 보존)되고 표에 즉시 반영·선택은 풀립니다. "
            "미달 상품을 현재 마진으로 두면 더 이상 미달로 안 잡힙니다.")
-if st.button(f"🎯 기준마진율 설정 (선택 {len(sel_pids)}건)", type="primary",
-             disabled=(len(sel_pids) == 0), key=f"bl_open_{key}"):
-    if not _pat():
-        st.session_state[f"bl_{key}"] = {"error": "저장용 PAT(st.secrets GITHUB_PAT)가 없어 커밋할 수 없습니다."}
-    else:
-        _prop, _conf = cmm.propose_baseline(rows, sel_pids, offset=0.0)
-        if not _prop and not _conf:
-            st.session_state[f"bl_{key}"] = {"error": "선택 상품 중 마진율 산출 가능 항목이 없습니다(미매칭/정산불가)."}
-        else:
-            _items = []   # 관리코드 1행: 기본값=현재(비충돌)/최저(충돌, 보수적) · 충돌은 후보 표시
-            for _code, _v in _prop.items():
-                _items.append({"관리코드": _code, "현재마진": [_v], "기본값": _v, "충돌": False})
-            for _code, _cands in _conf.items():
-                _vals = sorted({c["값"] for c in _cands})
-                _items.append({"관리코드": _code, "현재마진": _vals, "기본값": min(_vals), "충돌": True})
-            _items.sort(key=lambda x: x["관리코드"])
-            st.session_state[f"bl_{key}"] = {"items": _items, "bcol": _bcol}
 
-_stage = st.session_state.get(f"bl_{key}")
-if _stage:
-    if _stage.get("error"):
-        st.warning(_stage["error"])
+if not sel_pids:
+    st.info("⬆️ 위 표에서 상품을 선택하세요. (행 왼쪽 체크박스=개별 · 헤더 체크박스=현재 화면 전체)")
+elif not _pat():
+    st.warning("저장용 PAT(st.secrets GITHUB_PAT)가 없어 커밋할 수 없습니다.")
+else:
+    _prop, _conf = cmm.propose_baseline(rows, sel_pids, offset=0.0)
+    if not _prop and not _conf:
+        st.warning("선택 상품 중 마진율 산출 가능 항목이 없습니다(미매칭/정산불가).")
     else:
-        _bcol = _stage["bcol"]
+        _items = []   # 관리코드 1행: 기본값=현재(비충돌)/최저(충돌, 보수적) · 충돌은 후보 표시
+        for _code, _v in _prop.items():
+            _items.append({"관리코드": _code, "현재마진": [_v], "기본값": _v, "충돌": False})
+        for _code, _cands in _conf.items():
+            _vals = sorted({c["값"] for c in _cands})
+            _items.append({"관리코드": _code, "현재마진": _vals, "기본값": min(_vals), "충돌": True})
+        _items.sort(key=lambda x: x["관리코드"])
         _curbase = cmm.parse_baseline_dict(_load_baseline_text())
-        _has_conf = any(it["충돌"] for it in _stage["items"])
-        if _has_conf:
-            st.warning("⚠️ '현재 마진율'에 값이 여러 개(`/`)인 관리코드는 같은 코드에 마진이 다른 상품이 섞인 경우입니다. "
+        if any(it["충돌"] for it in _items):
+            st.warning("⚠️ '현재 마진율'이 여러 개(`/`)인 관리코드는 같은 코드에 마진이 다른 상품이 섞인 경우입니다. "
                        "**새 기준(%)** 칸에 원하는 값을 직접 정해 주세요(기본은 가장 낮은 값).")
         _disp = []
-        for it in _stage["items"]:
+        for it in _items:
             _code = it["관리코드"]
             _old = (_curbase.get(_code, {}) or {}).get(_bcol, "") or ""
             _disp.append({
@@ -635,11 +629,11 @@ if _stage:
                     "새 기준(%) ✏️", min_value=0.0, max_value=100.0, step=0.1, format="%.1f",
                     help="직접 수정 가능. 0.1%p 단위. 비우면 그 행은 저장 안 함."),
             },
-            hide_index=True, use_container_width=True, key=f"bl_editor_{key}",
+            hide_index=True, use_container_width=True,
+            key=f"bl_editor_{key}_{st.session_state['cmm_tblver']}",
         )
-        st.caption(f"적용 대상 **{len(_disp)} 관리코드** · 이 채널({_bcol}) 컬럼만 수정 · 새 기준 = 사용자 입력값(0.1%p 반올림 저장)")
-        _b1, _b2, _ = st.columns([1, 1, 2])
-        if _b1.button("💾 저장 (커밋)", type="primary", key=f"bl_save_{key}"):
+        st.caption(f"적용 대상 **{len(_disp)} 관리코드** · 이 채널({_bcol}) 컬럼만 수정 · 새 기준 = 입력값(0.1%p 반올림 저장)")
+        if st.button("💾 저장 (커밋)", type="primary", key=f"bl_save_{key}"):
             _updates = {}
             for _, _r in _edited.iterrows():
                 _val = _r["새 기준(%)"]
@@ -652,9 +646,7 @@ if _stage:
                 _newtext, _upd, _added = cmm.update_baseline_csv(_load_baseline_text(), _bcol, _updates)
                 _commit_baseline(_newtext)
                 _load_baseline_text.clear()
-                st.session_state.pop(f"bl_{key}", None)
+                st.session_state["cmm_tblver"] += 1       # 표 선택 초기화(체크박스 풀림)
+                st.session_state.pop(f"bl_{key}", None)    # 구버전 잔여 단계 정리
                 st.success(f"기준마진율 저장 완료 — 수정 {_upd} · 신규 {_added} 관리코드 ({_bcol}). 표에 즉시 반영됩니다.")
                 st.rerun()
-        if _b2.button("취소", key=f"bl_cancel_{key}"):
-            st.session_state.pop(f"bl_{key}", None)
-            st.rerun()
