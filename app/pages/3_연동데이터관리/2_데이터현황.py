@@ -53,7 +53,9 @@ if ok:
                 if r["gaps"]:
                     st.caption(f"⚠️ 갭 {len(r['gaps'])}: {', '.join(r['gaps'])}")
                 else:
-                    st.caption(f"{r['first']} ~ {r['last']}")
+                    _f = r.get("first_day") or r["first"]
+                    _l = r.get("last_day") or r["last"]
+                    st.caption(f"{_f} ~ {_l}")
             else:
                 st.metric(r["label"], f"{r['size_kb']}KB")
                 st.caption(r["note"])
@@ -82,7 +84,7 @@ if rows:
 UP = {"direct": "직접 업로드", "auto": "자동(부산물)", "planned": "예정"}
 tbl = pd.DataFrame([{
     "데이터": r["label"],
-    "범위": (f"{r['first']} ~ {r['last']}" if r["first"]
+    "범위": (f"{r.get('first_day') or r['first']} ~ {r.get('last_day') or r['last']}" if r["first"]
              else ("단일파일" if r["kind"] == "single" and r["status"] == "ok" else "—")),
     "개월/파일": r["files"],
     "갭": (", ".join(r["gaps"]) if r["gaps"] else "—"),
