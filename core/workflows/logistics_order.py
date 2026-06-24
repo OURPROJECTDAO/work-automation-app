@@ -559,6 +559,20 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
     ws.column_dimensions["F"].width = 8
     ws.row_dimensions[1].height = 22
 
+    # A·B·F 글자크기 9 · D(어드민옵션) 자동줄바꿈 해제 (물류팀 인쇄 가독성)
+    # 물류팀 ws 한정 후처리 — C/D/E 폰트·품절목록 시트는 그대로.
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=6):
+        for ci in (1, 2, 6):          # A 구분 · B 규격 · F 재고
+            cell = row[ci - 1]
+            f = cell.font
+            cell.font = Font(name=f.name, size=9, bold=f.bold, italic=f.italic,
+                             color=f.color, underline=f.underline, strike=f.strike)
+        dcell = row[3]                # D 어드민옵션 — wrap만 끄고 정렬 보존
+        a = dcell.alignment
+        dcell.alignment = Alignment(horizontal=a.horizontal, vertical=a.vertical,
+                                    wrap_text=False, text_rotation=a.text_rotation,
+                                    indent=a.indent)
+
     # ── 품절목록 시트 ─────────────────────────────
     ws2 = wb.create_sheet("품절목록")
     cadence = cadence or {}
