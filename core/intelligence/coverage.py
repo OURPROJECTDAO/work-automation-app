@@ -31,7 +31,7 @@ CATALOG = [
      "kind": "monthly", "upload": "auto", "note": "상품관리 업로드 부산물 · 자동 적립"},
     {"id": "purchases", "label": "매입현황", "dir": "purchases", "rx": r"buyin_(\d{4}-\d{2})\.parquet",
      "date_col": "기준일",
-     "kind": "monthly", "upload": "planned", "note": "유형별매입현황 · 실입고(예정)"},
+     "kind": "monthly", "upload": "direct", "note": "유형별매입현황 · 실입고"},
     {"id": "demand", "label": "발주자료", "dir": "demand", "rx": r"order_(\d{4}-\d{2})\.parquet",
      "kind": "monthly", "upload": "planned", "note": "logistics 발주 · 리드타임 산출(예정)"},
 ]
