@@ -2,7 +2,7 @@
 
 시계열로 누적되는 자료(매출·주문·가격이력·재고 스냅샷·매입현황·발주자료)의 적재
 범위·갭을 한눈에. GitHub 디렉토리 목록만 사용(파일 내용 read 0회). 이력 엔진(ADR 0018).
-1단계=현황(읽기 전용). 업로드는 다음 단계(직접 적립=매출·주문·가격이력·매입현황).
+현황(읽기 전용) + 직접 적립 업로드(매출·주문·가격이력·매입현황).
 """
 import sys
 from pathlib import Path
@@ -95,5 +95,74 @@ tbl = pd.DataFrame([{
 st.dataframe(tbl, use_container_width=True, hide_index=True)
 
 st.divider()
-st.caption("업로드는 다음 단계에서 추가됩니다 — 직접 적립 대상: 매출·주문·가격이력·매입현황. "
+st.subheader("📤 직접 적립")
+st.caption("매출·주문·가격이력·매입현황을 여기서 업로드하면 바로 적재됩니다. "
            "재고 스냅샷은 상품관리 업로드 시 자동 적립됩니다.")
+
+_SOURCES = {
+    "매출 — 천년경영 영업이익현황": "sales",
+    "주문 — EasyAdmin 확장주문검색": "orders",
+    "가격이력 — 상품수정삭제로그": "price",
+    "매입현황 — 유형별매입현황": "purchases",
+}
+_EXT = {"sales": ["xlsx"], "orders": ["xls"], "price": ["xlsx"], "purchases": ["xlsx"]}
+_HELP = {
+    "sales": "Exp______영업이익현황_YYYYMMDD-YYYYMMDD.xlsx",
+    "orders": "확장주문검색_YYYYMMDDHHMMSS_.xls (HTML 위장 파일 — 정상)",
+    "price": "Exp______상품수정삭제로그_YYYYMMDD-YYYYMMDD.xlsx",
+    "purchases": "Exp______유형별매입현황_YYYYMMDD-YYYYMMDD.xlsx (통파일·개별 둘 다 가능)",
+}
+_DATE_COL = {"sales": "거래일자", "orders": "기준일", "price": "수정일자", "purchases": "기준일"}
+
+
+def _salt() -> str:
+    try:
+        return st.secrets["data"].get("customer_key_salt", "")
+    except Exception:
+        return ""
+
+
+choice = st.selectbox("자료 종류", list(_SOURCES.keys()))
+kind = _SOURCES[choice]
+
+up = st.file_uploader(f"{choice} 파일 업로드", type=_EXT[kind], help=_HELP[kind], key=f"up_{kind}")
+
+if up:
+    raw = up.read()
+    try:
+        if kind == "sales":
+            from core.dashboard import sales_data as _mod, store as _store
+            new = _mod.parse_sales(raw)
+        elif kind == "orders":
+            from core.intelligence import orders as _mod
+            salt = _salt()
+            if not salt:
+                st.warning("⚠️ customer_key_salt 시크릿이 없어 고객키·합포박스키는 빈값으로 적재됩니다.")
+            new = _mod.parse_orders(raw, salt=salt or None)
+        elif kind == "price":
+            from core.intelligence import price_history as _mod
+            new = _mod.parse_price_log(raw)
+        else:  # purchases
+            from core.intelligence import purchases as _mod
+            new = _mod.parse_purchases(raw)
+
+        st.success(f"✅ {len(new)}행 인식됨")
+        dc = _DATE_COL[kind]
+        if len(new) and dc in new.columns:
+            st.caption(f"기간: {new[dc].min()} ~ {new[dc].max()}")
+        st.dataframe(new.head(8), use_container_width=True, height=200)
+
+        if st.button("📤 적재", type="primary", use_container_width=True, key=f"ingest_{kind}"):
+            with st.spinner("GitHub에 적재 중..."):
+                if kind == "sales":
+                    result = _store.ingest(pat, repo, raw)
+                else:
+                    result = _mod.ingest(new, pat, repo)
+            st.success(f"✅ 적재 완료: {result}")
+            _load.clear()
+            st.rerun()
+    except KeyError as e:
+        st.error(f"필수 컬럼을 찾을 수 없습니다: {e}. 헤더가 깨졌을 수 있어요 — 원본 파일 1행을 확인해주세요.")
+    except Exception as e:
+        st.error(f"처리 오류: {e}")
+        st.exception(e)
