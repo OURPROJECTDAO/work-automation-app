@@ -199,7 +199,7 @@ k3.metric("판매 채널 수", f"{len(bd)}")
 
 show = bd.drop(columns=["_상호명"]).copy()
 st.dataframe(
-    show, use_container_width=True, hide_index=True,
+    show, width="stretch", hide_index=True,
     column_config={
         "채널": st.column_config.TextColumn(width="medium"),
         "마진율(%)": st.column_config.NumberColumn("마진율(%)", format="%.2f",
@@ -281,7 +281,7 @@ else:
             for c in disp.columns:
                 disp[c] = [f"{int(v):,} ({cnt.loc[i, c]}M)" if pd.notna(v) else "—"
                            for i, v in zip(disp.index, disp[c])]
-            st.dataframe(disp, use_container_width=True)
+            st.dataframe(disp, width="stretch")
             st.caption("ⓘ x=그달 실현마진율(순이익÷매입가) · y=그달 판매량(낱개) · 점=월. "
                        "왼쪽 위로 갈수록 ‘마진 낮음 + 많이 팔림’. "
                        "품절·계절·행사는 보정 안 함 — 아래로 튄 점은 품절일 수 있으니 직접 판단.")
