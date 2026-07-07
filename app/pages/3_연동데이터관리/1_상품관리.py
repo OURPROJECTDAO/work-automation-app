@@ -110,14 +110,14 @@ if uploaded:
 
         col_preview, col_info = st.columns([3, 1])
         with col_preview:
-            st.dataframe(df.head(8), use_container_width=True, height=200)
+            st.dataframe(df.head(8), width="stretch", height=200)
         with col_info:
             if df.shape[1] >= 15:
                 st.metric("관리코드 컬럼", df.columns[4])
                 st.metric("박스재고 컬럼", df.columns[14])
             st.metric("전체 상품 수", len(df))
 
-        if st.button("📤 업로드 & 저장", type="primary", use_container_width=True):
+        if st.button("📤 업로드 & 저장", type="primary", width="stretch"):
             token = _get_pat()
             if not token:
                 st.error("GITHUB_PAT 시크릿이 설정되지 않았습니다.")
