@@ -327,7 +327,7 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
             #   원본을 inlineStr로 변질시켜 업로더가 거부 → 비활성화. '전체 교체'(업로드 바이트 verbatim)만.
             native_raw = cfg.get("price_form", {}).get("mode") == "filter"
             b1, b2 = st.columns(2)
-            if b1.button("전체 교체 저장", type="primary", use_container_width=True,
+            if b1.button("전체 교체 저장", type="primary", width="stretch",
                          help="최신 전체 다운로드로 덮어쓰기 (신규+가격변동 반영)"
                               + ("" if multi else " + 원본양식 저장")):
                 meta = _commit_listing(key, new_recs)
@@ -340,7 +340,7 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
                            "(신규만 추가=openpyxl 저장이 원본을 inlineStr로 변질 → 업로드 거부)"
                            if native_raw else
                            "기존 유지 + 새 상품번호만 병합 (기존 상품의 가격변동은 미반영 → 갱신은 '전체 교체')")
-            if b2.button("신규만 추가", use_container_width=True,
+            if b2.button("신규만 추가", width="stretch",
                          disabled=native_raw, help=_merge_help):
                 cur, _ = _load_listing(key)
                 merged, added = cmm.merge_listing(cur or [], new_recs)
@@ -501,7 +501,7 @@ filter_sig = hash((tuple(sorted(pick)), only_under, only_over, min_stock, sales_
 
 event = st.dataframe(
     view_reset[DISPLAY],
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     on_select="rerun",
     selection_mode="multi-row",
@@ -527,11 +527,11 @@ dc1.download_button(
     data=csv_buf.getvalue().encode("utf-8-sig"),
     file_name=f"{channel}_마진모니터.csv",
     mime="text/csv",
-    use_container_width=True,
+    width="stretch",
 )
 
 if dc2.button(f"🛠️ 가격 일괄변경 양식 생성 (선택 {len(sel_pids)}건)",
-              type="primary", use_container_width=True, disabled=(len(sel_pids) == 0)):
+              type="primary", width="stretch", disabled=(len(sel_pids) == 0)):
     pf = cfg.get("price_form")
     row_by = {r["상품번호"]: r for r in rows}
     rec_by = {r["상품번호"]: r for r in recs}
@@ -602,10 +602,10 @@ if form:
         st.download_button(
             "⬇️ 가격 일괄변경 양식 다운로드 (.xlsx)",
             data=form["bytes"], file_name=form["name"], mime=_XLSX_MIME,
-            use_container_width=True,
+            width="stretch",
         )
         with st.expander(f"변경 미리보기 ({form['kept']}건)", expanded=True):
-            st.dataframe(pd.DataFrame(form["preview"]), use_container_width=True, hide_index=True,
+            st.dataframe(pd.DataFrame(form["preview"]), width="stretch", hide_index=True,
                          column_config={
                              "현재판매가": st.column_config.NumberColumn(format="localized"),
                              "현재할인": st.column_config.NumberColumn(format="localized"),
@@ -677,7 +677,7 @@ else:
                     "새 기준(%) ✏️", min_value=0.0, max_value=100.0, step=0.1, format="%.1f",
                     help="직접 수정 가능. 0.1%p 단위. 비우면 그 행은 저장 안 함."),
             },
-            hide_index=True, use_container_width=True,
+            hide_index=True, width="stretch",
             key=f"bl_editor_{key}_{st.session_state['cmm_tblver']}",
         )
         st.caption(f"적용 대상 **{len(_disp)} 관리코드** · 이 채널({_bcol}) 컬럼만 수정 · 새 기준 = 입력값(0.1%p 반올림 저장)")
@@ -735,7 +735,7 @@ else:
                 help="권장가 칸에 표시될 문구. 예: 마진율 민감 상품 / 배송비 미포함 17000원. "
                      "비우고 저장하면 제한 해제(빈 채로 두면 등록 안 함)."),
         },
-        hide_index=True, use_container_width=True,
+        hide_index=True, width="stretch",
         key=f"fl_editor_{key}_{st.session_state['cmm_tblver']}",
     )
     st.caption(f"선택 **{len(_fdisp)} 관리코드** · 제한은 전 채널 공통(margin_floor) · 입력한 행만 등록")
