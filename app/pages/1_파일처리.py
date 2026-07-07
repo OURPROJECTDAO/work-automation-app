@@ -70,7 +70,7 @@ with tab_basic:
             st.warning("등록된 워크플로우 없음")
 
     if uploaded and workflow_name:
-        if st.button("▶ 실행", type="primary", use_container_width=True, key="basic_run"):
+        if st.button("▶ 실행", type="primary", width="stretch", key="basic_run"):
             with st.spinner("처리 중..."):
                 try:
                     with tempfile.TemporaryDirectory() as tmp:
@@ -124,7 +124,7 @@ with tab_basic:
             data=res["result_bytes"],
             file_name=res["result_name"],
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
             key="basic_result_dl",
         )
         if res["invoice_bytes"]:
@@ -133,7 +133,7 @@ with tab_basic:
                 data=res["invoice_bytes"],
                 file_name=f"★★송장{res['mmdd']}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
+                width="stretch",
                 key="basic_invoice_dl",
             )
 
@@ -153,7 +153,7 @@ with tab_cy:
                                 help="스마트스토어 배송비. 없으면 스마트스토어 G=선결제비")
 
     if f_baeju:
-        if st.button("▶ 실행", type="primary", use_container_width=True, key="cy_run"):
+        if st.button("▶ 실행", type="primary", width="stretch", key="cy_run"):
             with st.spinner("처리 중..."):
                 try:
                     out, stats, sheets, _, _ = cy.run(
@@ -193,7 +193,7 @@ with tab_cy:
             )
             st.dataframe(
                 pd.DataFrame(anomalies)[["시트", "관리코드", "상품명", "신호", "확신"]],
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
             st.caption(
                 "낱개로 파는 상품인데 소분목록(낱개코드→원코드)에 없으면 전체 시트에 "
@@ -206,7 +206,7 @@ with tab_cy:
             data=res["bytes"],
             file_name=res["name"],
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
             key="cy_result_dl",
         )
 
@@ -357,7 +357,7 @@ with tab_order:
             data=archive_bytes,
             file_name=f"★★발주자료{today}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
             key="dl_archive",
         )
 
@@ -432,7 +432,7 @@ with tab_order:
             data=result_bytes,
             file_name=f"물류팀_{today}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
             key="dl_result",
         )
 
