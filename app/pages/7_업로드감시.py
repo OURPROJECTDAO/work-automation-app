@@ -118,7 +118,7 @@ k3.metric("품절처리필요", f"{sold_any:,}", help="재고0인데 채널엔 �
 st.markdown("**채널별 미업로드 / 품절처리 / 업로드제외 건수**")
 sdf = pd.DataFrame(um.channel_summary(rows))[
     ["label", "업로드필요", "품절처리필요", "업로드제외"]].rename(columns={"label": "채널"})
-st.dataframe(sdf, hide_index=True, use_container_width=True,
+st.dataframe(sdf, hide_index=True, width="stretch",
              column_config={"업로드필요": st.column_config.NumberColumn(format="localized"),
                             "품절처리필요": st.column_config.NumberColumn(format="localized"),
                             "업로드제외": st.column_config.NumberColumn(format="localized")})
@@ -134,7 +134,7 @@ def _toggle_all_channels():
 
 
 tcol, _ = st.columns([1, 5])
-tcol.button("전체 선택/해제", on_click=_toggle_all_channels, use_container_width=True)
+tcol.button("전체 선택/해제", on_click=_toggle_all_channels, width="stretch")
 ch_boxes = st.columns(len(um.CHANNELS))
 for (k, label, _au), col in zip(um.CHANNELS, ch_boxes):
     col.checkbox(label, value=True, key=f"um_ch_{k}")
@@ -192,7 +192,7 @@ filter_sig = hash((tuple(selected),
                    min_stock, min_amount, len(view_reset)))
 event = st.dataframe(
     disp,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     on_select="rerun",
     selection_mode="multi-row",
@@ -279,9 +279,9 @@ else:
     st.write(f"대상: **{len(sel_codes)}개 상품 × {len(selected)}채널 = {len(pairs)}쌍**  ({chips})")
     with st.expander(f"대상 (상품코드 × 채널) 미리보기 — {len(pairs)}쌍"):
         st.dataframe(pd.DataFrame([{"상품코드": sc, "채널": um.CHANNEL_LABEL[ch]} for sc, ch in pairs]),
-                     hide_index=True, use_container_width=True)
+                     hide_index=True, width="stretch")
     bcol1, bcol2 = st.columns(2)
-    if bcol1.button("🚫 업로드제외 등록", use_container_width=True, type="primary"):
+    if bcol1.button("🚫 업로드제외 등록", width="stretch", type="primary"):
         ok, err = _commit_skip(um.build_skip_text(skip_set | set(pairs)),
                                f"upload-monitor: 업로드제외 등록 {len(pairs)}쌍")
         if ok:
@@ -290,7 +290,7 @@ else:
             st.rerun()
         else:
             st.error(err)
-    if bcol2.button("↩️ 업로드제외 해제 (다시 업로드모드)", use_container_width=True):
+    if bcol2.button("↩️ 업로드제외 해제 (다시 업로드모드)", width="stretch"):
         ok, err = _commit_skip(um.build_skip_text(skip_set - set(pairs)),
                                f"upload-monitor: 업로드제외 해제 {len(pairs)}쌍")
         if ok:
