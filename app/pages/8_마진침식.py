@@ -253,7 +253,7 @@ with tabA:
             _disp = df.copy()
             for col in ("매입Δ%", "마진율", "기준마진율", "미달폭"):
                 _disp[col] = (_disp[col].astype(float) * 100).round(1)
-            st.dataframe(_disp, hide_index=True, use_container_width=True, height=440,
+            st.dataframe(_disp, hide_index=True, width="stretch", height=440,
                          column_config={
                              "월손실액": st.column_config.NumberColumn("월손실액(원)", format="%d",
                                           help="매입상승분 × 월 판매낱개 — 아직 못 올려 흡수 중인 금액"),
@@ -295,7 +295,7 @@ with tabB:
             c[1].metric("월 손실액 합", f"{bdf['월손실액'].sum():,.0f} 원")
             c[2].metric("검토 필요", f"{len(suspect)} 건", help="Δ%>60% — 관리코드 충돌/단위/극과거 master 의심")
             _b = bdf.copy(); _b["입고Δ%"] = (_b["입고Δ%"] * 100).round(0)
-            st.dataframe(_b, hide_index=True, use_container_width=True, height=440,
+            st.dataframe(_b, hide_index=True, width="stretch", height=440,
                          column_config={
                              "master매입": st.column_config.NumberColumn(format="%d"),
                              "실입고가": st.column_config.NumberColumn(format="%d"),
@@ -311,7 +311,7 @@ with tabB:
                     sdf = pd.DataFrame([{"관리코드": k, "상품명": name_lookup.get(k, ""),
                                          "master매입": v["master매입"], "실입고가": v["실입고가"],
                                          "입고Δ%": round(v["입고Δ%"] * 100)} for k, v in suspect.items()])
-                    st.dataframe(sdf, hide_index=True, use_container_width=True)
+                    st.dataframe(sdf, hide_index=True, width="stretch")
 
 # ── 탭 C: 실판매 이상 ──
 with tabC:
@@ -336,7 +336,7 @@ with tabC:
             _c = cdf.copy()
             for col in ("마진율", "기준마진율", "미달폭"):
                 _c[col] = (_c[col].astype(float) * 100).round(1)
-            st.dataframe(_c, hide_index=True, use_container_width=True, height=440,
+            st.dataframe(_c, hide_index=True, width="stretch", height=440,
                          column_config={
                              "판매금액": st.column_config.NumberColumn(format="%d"),
                              "판매이익": st.column_config.NumberColumn(format="%d"),
