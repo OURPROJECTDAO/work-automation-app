@@ -50,10 +50,16 @@ def _commit_csv(path: str, df: pd.DataFrame, message: str):
     return True
 
 
-def _edit_with_search(df, name, key_col=None, height_cap=560):
+def _edit_with_search(df, name, key_col=None, height_cap=560, save_label="💾 저장(커밋)"):
     """검색 필터 + 인라인 편집 + 키 무관 merge-back.
     필터가 걸려 있으면 필터된 행만 편집 대상이 되고, 필터 밖 행은 그대로 보존된다.
-    (부분집합으로 전체 CSV를 덮어써 나머지가 날아가는 사고 방지.)"""
+    (부분집합으로 전체 CSV를 덮어써 나머지가 날아가는 사고 방지.)
+
+    data_editor + 저장 버튼을 st.form으로 묶는다: 폼 밖에 버튼을 두면 방금 입력한
+    마지막 셀(예: 새로 추가한 행의 원코드)이 위젯 상태에 아직 커밋되기 전에 버튼
+    클릭이 먼저 처리되어 "한 번에 저장 안 됨"(반영 전 상태로 커밋 → 재클릭해야 반영)
+    현상이 생긴다. 폼 제출 버튼은 모든 위젯 값을 한 번에 확정 후 처리하므로 이 경합이 없다.
+    """
     import pandas as _pd
     q = st.text_input("🔍 검색 (모든 열 대상)", key=f"search_{name}",
                       placeholder="코드·이름 일부 입력 · 비우면 전체 편집")
@@ -67,14 +73,16 @@ def _edit_with_search(df, name, key_col=None, height_cap=560):
         mask = _pd.Series(True, index=df.index)
         view = df
     h = min(38 * (len(view) + 1) + 3, height_cap)
-    edited = st.data_editor(view, use_container_width=True, num_rows="dynamic",
-                            key=f"editor_{name}", height=h)
+    with st.form(key=f"form_{name}", clear_on_submit=False):
+        edited = st.data_editor(view, width="stretch", num_rows="dynamic",
+                                key=f"editor_{name}", height=h)
+        submitted = st.form_submit_button(save_label, type="primary")
     result = _pd.concat([df[~mask], edited], ignore_index=True)
     if key_col and key_col in result.columns:
         result = result[result[key_col].astype(str).str.strip() != ""].reset_index(drop=True)
     else:
         result = result.dropna(how="all").reset_index(drop=True)
-    return result
+    return result, submitted
 
 def _section(title: str, filename: str, expected_cols: list[str],
              commit_label: str, key_col: str = "관리코드"):
@@ -86,8 +94,9 @@ def _section(title: str, filename: str, expected_cols: list[str],
     df = pd.read_csv(local, encoding="utf-8-sig", dtype=str).fillna("")
     st.caption(f"현재 {len(df)}행")
 
-    save_df = _edit_with_search(df, filename, key_col)
-    if st.button(f"💾 {title} 저장(커밋)", key=f"save_{filename}", type="primary"):
+    save_df, submitted = _edit_with_search(df, filename, key_col,
+                                            save_label=f"💾 {title} 저장(커밋)")
+    if submitted:
         if _commit_csv(f"reference/{filename}", save_df, commit_label):
             st.success(f"✅ {len(save_df)}건 저장 — 1~2분 후 재배포 반영.")
 
@@ -105,7 +114,7 @@ def _section(title: str, filename: str, expected_cols: list[str],
                 st.error(f"필수 컬럼 누락: {miss} · 현재 컬럼: {list(new.columns)}")
             else:
                 st.success(f"미리보기 {len(new)}행")
-                st.dataframe(new.head(20), use_container_width=True)
+                st.dataframe(new.head(20), width="stretch")
                 if st.button(f"💾 {title} 전체 교체 커밋", key=f"saveup_{filename}"):
                     if _commit_csv(f"reference/{filename}", new, commit_label):
                         st.success("✅ 전체 교체 완료 — 1~2분 후 반영.")
