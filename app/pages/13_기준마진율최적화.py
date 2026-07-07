@@ -409,7 +409,7 @@ with tab_wl:
             with st.expander(f"🔒 가격 제한(마진 민감) {len(lock_v):,}건 — 가격 못 움직임(채널마진모니터 제한상품) · 기준마진율 변경 대상 아님"):
                 _lshow = lock_v.sort_values("월순이익", ascending=False)[
                     ["관리코드", "상품명", "채널", "현재마진", "베이스", "월순이익", "제한내용"]]
-                st.dataframe(_lshow, use_container_width=True, hide_index=True,
+                st.dataframe(_lshow, width="stretch", hide_index=True,
                              column_config={
                                  "현재마진": st.column_config.NumberColumn("현재(%)", format="%.1f"),
                                  "베이스": st.column_config.NumberColumn("베이스(%)", format="%.1f"),
@@ -422,7 +422,7 @@ with tab_wl:
             with st.expander(f"🔴 변화 없음 · 가격 외 요인 {len(none_v):,}건 — 이미 싼데 안 팔림(노출·상세·광고/단종 판단)"):
                 _nshow = none_v.sort_values("월순이익", ascending=False)[
                     ["플래그", "목표", "관리코드", "상품명", "채널", "현재마진", "베이스", "월순이익", "사유"]]
-                st.dataframe(_nshow, use_container_width=True, hide_index=True,
+                st.dataframe(_nshow, width="stretch", hide_index=True,
                              column_config={
                                  "현재마진": st.column_config.NumberColumn("현재(%)", format="%.1f"),
                                  "베이스": st.column_config.NumberColumn("베이스(%)", format="%.1f"),
@@ -447,7 +447,7 @@ with tab_wl:
 
         styled = show.style.map(_color_dir, subset=["변화"])
         ev = st.dataframe(
-            styled, use_container_width=True, hide_index=True,
+            styled, width="stretch", hide_index=True,
             on_select="rerun", selection_mode="multi-row",
             column_config={
                 "플래그": st.column_config.TextColumn(width="small"),
@@ -482,7 +482,7 @@ with tab_wl:
             prv["반영"] = ["✔ cmm" if (ch in _BCOL and pd.notna(bm)) else "기록만"
                           for ch, bm in zip(sel_df["채널"], sel_df["기준마진율"])]
             st.caption("↓ 현 기준마진율(타깃)에 **변화량(Δ)**을 더해 갱신합니다(기준값 없는 행은 기록만). 확인 후 버튼.")
-            st.dataframe(prv, hide_index=True, use_container_width=True,
+            st.dataframe(prv, hide_index=True, width="stretch",
                          column_config={"기준마진율": st.column_config.NumberColumn("기준(현)%", format="%.2f"),
                                         "새기준(%)": st.column_config.NumberColumn("새기준%", format="%.2f")})
 
@@ -581,7 +581,7 @@ with tab_ms:
                                "측정전_월순이익", "측정후_월순이익", "측정전_월볼륨",
                                "측정후_월볼륨", "측정후마진", "측정일수", "post_개월", "플래그"]].copy()
                 rev = st.dataframe(
-                    rshow, use_container_width=True, hide_index=True,
+                    rshow, width="stretch", hide_index=True,
                     on_select="rerun", selection_mode="multi-row",
                     column_config={
                         "결과": st.column_config.TextColumn(width="small"),
@@ -622,7 +622,7 @@ with tab_ms:
                     st.caption("측정일수 = 적재 최신거래일 − 결정일. 다음 월 매출이 적재되면 자동으로 측정 가능으로 넘어옵니다.")
                     st.dataframe(
                         wait[["관리코드", "상품명", "채널", "액션", "측정일수", "경과일", "post_개월", "플래그"]],
-                        hide_index=True, use_container_width=True,
+                        hide_index=True, width="stretch",
                         column_config={"측정일수": st.column_config.NumberColumn("측정일수(적재)", format="%d")})
 
             st.divider()
@@ -642,7 +642,7 @@ with tab_ms:
                 mshow = mv[["결과", "관리코드", "채널", "액션", "_적용여부",
                             "측정전_월순이익", "측정후_월순이익", "측정일", "ts"]].copy()
                 mev = st.dataframe(
-                    mshow, use_container_width=True, hide_index=True,
+                    mshow, width="stretch", hide_index=True,
                     on_select="rerun", selection_mode="multi-row",
                     column_config={
                         "결과": st.column_config.TextColumn(width="small"),
@@ -677,7 +677,7 @@ with tab_ms:
                             원복후=round((cur + rev_delta) * 100, 2) if cur is not None else float("nan")))
                     if prev_rows:
                         st.caption("↩ 되돌림 대상(기준마진율 원복) — 현 타깃에 **−Δ**(원래 변화 역가산):")
-                        st.dataframe(pd.DataFrame(prev_rows), hide_index=True, use_container_width=True,
+                        st.dataframe(pd.DataFrame(prev_rows), hide_index=True, width="stretch",
                                      column_config={"현기준": st.column_config.NumberColumn("현 기준%", format="%.2f"),
                                                     "원복후": st.column_config.NumberColumn("원복 후%", format="%.2f")})
 
