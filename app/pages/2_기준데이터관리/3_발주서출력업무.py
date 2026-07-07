@@ -111,7 +111,7 @@ def _edit_with_search(df, name, key_col=None, height_cap=560):
         mask = _pd.Series(True, index=df.index)
         view = df
     h = min(38 * (len(view) + 1) + 3, height_cap)
-    edited = st.data_editor(view, use_container_width=True, num_rows="dynamic",
+    edited = st.data_editor(view, width="stretch", num_rows="dynamic",
                             key=f"editor_{name}", height=h)
     result = _pd.concat([df[~mask], edited], ignore_index=True)
     if key_col and key_col in result.columns:
@@ -144,7 +144,7 @@ for tab, (tab_name, cfg) in zip(tabs, _REF_CONFIG.items()):
             # 검색어 비우면 전체 편집표(무거우면 검색해서 좁혀 편집).
             save_df = _edit_with_search(df, tab_name, cfg["key_col"])
             if st.button(f"💾 {tab_name} 저장", key=f"save_{tab_name}",
-                         type="primary", use_container_width=True):
+                         type="primary", width="stretch"):
                 _save_csv(token, cfg["filename"], save_df,
                           f"ref: {tab_name} 갱신")
                 st.success(f"✅ {len(save_df)}건 저장 완료")
@@ -168,7 +168,7 @@ for tab, (tab_name, cfg) in zip(tabs, _REF_CONFIG.items()):
             # 일반 : 검색 + 인라인 편집 (필터된 행만 편집, 나머지 보존)
             save_df = _edit_with_search(df, tab_name, cfg["key_col"])
             if st.button(f"💾 {tab_name} 저장", key=f"save_{tab_name}",
-                         type="primary", use_container_width=True):
+                         type="primary", width="stretch"):
                 _save_csv(token, cfg["filename"], save_df,
                           f"ref: {tab_name} 갱신")
                 st.success(f"✅ {len(save_df)}건 저장 완료")
