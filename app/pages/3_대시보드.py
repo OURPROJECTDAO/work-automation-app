@@ -239,7 +239,7 @@ with tab_group:
                 "그룹": [assigned[s] for s in shown],
             })
             edited = st.data_editor(
-                tbl, key="grp_editor", use_container_width=True, hide_index=True, num_rows="fixed",
+                tbl, key="grp_editor", width="stretch", hide_index=True, num_rows="fixed",
                 column_config={
                     "상호명": st.column_config.TextColumn(disabled=True),
                     "매출": st.column_config.NumberColumn(format="%d", disabled=True),
@@ -308,7 +308,7 @@ with tab_cls:
             shown["매출"] = shown["매출"].astype(int)
             shown["구분지정"] = ""
             edited = st.data_editor(
-                shown, key="cls_editor", use_container_width=True, hide_index=True, num_rows="fixed",
+                shown, key="cls_editor", width="stretch", hide_index=True, num_rows="fixed",
                 column_config={
                     "관리코드": st.column_config.TextColumn(disabled=True),
                     "상품명": st.column_config.TextColumn(disabled=True),
@@ -476,7 +476,7 @@ def _render_dashboard(pat: str, repo: str) -> None:
                 _picks["포함"] = st.session_state["dash_store_bulk"]
                 ed = st.data_editor(
                     _picks, key=f"dash_store_pick_{st.session_state['dash_store_ver']}",
-                    use_container_width=True, hide_index=True, num_rows="fixed",
+                    width="stretch", hide_index=True, num_rows="fixed",
                     column_config={
                         "포함": st.column_config.CheckboxColumn(default=True),
                         "그룹": st.column_config.TextColumn(disabled=True),
@@ -525,7 +525,7 @@ def _render_dashboard(pat: str, repo: str) -> None:
             st.subheader(f"{d1} × {d2} 매출 — {min(n, 100):,}행{note}")
             cfg = {c: st.column_config.NumberColumn(format="localized")
                    for c in out.columns if c != d1}
-            st.dataframe(out, use_container_width=True, hide_index=True, column_config=cfg,
+            st.dataframe(out, width="stretch", hide_index=True, column_config=cfg,
                          height=min(620, 80 + 36 * min(len(out), 28)))
             st.download_button("표 CSV 내려받기", out.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"매출_{d1}_x_{d2}.csv", mime="text/csv", key="dl_pivot_sales")
@@ -548,7 +548,7 @@ def _render_dashboard(pat: str, repo: str) -> None:
                 chart.index = chart[dim_label]
             st.line_chart(chart["매출"], height=260)
             agg["매출"] = agg["매출"].round().astype("int64")
-            st.dataframe(agg, use_container_width=True, hide_index=True,
+            st.dataframe(agg, width="stretch", hide_index=True,
                          height=min(420, 80 + 36 * min(len(agg), 20)),
                          column_config={"매출": st.column_config.NumberColumn(format="localized")})
             fname, dlkey = f"매출_{dim_label}.csv", "dl_time"
@@ -561,7 +561,7 @@ def _render_dashboard(pat: str, repo: str) -> None:
             agg.insert(0, "순위", range(1, len(agg) + 1))
             st.subheader(f"{dim_label}별 매출 — 총 {len(agg):,}개")
             agg["매출"] = agg["매출"].round().astype("int64")
-            st.dataframe(agg, use_container_width=True, hide_index=True,
+            st.dataframe(agg, width="stretch", hide_index=True,
                          height=min(560, 80 + 36 * min(len(agg), 30)),
                          column_config={"매출": st.column_config.NumberColumn(format="localized")})
             fname, dlkey = f"매출_{dim_label}별.csv", "dl_cat"
@@ -609,7 +609,7 @@ def _render_dashboard(pat: str, repo: str) -> None:
         st.subheader(f"{d1} × {d2} 이익{suf} — {min(n, 100):,}행{note}")
         cfg = {c: st.column_config.NumberColumn(format="localized")
                for c in out.columns if c != d1}
-        st.dataframe(out, use_container_width=True, hide_index=True, column_config=cfg,
+        st.dataframe(out, width="stretch", hide_index=True, column_config=cfg,
                      height=min(620, 80 + 36 * min(len(out), 28)))
         st.download_button("표 CSV 내려받기", out.to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"이익_{d1}_x_{d2}{'_보정' if unit == 2500 else ''}.csv",
@@ -655,7 +655,7 @@ def _render_dashboard(pat: str, repo: str) -> None:
     for c in ["매출", "매입가", "택배비", "이익", "송장"]:
         show[c] = show[c].round().astype("int64")
     _num = st.column_config.NumberColumn(format="localized")
-    st.dataframe(show, use_container_width=True, hide_index=True,
+    st.dataframe(show, width="stretch", hide_index=True,
                  height=min(520, 80 + 36 * min(len(show), 24)),
                  column_config={"매출": _num, "매입가": _num, "택배비": _num,
                                 "이익": _num, "송장": _num,
@@ -725,7 +725,7 @@ def _render_online_margin(pat: str, repo: str) -> None:
         _picks["포함"] = st.session_state["om_store_bulk"]
         ed = st.data_editor(
             _picks, key=f"om_store_pick_{st.session_state['om_store_ver']}",
-            use_container_width=True, hide_index=True, num_rows="fixed",
+            width="stretch", hide_index=True, num_rows="fixed",
             column_config={
                 "포함": st.column_config.CheckboxColumn(default=True),
                 "거래처": st.column_config.TextColumn(disabled=True),
@@ -821,7 +821,7 @@ def _render_online_margin(pat: str, repo: str) -> None:
         xt = pd.concat([xt, pd.DataFrame([totrow])], ignore_index=True)
         st.subheader(f"{dim_label} × {d2_label} 마진율(%) — {min(len(margin), 100):,}행{note}")
         cfg = {c: st.column_config.NumberColumn(format="%.2f") for c in xt.columns if c != rcol}
-        st.dataframe(xt, use_container_width=True, hide_index=True, column_config=cfg,
+        st.dataframe(xt, width="stretch", hide_index=True, column_config=cfg,
                      height=min(620, 80 + 36 * min(len(xt), 18)))
         st.download_button("표 CSV 내려받기", xt.to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"온라인마진_{dim_label}_x_{d2_label}.csv",
@@ -850,7 +850,7 @@ def _render_online_margin(pat: str, repo: str) -> None:
         out[c] = out[c].round().astype("int64")
     cfg = {c: st.column_config.NumberColumn(format="localized")
            for c in ["매출", "매입가", "택배비", "순이익", "수량"]}
-    st.dataframe(out, use_container_width=True, hide_index=True, column_config=cfg,
+    st.dataframe(out, width="stretch", hide_index=True, column_config=cfg,
                  height=min(620, 80 + 36 * min(len(out), 16)))
     st.download_button("표 CSV 내려받기", out.to_csv(index=False).encode("utf-8-sig"),
                        file_name=f"온라인_상품마진_{dim_label}.csv", mime="text/csv", key="om_dl")
