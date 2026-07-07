@@ -286,7 +286,7 @@ st.caption(f"**등재 {n_up}/{len(present)}채널** —  {strip}")
 if listing_rows:
     ldf = pd.DataFrame(listing_rows)
     st.dataframe(
-        ldf, use_container_width=True, hide_index=True,
+        ldf, width="stretch", hide_index=True,
         column_config={
             "채널": st.column_config.TextColumn(width="small"),
             "리스팅(상품번호)": st.column_config.TextColumn(width="small"),
@@ -341,7 +341,7 @@ else:
             k3.metric("판매 채널 수", f"{len(bd)}")
             show = bd.drop(columns=["_상호명"])
             st.dataframe(
-                show, use_container_width=True, hide_index=True,
+                show, width="stretch", hide_index=True,
                 column_config={
                     "마진율(%)": st.column_config.NumberColumn("실현마진율(%)", format="%.2f",
                                                             help="순이익 ÷ 매입가 (택배 실배분)"),
@@ -407,7 +407,7 @@ if prodcode and not (hist := load_price_hist(pat, repo)).empty:
         hsub["수정일자"] = pd.to_datetime(hsub["수정일자"]).dt.date.astype(str)
         with st.expander(f"🧾 장부 매입가 변경 이력 (수정로그 · 최근 {len(hsub)}건)"):
             st.dataframe(hsub[["수정일자", "수정전", "수정후"]], hide_index=True,
-                         use_container_width=True,
+                         width="stretch",
                          column_config={
                              "수정전": st.column_config.NumberColumn(format="localized"),
                              "수정후": st.column_config.NumberColumn(format="localized"),
