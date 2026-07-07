@@ -207,7 +207,7 @@ def _show(table: pd.DataFrame, key: str, show_dead_cols=False):
             "일소진(박스)", "일소진액(매입)", "월낱개", "월소진액(매입)", "소진예측일", "예상소진일자",
             "리드타임", "리드출처", "최근입고일", "입고횟수", "재고금액", "재발주필요"]
     view = table[cols].copy()
-    st.dataframe(view, use_container_width=True, hide_index=True,
+    st.dataframe(view, width="stretch", hide_index=True,
                  column_config={
                      "재고금액": st.column_config.NumberColumn(format="%d"),
                      "일소진액(매입)": st.column_config.NumberColumn(format="%d"),
