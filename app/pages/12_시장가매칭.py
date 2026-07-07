@@ -129,7 +129,7 @@ with tab1:
     show = view[["매칭상태", "name", "spec", "box_price", "unit_price", "ps_page", "ps_goid"]].rename(
         columns={"name": "상품명", "spec": "규격", "box_price": "박스가",
                  "unit_price": "개당가", "ps_page": "페이지"})
-    st.dataframe(show, use_container_width=True, hide_index=True,
+    st.dataframe(show, width="stretch", hide_index=True,
                  column_config={"박스가": st.column_config.NumberColumn(format="%d"),
                                 "개당가": st.column_config.NumberColumn(format="%d")})
 
@@ -186,7 +186,7 @@ with tab2:
             st.markdown("**후보 (점수 높은 순)** — 맞는 것을 고르세요. 중복등록이면 여러 개 체크.")
             ct = pd.DataFrame(cands)
             ct = ct[["점수", "관리코드", "상품명", "규격", "매입단가", "매출단가"]]
-            st.dataframe(ct, use_container_width=True, hide_index=True,
+            st.dataframe(ct, width="stretch", hide_index=True,
                          column_config={"매입단가": st.column_config.NumberColumn(format="%d"),
                                         "매출단가": st.column_config.NumberColumn(format="%d")})
             for c in cands:
@@ -237,7 +237,7 @@ with tab3:
                 f"미매칭 {(matched_tbl['상태'] == '미매칭').sum()}")
     only_matched = st.checkbox("매칭된 것만 보기", value=False, key="only_m")
     tbl = matched_tbl[matched_tbl["상태"] == "매칭"] if only_matched else matched_tbl
-    st.dataframe(tbl, use_container_width=True, hide_index=True,
+    st.dataframe(tbl, width="stretch", hide_index=True,
                  column_config={"박스가": st.column_config.NumberColumn(format="%d"),
                                 "개당가": st.column_config.NumberColumn(format="%d"),
                                 "우리_매입단가": st.column_config.NumberColumn(format="%d"),
@@ -258,7 +258,7 @@ with tab3:
         else:
             mm = mm[["status", "nadl_name", "nadl_spec", "관리코드", "updated", "ps_goid"]].rename(
                 columns={"status": "상태", "nadl_name": "nadl_상품명", "nadl_spec": "nadl_규격"})
-            st.dataframe(mm, use_container_width=True, hide_index=True)
+            st.dataframe(mm, width="stretch", hide_index=True)
             st.caption("삭제하면 해당 매핑이 제거됩니다('없음'이면 다시 검토 큐로 돌아옴).")
             del_goid = st.text_input("삭제할 ps_goid", key="del_goid").strip()
             if st.button("선택 매핑 삭제", disabled=not del_goid, key="del_btn"):
