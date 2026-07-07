@@ -79,7 +79,7 @@ if rows:
     fig.update_xaxes(title=None, tickformat="%Y-%m")
     fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
                       legend_title_text="", legend=dict(orientation="h", y=1.12))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 UP = {"direct": "직접 업로드", "auto": "자동(부산물)", "planned": "예정"}
 tbl = pd.DataFrame([{
@@ -92,7 +92,7 @@ tbl = pd.DataFrame([{
     "적립 방식": UP[r["upload"]],
     "설명": r["note"],
 } for r in cov])
-st.dataframe(tbl, use_container_width=True, hide_index=True)
+st.dataframe(tbl, width="stretch", hide_index=True)
 
 st.divider()
 st.subheader("📤 직접 적립")
@@ -150,9 +150,9 @@ if up:
         dc = _DATE_COL[kind]
         if len(new) and dc in new.columns:
             st.caption(f"기간: {new[dc].min()} ~ {new[dc].max()}")
-        st.dataframe(new.head(8), use_container_width=True, height=200)
+        st.dataframe(new.head(8), width="stretch", height=200)
 
-        if st.button("📤 적재", type="primary", use_container_width=True, key=f"ingest_{kind}"):
+        if st.button("📤 적재", type="primary", width="stretch", key=f"ingest_{kind}"):
             with st.spinner("GitHub에 적재 중..."):
                 if kind == "sales":
                     result = _store.ingest(pat, repo, raw)
