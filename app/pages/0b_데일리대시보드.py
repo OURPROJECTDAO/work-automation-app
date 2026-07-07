@@ -439,7 +439,7 @@ def _do_price_change(channel, codes):
             st.download_button(f"⬇️ {channel} 가격변경 시트 다운로드 (.xlsx)",
                                _form["bytes"], _form["name"], type="primary", key="d_pc_dl")
             if _form.get("preview"):
-                st.dataframe(pd.DataFrame(_form["preview"]), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(_form["preview"]), hide_index=True, width="stretch")
 
 
 def _to_xlsx(df: pd.DataFrame, title: str) -> bytes:
@@ -545,7 +545,7 @@ else:
         if _log.empty:
             st.caption("입고 로그가 아직 없습니다.")
         else:
-            st.dataframe(_log.tail(50).iloc[::-1], hide_index=True, use_container_width=True)
+            st.dataframe(_log.tail(50).iloc[::-1], hide_index=True, width="stretch")
 
 ui.section_head("신규 업로드 대상", icon="🆕")
 st.caption("최근 재고가 **새로 들어왔는데(입고·신규등재) 아직 어느 채널에도 안 올라간** 상품 — 신규 업로드 후보. "
@@ -576,7 +576,7 @@ else:
         _ucols = ["관리코드", "상품명", "박스재고", "유형", "이벤트일", "최근매입일", "올릴채널수"]
         _sty = (_nu[_ucols].style
                 .format({"박스재고": "{:,.0f}", "올릴채널수": "{:.0f}"}, na_rep="—"))
-        st.dataframe(_sty, hide_index=True, use_container_width=True, height=320)
+        st.dataframe(_sty, hide_index=True, width="stretch", height=320)
         st.download_button("📥 XLSX", _to_xlsx(_nu[_ucols], "신규업로드대상"),
                            "신규업로드대상.xlsx", key="nu_dl")
         st.caption("→ 채널별 상세 업로드 현황·등록 인계는 **업로드감시** 페이지에서.")
@@ -630,7 +630,7 @@ else:
                     .map(_dir_color, subset=["방향"])
                     .format({"전일가": "{:,.0f}", "금일가": "{:,.0f}",
                              "변동률(%)": "{:.2f}", "박스재고": "{:,.0f}"}, na_rep="—"))
-            st.dataframe(_sty, hide_index=True, use_container_width=True, height=360)
+            st.dataframe(_sty, hide_index=True, width="stretch", height=360)
             st.download_button("📥 XLSX", _to_xlsx(_chg, "가격변동"),
                                "가격변동알림.xlsx", key="pc_dl")
 
@@ -695,7 +695,7 @@ else:
                .rename(columns={"매출": "매출(net)", "마진율": "마진%"}))
         _gsty = _gd.style.format({"매출(net)": "{:,.0f}", "원가": "{:,.0f}", "마진": "{:,.0f}",
                                   "택배(박스)": "{:,.0f}", "마진%": "{:.1f}", "품목수": "{:,.0f}"})
-        st.dataframe(_gsty, hide_index=True, use_container_width=True)
+        st.dataframe(_gsty, hide_index=True, width="stretch")
         _view = st.radio("보기", ["이상치만", "전체"], horizontal=True, key="d_view")
         _show = (anom if _view == "이상치만" else ddf).reset_index(drop=True)
         if _show.empty:
@@ -768,7 +768,7 @@ else:
             for _mrc in _mr_cols:
                 _ccfg[_mrc] = st.column_config.NumberColumn(
                     _mrc, format="%.1f", help="정산 총마진율(판매이익÷판매금액·택배 전). 월 추세 비교용.")
-            _ev = st.dataframe(_disp[_order], hide_index=True, use_container_width=True, height=460,
+            _ev = st.dataframe(_disp[_order], hide_index=True, width="stretch", height=460,
                                on_select="rerun", selection_mode="multi-row", key="d_table",
                                column_config=_ccfg)
             st.download_button("📥 XLSX (전체 이상치)", _to_xlsx(anom, "당일마진이상"),
