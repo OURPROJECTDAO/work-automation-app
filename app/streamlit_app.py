@@ -4,6 +4,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
+import pandas as pd
+# pandas 3.0 + pyarrow arrow-backed 문자열(read_csv)이 특정 네이티브 조합(Cloud 최신 stack)에서
+# SIGSEGV → 문자열 저장소를 python 백엔드로 고정해 크래시 경로 회피 (pitfalls 2026-07-13).
+try:
+    pd.set_option("mode.string_storage", "python")
+except Exception:
+    pass
 from core.ui import inject_css
 
 st.set_page_config(
