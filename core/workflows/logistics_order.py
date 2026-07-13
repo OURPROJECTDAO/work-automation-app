@@ -29,8 +29,10 @@ _REF = Path(__file__).parent.parent.parent / "reference"
 
 # erp관리코드 패턴: XX-XX-XX (각 부분 정확히 2자리) — 구버전 합포 fallback용
 _ERP_CODE_RE = re.compile(r'\d{2}-\d{2}-\d{2}')
-# 어드민옵션 안의 [erp코드] (영숫자·하이픈·점, 포맷 무관) — 합포 감지·분리 1순위 기준
+# 어드민옵션 안의 [erp코드] (영숫자·하이픈·점, 포맷 무관) — 합포 감지·분리 2순위 기준
 _BRACKET_CODE_RE = re.compile(r'\[([A-Z0-9][A-Z0-9.\-]*)\]')
+# 합포 셀의 중첩테이블(tableGridA) 행 경계 보존용 구분자 (parse → split 1순위)
+_SENTINEL = "\x1f"
 
 # ───────────────────────────────────────────────
 # Reference 로딩
@@ -68,12 +70,66 @@ _COLS = ["erp관리코드", "어드민옵션", "총수량", "평균단가",
          "정산금액", "판매처그룹", "선결제택배비", "옵션추가항목1"]
 
 
-def parse_sales_report(file_bytes: bytes) -> pd.DataFrame:
-    """HTML-xls 매출통계 파싱. 노이즈 행 제거 후 실제 데이터 반환."""
-    html = file_bytes.decode("utf-8").replace("\ufeff", "")
-    df = pd.read_html(io.StringIO(html))[0]
+def _extract_cell(td) -> list:
+    """셀 텍스트 추출. 중첩 tableGridA가 있으면 행별 텍스트 리스트, 없으면 [단일 텍스트].
 
-    # 헤더 행 찾기
+    ERP 매출통계 HTML은 합포(다른 상품)를 셀 안 중첩 테이블(tableGridA)의
+    여러 <tr>로 표현한다(코드/상품명이 행 분리). pd.read_html은 이를 이어붙여
+    뭉개므로, 여기서 각 행을 분리 보존해 합포 분리의 정확한 경계로 쓴다.
+    """
+    inner = td.xpath('.//table[contains(@class,"tableGridA")]')
+    if inner:
+        subs = [" ".join(r.itertext()).strip() for r in inner[0].xpath('.//tr')]
+        return subs if subs else [""]
+    return [" ".join(td.itertext()).strip()]
+
+
+def _parse_via_lxml(text: str):
+    """중첩테이블 행 경계를 _SENTINEL로 보존해 파싱. 실패 시 None."""
+    from lxml import html as _lh
+    doc = _lh.fromstring(text)
+    # 본 데이터 테이블 = tableGridA(셀 내부용) 아닌 테이블 중 'erp관리코드' 포함·행 최다
+    main, best = None, 0
+    for tb in doc.xpath("//table"):
+        if "tableGridA" in (tb.get("class") or ""):
+            continue
+        trs = tb.xpath("./tbody/tr | ./tr")
+        if "erp관리코드" in "".join(tb.itertext()) and len(trs) > best:
+            main, best = tb, len(trs)
+    if main is None:
+        return None
+    trs = main.xpath("./tbody/tr | ./tr")
+    parsed = []
+    for tr in trs:
+        tds = tr.xpath("./td")
+        parsed.append([_extract_cell(td) for td in tds]
+                      if len(tds) == len(_COLS) else None)
+    header_idx = None
+    for i, vc in enumerate(parsed):
+        if vc and vc[0] and vc[0][0].strip() == "erp관리코드":
+            header_idx = i
+            break
+    if header_idx is None:
+        return None
+    out = []
+    for vc in parsed[header_idx + 1:]:
+        if vc is None:
+            continue
+        rec = {}
+        for ci, col in enumerate(_COLS):
+            cell = vc[ci]
+            if len(cell) > 1:                 # 합포: 중첩 행들 → sentinel 보존
+                rec[col] = _SENTINEL.join(cell)
+            else:                             # 단일 셀: 빈값은 NaN(fill_management_code 호환)
+                v = cell[0] if cell else ""
+                rec[col] = v if v.strip() != "" else None
+        out.append(rec)
+    return pd.DataFrame(out, columns=_COLS)
+
+
+def _parse_via_readhtml(text: str):
+    """구 방식(pd.read_html). 중첩 경계 보존 못 함 — lxml 실패 시 폴백."""
+    df = pd.read_html(io.StringIO(text))[0]
     header_idx = None
     for i, row in df.iterrows():
         if str(row.iloc[0]).strip() == "erp관리코드":
@@ -81,14 +137,30 @@ def parse_sales_report(file_bytes: bytes) -> pd.DataFrame:
             break
     if header_idx is None:
         raise ValueError("헤더 행(erp관리코드)을 찾을 수 없습니다")
-
     data = df.iloc[header_idx + 1:].copy()
     data.columns = _COLS
-    data = data.reset_index(drop=True)
+    return data.reset_index(drop=True)
+
+
+def parse_sales_report(file_bytes: bytes) -> pd.DataFrame:
+    """HTML-xls 매출통계 파싱. 노이즈 행 제거 후 실제 데이터 반환.
+
+    합포(다른 상품) 셀의 중첩테이블 행 경계를 _SENTINEL로 보존한다
+    (split_multiproduct_cells 1순위). lxml 파싱 실패 시 구 read_html로 폴백.
+    """
+    text = file_bytes.decode("utf-8").replace("\ufeff", "")
+    try:
+        data = _parse_via_lxml(text)
+    except Exception:
+        data = None
+    if data is None or data.empty:
+        data = _parse_via_readhtml(text)
 
     for col in ["총수량", "평균단가", "정산금액", "선결제택배비"]:
-        data[col] = pd.to_numeric(data[col], errors="coerce")
-
+        data[col] = pd.to_numeric(
+            data[col].astype(str).str.replace(",", "", regex=False),
+            errors="coerce",
+        )
     return data
 
 
@@ -101,30 +173,67 @@ def split_multiproduct_cells(df: pd.DataFrame) -> pd.DataFrame:
     예) 어드민옵션='코카콜라355...[31-03-05]코카콜라제로355...[31-22-02]'
         어드민옵션='명가 꽈배기 참깨[MGG1EA-67-74]명가 꽈배기 흑당[MGG1EA-67-74-01]'
 
-    감지·분리 1순위 = 어드민옵션의 [erp코드] 대괄호.
-      - 포맷 무관(숫자 31-03-05, 영문접두 MGG1EA-67-74-01, PC005708 등 모두).
-      - 구분자(대괄호)가 명확해 옵션추가항목1의 붙은 문자열보다 안전.
-      - N개 상품 합포 지원(2개 한정 아님).
-    처리 : 총수량·정산금액 ÷ N(상품 수), 어드민옵션을 각 [코드] 경계로 분할,
+    감지·분리 1순위 = parse가 남긴 _SENTINEL(중첩테이블 행 경계 = 원본 진실).
+      - erp관리코드/어드민옵션/옵션추가항목1 어디든 sentinel이 있으면 그 경계로 분할.
+      - 코드 = erp행값 → (없으면) 옵션추가항목1행값 → (없으면) 상품명 속 [대괄호코드] 순.
+      - 대괄호도 옵션추가항목1도 필요 없어, 카프리썬처럼 코드끼리 붙고 옵션1이 빈 케이스도 잡음.
+    2순위 = 어드민옵션의 [erp코드] 대괄호(포맷 무관·N개).
+    3순위 = 옵션추가항목1의 숫자코드(XX-XX-XX) 2개(구버전 호환).
+    처리 : 총수량·정산금액 ÷ N(상품 수), 상품명을 각 상품 경계로 분할,
            각 행에 해당 erp코드 직접 기입. 선결제비·판매처·평균단가는 복사.
-    fallback : 대괄호 코드가 2개 미만이면 옵션추가항목1의 숫자코드(XX-XX-XX) 2개로 처리(구버전 호환).
     """
     new_rows = []
     changed = False
 
     for _, row in df.iterrows():
+        erp = str(row.get("erp관리코드") or "")
         admin = str(row.get("어드민옵션") or "")
         opt1 = str(row.get("옵션추가항목1") or "")
 
-        # 1순위: 어드민옵션 [erp코드] (숫자를 포함하는 코드만)
-        bm = [m for m in _BRACKET_CODE_RE.finditer(admin)
-              if any(c.isdigit() for c in m.group(1))]
-        if len(bm) >= 2:
-            codes = [m.group(1) for m in bm]
-            bounds = [0] + [m.end() for m in bm]
-            segs = [admin[bounds[k]:bounds[k + 1]].strip() for k in range(len(bm))]
-        else:
-            # 2순위(구버전 호환): 옵션추가항목1 숫자코드 2개
+        codes = None
+        segs = None
+
+        # 1순위: sentinel (중첩테이블 행 경계 = ground truth)
+        if _SENTINEL in erp or _SENTINEL in admin or _SENTINEL in opt1:
+            eparts = erp.split(_SENTINEL)
+            nparts = admin.split(_SENTINEL)
+            oparts = opt1.split(_SENTINEL)
+            n = max(len(eparts), len(nparts), len(oparts))
+            pick = lambda parts, k: (parts[k] if k < len(parts) else "")
+            cand_codes, cand_segs = [], []
+            for k in range(n):
+                nm = pick(nparts, k).strip()
+                code = pick(eparts, k).strip() or pick(oparts, k).strip()
+                if not code:  # 코드가 상품명 대괄호에만 있는 경우
+                    bm = [m for m in _BRACKET_CODE_RE.finditer(nm)
+                          if any(c.isdigit() for c in m.group(1))]
+                    if bm:
+                        code = bm[0].group(1)
+                cand_codes.append(code)
+                cand_segs.append(nm)
+            if sum(1 for c in cand_codes if c) >= 2:
+                codes, segs = cand_codes, cand_segs
+            else:
+                # sentinel이 있으나 실제 합포가 아님(이상 케이스) → sentinel만 정리해 단일화
+                r = row.copy()
+                r["erp관리코드"] = (erp.replace(_SENTINEL, "") or None)
+                r["어드민옵션"] = admin.replace(_SENTINEL, " ").strip()
+                r["옵션추가항목1"] = (opt1.replace(_SENTINEL, "") or None)
+                new_rows.append(r)
+                changed = True
+                continue
+
+        # 2순위: 어드민옵션 [erp코드] (숫자를 포함하는 코드만)
+        if codes is None:
+            bm = [m for m in _BRACKET_CODE_RE.finditer(admin)
+                  if any(c.isdigit() for c in m.group(1))]
+            if len(bm) >= 2:
+                codes = [m.group(1) for m in bm]
+                bounds = [0] + [m.end() for m in bm]
+                segs = [admin[bounds[k]:bounds[k + 1]].strip() for k in range(len(bm))]
+
+        # 3순위(구버전 호환): 옵션추가항목1 숫자코드 2개
+        if codes is None:
             ncodes = _ERP_CODE_RE.findall(opt1)
             if len(ncodes) < 2:
                 new_rows.append(row)
