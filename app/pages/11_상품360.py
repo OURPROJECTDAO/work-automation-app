@@ -245,7 +245,9 @@ listing_rows = []
 present = {}      # 채널 → 등재여부
 for ch, cfg in cmm.CHANNEL_CONFIG.items():
     recs = load_listing_recs(cfg["key"])
-    sub = [r for r in recs if _nfc(r["코드"]) == code]
+    # 박스 관리코드뿐 아니라 낱개(PC+상품코드)·소분으로 올라간 리스팅도 함께 매칭.
+    # canonical_code가 PC낱개/소분을 원박스 관리코드로 통일 → 흩어진 등재를 한 상품으로 모음.
+    sub = [r for r in recs if cmm.canonical_code(r["코드"], refs) == code]
     present[ch] = bool(sub)
     if not sub:
         continue
@@ -266,6 +268,8 @@ for ch, cfg in cmm.CHANNEL_CONFIG.items():
                 need = _ceil100(net_new + rec.get("즉시할인", 0) + rec.get("포인트", 0))
         listing_rows.append({
             "채널": ch,
+            "등재유형": row["코드유형"],
+            "등재코드": rec["코드"],
             "리스팅(상품번호)": row["상품번호"],
             "N": row["N"],
             "현재판매가": 판매가,
@@ -289,6 +293,10 @@ if listing_rows:
         ldf, width="stretch", hide_index=True,
         column_config={
             "채널": st.column_config.TextColumn(width="small"),
+            "등재유형": st.column_config.TextColumn(width="small",
+                help="이 리스팅이 박스/낱개(PC)/소분/합포 중 어느 코드로 올라갔는지"),
+            "등재코드": st.column_config.TextColumn(width="small",
+                help="채널에 실제로 등록된 판매자상품코드 (낱개=PC+상품코드)"),
             "리스팅(상품번호)": st.column_config.TextColumn(width="small"),
             "N": st.column_config.NumberColumn("N(합포)", format="%.2g"),
             "현재판매가": st.column_config.NumberColumn(format="localized"),
@@ -303,11 +311,13 @@ if listing_rows:
                                                 help="필요판매가 − 현재판매가 (양수=올려야)"),
         },
         height=min(440, 80 + 36 * min(len(ldf), 10)))
-    st.caption("ⓘ 같은 관리코드가 한 채널에 여러 리스팅(합포 N 상이)이면 각각 행으로 펼칩니다. "
+    st.caption("ⓘ 이 관리코드로 올라간 리스팅을 **박스·낱개(PC)·소분 코드 모두** 모아 각각 행으로 펼칩니다"
+               "(예: 낱개는 `PC+상품코드`로 등록된 별도 상품번호 — **등재유형/등재코드** 컬럼으로 구분). "
                "**필요판매가**=현재 수수료·배송비·매입가 그대로 두고 목표 마진율만 채우는 판매가. "
                "가격 변경은 **채널마진모니터**에서 (이 카드는 조회 전용).")
 else:
-    st.info("8개 채널 저장 리스팅 어디에도 이 관리코드가 없습니다. (미등재 또는 합성코드)")
+    st.info("8개 채널 저장 리스팅 어디에도 이 상품이 없습니다 "
+            "(박스·낱개(PC)·소분 코드 전부 확인 — 미등재 또는 합포 구성코드).")
 
 # ── D. 채널별 실판매 (어디서 얼마에 매출 얼마나) ─────────────────────────────
 st.markdown("### 💰 채널별 실판매 — 매출 · 판매량 · 실현마진 (최근 3개월)")
