@@ -29,6 +29,19 @@ def _nfc(v):
     return unicodedata.normalize("NFC", str(v)).strip() if v is not None and pd.notna(v) else ""
 
 
+def _key(code, code_map: dict = None) -> str:
+    """조회키 — 낱개/소분 코드는 **원코드(박스)**로 치환.
+
+    ★ 매입현황(cadence)·상품관리(박스재고)는 전부 박스 관리코드 기준이라, 알림판에 낱개/소분
+      코드로 등록된 건은 치환 없이는 최근입고/평균주기/박스재고가 전부 미매칭 → 재입고 자동삭제도
+      영영 안 걸림. code_map = {낱개코드: 원코드} (logistics_order.unit_origin_map).
+    """
+    k = _nfc(code)
+    if code_map:
+        return _nfc(code_map.get(k, k))
+    return k
+
+
 def _num(v):
     try:
         return float(str(v).replace(",", "").strip())
@@ -117,7 +130,8 @@ def seed_from_stockout(board: dict, so_df, today: str):
     return board, added
 
 
-def reconcile(board: dict, box_stock: dict, today: str, threshold: float = 0.0):
+def reconcile(board: dict, box_stock: dict, today: str, threshold: float = 0.0,
+              code_map: dict = None):
     """알림판 각 항목 현재 박스재고 > threshold(0) 회복 시 입고로그 행 생성·알림판에서 제거.
 
     box_stock = {관리코드(NFC): 박스재고}. return (남은 board, 입고로그 rows).
@@ -126,7 +140,7 @@ def reconcile(board: dict, box_stock: dict, today: str, threshold: float = 0.0):
     keep = {}
     td = pd.Timestamp(today)
     for code, info in board.items():
-        bs = box_stock.get(_nfc(code))
+        bs = box_stock.get(_key(code, code_map))
         if bs is not None and bs > threshold:
             since = info.get("since", "")
             try:
@@ -146,7 +160,8 @@ def manual_remove(board: dict, code: str) -> dict:
     return {k: v for k, v in board.items() if _nfc(k) != _nfc(code)}
 
 
-def board_to_frame(board: dict, box_stock: dict, today: str, cadence: dict = None) -> pd.DataFrame:
+def board_to_frame(board: dict, box_stock: dict, today: str, cadence: dict = None,
+                   code_map: dict = None) -> pd.DataFrame:
     cadence = cadence or {}
     td = pd.Timestamp(today)
     rows = []
@@ -156,13 +171,14 @@ def board_to_frame(board: dict, box_stock: dict, today: str, cadence: dict = Non
             days = (td - pd.Timestamp(since)).days
         except Exception:
             days = None
-        ci = cadence.get(_nfc(code), {})
+        _k = _key(code, code_map)
+        ci = cadence.get(_k, {})
         last = ci.get("최근입고일")
         avg = ci.get("평균주기")
         cnt = ci.get("입고횟수")
         rows.append({"관리코드": code, "상품명": info.get("상품명", ""),
                      "품절시작일": since, "N일째": days,
-                     "현재박스재고": box_stock.get(_nfc(code)),
+                     "현재박스재고": box_stock.get(_k),
                      "발주수량": info.get("발주수량"),
                      "최근입고일": (last.strftime("%Y-%m-%d") if (last is not None and pd.notna(last)) else ""),
                      "평균매입주기": (round(avg) if avg is not None else None),
