@@ -30,6 +30,7 @@ from core.intelligence import stockout_board as sb
 from core.intelligence import purchases as _buy
 from core.intelligence import stock_history as shh
 from core.workflows import channel_margin_monitor as cmm
+from core.workflows import logistics_order as lo
 from core.workflows import upload_monitor as um
 from core.dashboard import store
 from core.intelligence import channel_compare as cc
@@ -123,6 +124,15 @@ def _box_stock_lookup():
     df = pd.read_csv(io.BytesIO(text), dtype=str)
     return {_nfc(k): float(v) for k, v in
             zip(df["관리코드"], pd.to_numeric(df["박스"], errors="coerce").fillna(0.0))}
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _unit_origin_map():
+    """낱개/소분 코드 → 원코드(박스). 매입현황·박스재고가 박스코드 기준이라 조회 전 치환용."""
+    try:
+        return lo.unit_origin_map()
+    except Exception:
+        return {}
+
 
 @st.cache_data(ttl=1800, show_spinner="매입현황(최근입고·평균주기) 불러오는 중...")
 def _buyin_cadence():
@@ -502,18 +512,20 @@ else:
     _today = datetime.now(_KST).strftime("%Y-%m-%d")
     _board = sb.read_board(_pat_d, _repo_d)
     if _board and _box_stock:   # 재입고 reconcile(박스재고>0) → 입고로그 + 자동삭제
-        _board2, _restocked = sb.reconcile(_board, _box_stock, _today)
+        _board2, _restocked = sb.reconcile(_board, _box_stock, _today,
+                                           code_map=_unit_origin_map())
         if _restocked:
             sb.append_log(_pat_d, _repo_d, _restocked, f"restock +{len(_restocked)} ({_today})")
             sb.write_board(_pat_d, _repo_d, _board2, f"board: 재입고 {len(_restocked)}건 자동삭제 ({_today})")
             _board = _board2
             st.success("✅ 재입고 자동처리 " + str(len(_restocked)) + "건 — 입고로그 기록·알림판 제거: "
                        + ", ".join(f"{r['관리코드']}({r['품절일수']}일)" for r in _restocked))
-    _bdf = sb.board_to_frame(_board, _box_stock, _today, cadence=_buyin_cadence())
+    _bdf = sb.board_to_frame(_board, _box_stock, _today, cadence=_buyin_cadence(),
+                             code_map=_unit_origin_map())
     if _bdf.empty:
         st.success("현재 품절(미입고) 상품이 없습니다. 발주 품절목록에 뜨면 여기 자동 등록됩니다.")
     else:
-        st.caption(f"품절 {len(_bdf)}건 — 발주 품절목록 자동 등록 · 박스재고>0 들어오면 자동 입고처리. 최근입고·평균주기·입고횟수=최근 1년 매입현황. 🗑=수동 제거(로그 없음)")
+        st.caption(f"품절 {len(_bdf)}건 — 발주 품절목록 자동 등록 · 박스재고>0 들어오면 자동 입고처리. 최근입고·평균주기·입고횟수=최근 1년 매입현황(낱개/소분은 원코드=박스 기준). 🗑=수동 제거(로그 없음)")
         st.markdown(
             '<style>.st-key-sb_board [data-testid="stHorizontalBlock"]'
             '{border-bottom:1px solid #ECEEF2;padding:6px 0;align-items:center}</style>',
