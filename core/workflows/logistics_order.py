@@ -46,6 +46,26 @@ def load_unit_list() -> pd.DataFrame:
     return pd.read_csv(_REF / "unit_list.csv",
                        encoding="utf-8-sig", dtype={"관리코드": str, "원코드": str})
 
+
+def unit_origin_map(unit_df: pd.DataFrame = None) -> dict:
+    """낱개/소분 코드 → 원코드(박스 관리코드) 매핑 (NFC·자기자신 제외).
+
+    ★ 매입현황(buyin cadence)·상품관리(박스재고)는 전부 **박스 관리코드** 기준 —
+      낱개/소분 코드로 조회하면 무조건 미매칭(공백)이라 원코드로 치환해야 함.
+      재고 대조(reconcile_stock)가 쓰는 원코드와 동일 기준.
+    """
+    if unit_df is None:
+        unit_df = load_unit_list()
+    out = {}
+    for _, r in unit_df.iterrows():
+        if pd.isna(r.get("관리코드")) or pd.isna(r.get("원코드")):
+            continue
+        k = unicodedata.normalize("NFC", str(r["관리코드"]).strip())
+        v = unicodedata.normalize("NFC", str(r["원코드"]).strip())
+        if k and v and k != v:
+            out[k] = v
+    return out
+
 def load_spec_master() -> pd.DataFrame:
     return pd.read_csv(_REF / "spec_master.csv",
                        encoding="utf-8-sig", dtype={"관리코드": str})
@@ -573,7 +593,8 @@ def generate_archive_xlsx(archive_df: pd.DataFrame) -> bytes:
 
 
 def generate_result_xlsx(logistics_df: pd.DataFrame,
-                         stockout_df: pd.DataFrame, cadence: dict = None) -> bytes:
+                         stockout_df: pd.DataFrame, cadence: dict = None,
+                         unit_df: pd.DataFrame = None) -> bytes:
     """최종결과물 xlsx : 물류팀 + 품절목록."""
     wb = Workbook()
 
@@ -685,6 +706,11 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
     # ── 품절목록 시트 ─────────────────────────────
     ws2 = wb.create_sheet("품절목록")
     cadence = cadence or {}
+    # 낱개/소분 코드는 매입현황에 없음 → 원코드(박스)로 치환해 cadence 조회 (재고와 동일 기준)
+    try:
+        _omap = unit_origin_map(unit_df) if cadence else {}
+    except Exception:
+        _omap = {}
     ws2.append(["관리코드", "상품명", "발주수량", "현재고", "최근 입고일", "평균매입주기(일)", "입고횟수(1년)"])
     for c in range(1, 8):
         cell = ws2.cell(row=1, column=c)
@@ -695,7 +721,7 @@ def generate_result_xlsx(logistics_df: pd.DataFrame,
     r_idx = 2
     for _, r in stockout_df.iterrows():
         _code = unicodedata.normalize("NFC", str(r["관리코드"]).strip())
-        _info = cadence.get(_code, {})
+        _info = cadence.get(_code) or cadence.get(_omap.get(_code, "")) or {}
         _last = _info.get("최근입고일")
         _last_s = _last.strftime("%Y-%m-%d") if (_last is not None and pd.notna(_last)) else ""
         _avg = _info.get("평균주기")
