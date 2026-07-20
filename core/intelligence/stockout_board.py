@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import time
 import unicodedata
 import urllib.error
 import urllib.request
@@ -70,6 +71,34 @@ def _get_sha(pat, repo, path):
         raise
 
 
+def _put_retry(pat, repo, path, content_bytes: bytes, msg: str, max_attempts: int = 4):
+    """content_bytes 를 path 에 PUT. 매 시도 직전 fresh sha 재취득.
+
+    GitHub 는 같은 파일을 짧은 간격으로 연속 PUT 하면 409(Conflict)/422 를 던지고,
+    쓰기가 다발이면 403(secondary rate limit)을 던진다. 데일리 대시보드는 rerun 마다
+    reconcile→쓰기가 돌 수 있고 raw read 지연으로 같은 건이 반복 처리될 수 있어(2026-07-20 사례),
+    이들 코드는 sha 재취득 + backoff 로 재시도한다(429 도 포함).
+    """
+    content = base64.b64encode(content_bytes).decode("ascii")
+    last = None
+    for attempt in range(max_attempts):
+        sha = _get_sha(pat, repo, path)
+        body = {"message": msg, "content": content}
+        if sha:
+            body["sha"] = sha
+        try:
+            _gh(_url(repo, path), pat, method="PUT", data=body)
+            return
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code in (409, 422, 403, 429) and attempt < max_attempts - 1:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+    if last is not None:
+        raise last
+
+
 def read_board(pat, repo) -> dict:
     try:
         with _gh(_url(repo, BOARD_PATH) + "?ref=main", pat, accept="application/vnd.github.raw") as r:
@@ -81,12 +110,8 @@ def read_board(pat, repo) -> dict:
 
 
 def write_board(pat, repo, board: dict, msg: str):
-    sha = _get_sha(pat, repo, BOARD_PATH)
-    content = base64.b64encode(json.dumps(board, ensure_ascii=False, indent=1).encode("utf-8")).decode("ascii")
-    body = {"message": msg, "content": content}
-    if sha:
-        body["sha"] = sha
-    _gh(_url(repo, BOARD_PATH), pat, method="PUT", data=body)
+    content = json.dumps(board, ensure_ascii=False, indent=1).encode("utf-8")
+    _put_retry(pat, repo, BOARD_PATH, content, msg)
 
 
 def read_log(pat, repo) -> pd.DataFrame:
@@ -99,17 +124,26 @@ def read_log(pat, repo) -> pd.DataFrame:
         raise
 
 
-def append_log(pat, repo, rows: list, msg: str):
+def append_log(pat, repo, rows: list, msg: str) -> list:
+    """입고 로그 append. **멱등** — 이미 (관리코드, 입고일)이 로그에 있으면 skip.
+
+    ★ raw read 지연으로 같은 재입고 건이 rerun 사이 반복 판정되면 로그가 중복 기록되고,
+      그 반복 PUT 이 GitHub 409/403 를 유발했다(2026-07-20 사례). 실제 커밋 직전 최신 로그를
+      다시 읽어 (관리코드, 입고일) 중복분을 걸러낸다. return = 실제로 새로 추가된 rows.
+    """
     if not rows:
-        return
+        return []
     cur = read_log(pat, repo)
-    new = pd.concat([cur, pd.DataFrame(rows, columns=LOG_COLS)], ignore_index=True)
-    sha = _get_sha(pat, repo, LOG_PATH)
-    content = base64.b64encode(new.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")).decode("ascii")
-    body = {"message": msg, "content": content}
-    if sha:
-        body["sha"] = sha
-    _gh(_url(repo, LOG_PATH), pat, method="PUT", data=body)
+    existing = set()
+    if not cur.empty and {"관리코드", "입고일"}.issubset(cur.columns):
+        existing = {(_nfc(a), _nfc(b)) for a, b in zip(cur["관리코드"], cur["입고일"])}
+    fresh = [r for r in rows
+             if (_nfc(r.get("관리코드")), _nfc(r.get("입고일"))) not in existing]
+    if not fresh:
+        return []
+    new = pd.concat([cur, pd.DataFrame(fresh, columns=LOG_COLS)], ignore_index=True)
+    _put_retry(pat, repo, LOG_PATH, new.to_csv(index=False).encode("utf-8-sig"), msg)
+    return fresh
 
 
 def seed_from_stockout(board: dict, so_df, today: str):
