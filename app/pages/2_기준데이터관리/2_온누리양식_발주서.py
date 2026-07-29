@@ -1,5 +1,5 @@
 """{doc}"""
-import sys, base64, json, urllib.request, urllib.parse
+import sys, base64, io, json, re, urllib.request, urllib.parse
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))  # repo root
 
@@ -36,6 +36,40 @@ def _gh_put_csv(path: str, df: pd.DataFrame, msg: str, pat: str) -> bool:
     except urllib.error.HTTPError as e:
         st.error(f"GitHub 저장 실패: {e.read().decode()[:200]}")
         return False
+
+_CODEISH = ("코드",)
+
+def _to_xlsx(df: pd.DataFrame, sheet_name: str) -> bytes:
+    """참조 CSV(전열 문자열)를 일반 통합 엑셀(.xlsx) 바이트로 변환.
+
+    - 전부 숫자로만 이루어진 열만 숫자형으로 되돌린다(공급가·배송비 등).
+      '코드'가 들어간 열은 45-21 같은 값이 날짜로 오인될 수 있어 항상 문자열 유지.
+    - 헤더 굵게 + 틀고정 + 열너비 자동.
+    """
+    out = df.copy()
+    for c in out.columns:
+        if any(k in str(c) for k in _CODEISH):
+            continue
+        s = out[c].astype(str).str.strip()
+        nz = s[s != ""]
+        if len(nz) and nz.str.fullmatch(r"-?\d+(\.\d+)?").all():
+            out[c] = pd.to_numeric(s.replace("", None), errors="coerce")
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        out.to_excel(w, index=False, sheet_name=re.sub(r"[\\/*?:\[\]]", "_", sheet_name)[:31])
+        ws = w.sheets[list(w.sheets)[0]]
+        ws.freeze_panes = "A2"
+        for i, col in enumerate(out.columns, 1):
+            # 너비는 원본(전열 문자열) 기준으로 잰다. pandas 3 에서 숫자열의
+            # astype(str) 은 결측을 'nan' 문자열로 만들지 않고 NaN(float)으로 남긴다.
+            body = [str(v) for v in df[col].fillna("").tolist()]
+            width = max([len(str(col))] + [len(v) for v in body])
+            ws.column_dimensions[ws.cell(1, i).column_letter].width = min(max(width + 4, 10), 45)
+        from openpyxl.styles import Font
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+    return buf.getvalue()
+
 
 @st.cache_data(ttl=60)
 def load_ref(filename: str) -> pd.DataFrame:
@@ -116,9 +150,12 @@ def render_tabs(config: dict, readonly: bool, pat: str) -> None:
                         if ok:
                             st.success(f"✅ 저장 완료! ({len(save_df)}건)")
                             st.cache_data.clear()
-            csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-            st.download_button(label=f"⬇️ {name} CSV 다운로드", data=csv_bytes,
-                file_name=cfg["file"], mime="text/csv", key=f"dl_{name}")
+            st.download_button(
+                label=f"⬇️ {name} 엑셀 다운로드",
+                data=_to_xlsx(df, name),
+                file_name=cfg["file"].replace(".csv", ".xlsx"),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"dl_{name}")
 
 
 PRICE_CONFIG = {
