@@ -22,7 +22,7 @@ from pathlib import Path
 import pandas as pd
 from openpyxl import load_workbook
 
-from core.base import Workflow, Step, WorkflowContext
+from core.base import Workflow, Step, WorkflowContext, clean_cell
 from core.workflows.registry import register
 
 _REF = Path(__file__).parent.parent.parent / "reference"
@@ -79,7 +79,11 @@ def _patch_column_values(sheet_xml: bytes, col_letter: str, values: list) -> byt
     """
     content = sheet_xml.decode("utf-8")
     for i, val in enumerate(values):
-        if val is None:
+        # SKU 미매칭 행은 _calc 가 None 을 돌려주는데, 같은 컬럼에 정수가 하나라도
+        # 섞이면 pandas 가 float64 로 추론하며 None → NaN 이 된다. NaN 은 None 이
+        # 아니라서 예전 가드를 통과해 int(nan) 으로 터졌다(2026-08-04).
+        # 미매칭 행은 합계를 비워둔 채 나머지 행만 정상 출력한다.
+        if val is None or (isinstance(val, float) and math.isnan(val)):
             continue
         row_num = i + 2  # 행1=헤더, 행2부터 데이터
         cell_ref = f"{col_letter}{row_num}"
@@ -111,6 +115,9 @@ class LoadSKU(Step):
             encoding="utf-8-sig",
             dtype={"관리코드": str, "원코드": str},
         )
+        # 참조 CSV에 개행·공백이 섞여 들어와도 매칭되도록 방어(2026-08-04 사고)
+        sku["관리코드"] = sku["관리코드"].astype(str).map(clean_cell)
+        sku = sku[sku["관리코드"] != ""]
         sku.drop_duplicates("관리코드", keep="first", inplace=True)
         ctx.meta["sku"] = sku.set_index("관리코드")
 
@@ -124,7 +131,7 @@ class CalcTotal(Step):
         sku = ctx.meta["sku"]
 
         def _calc(row):
-            code = str(row[_COL_CODE]) if row[_COL_CODE] is not None else ""
+            code = clean_cell(str(row[_COL_CODE])) if row[_COL_CODE] is not None else ""
             if not code or code not in sku.index:
                 return None
             qty = int(row[_COL_QTY])
