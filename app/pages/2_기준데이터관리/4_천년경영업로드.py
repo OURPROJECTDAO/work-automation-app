@@ -18,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 import pandas as pd
 import streamlit as st
 
+from core.base import sanitize_ref_df
+
 _REPO = "OURPROJECTDAO/work-automation-app"
 _REF = Path(__file__).resolve().parent.parent.parent.parent / "reference"
 
@@ -31,6 +33,7 @@ def _commit_csv(path: str, df: pd.DataFrame, message: str):
     if not token:
         st.error("GITHUB_PAT 시크릿이 설정되지 않았습니다.")
         return False
+    df = sanitize_ref_df(df)   # 붙여넣기 개행·유령 빈행 제거 (2026-08-04)
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
     b64 = base64.b64encode(csv_bytes).decode()
     base = f"https://api.github.com/repos/{_REPO}/contents/{path}"
