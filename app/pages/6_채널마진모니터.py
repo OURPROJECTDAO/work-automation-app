@@ -73,7 +73,16 @@ def _meta_path(key): return f"reference/listing_{key}.meta.json"
 def _raw_ext(cfg): return "csv" if cfg.get("file_format") == "csv" else "xlsx"
 
 
-def _raw_path(key, ext="xlsx"): return f"reference/listing_{key}.{ext}"
+def _raw_path(key, ext="xlsx"):
+    """원본 다운로드 저장 경로.
+
+    ★ ext=="csv"(자사몰) 는 listing 저장경로(reference/listing_{key}.csv)와 **완전히 겹친다**
+      → _raw 접미 필수. 안 그러면 _commit_raw 가 파싱된 listing 을 원본 88열 CSV 로 덮어써
+      모니터가 '코드' 열을 못 찾고 관리코드 전건 빈값이 된다(2026-08-04 사고).
+    """
+    if ext == "csv":
+        return f"reference/listing_{key}_raw.csv"
+    return f"reference/listing_{key}.{ext}"
 
 
 @st.cache_data(ttl=600, show_spinner="저장된 상품관리 불러오는 중...")
