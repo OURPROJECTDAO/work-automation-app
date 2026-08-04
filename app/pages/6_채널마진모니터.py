@@ -70,7 +70,10 @@ def _gh_bytes(path):
 
 def _listing_path(key): return f"reference/listing_{key}.csv"
 def _meta_path(key): return f"reference/listing_{key}.meta.json"
-def _raw_path(key): return f"reference/listing_{key}.xlsx"
+def _raw_ext(cfg): return "csv" if cfg.get("file_format") == "csv" else "xlsx"
+
+
+def _raw_path(key, ext="xlsx"): return f"reference/listing_{key}.{ext}"
 
 
 @st.cache_data(ttl=600, show_spinner="저장된 상품관리 불러오는 중...")
@@ -97,9 +100,12 @@ def _commit_listing(key: str, recs: list) -> dict:
     return meta
 
 
-def _commit_raw(key: str, xlsx_bytes: bytes):
-    """원본 일괄변경 양식(.xlsx) 저장 — 가격변경 양식 출력의 원천(전체 컬럼 보존)."""
-    path = _raw_path(key)
+def _commit_raw(key: str, xlsx_bytes: bytes, ext: str = "xlsx"):
+    """원본 일괄변경 양식 저장 — 가격변경 양식 출력의 원천(전체 컬럼 보존).
+
+    ext: 채널 다운로드 확장자. 자사몰(카페24)만 csv, 그 외 xlsx.
+    """
+    path = _raw_path(key, ext)
     code, m = _gh(path)
     payload = {"message": f"data(listing-raw): {key} 원본양식 갱신",
                "content": base64.b64encode(xlsx_bytes).decode()}
@@ -299,10 +305,11 @@ committed = None
 flash = None
 with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
     multi = cfg.get("multi_file", False)   # ESM: 다운로드 500상품 한도 → 여러 배치 한번에
+    _rawext = _raw_ext(cfg)                # 자사몰(카페24)=csv, 그 외=xlsx
     up = st.file_uploader(
-        f"{channel} 상품관리 다운로드 (.xlsx 전체 업로드)"
+        f"{channel} 상품관리 다운로드 (.{_rawext} 전체 업로드)"
         + ("  — 여러 배치 파일을 한 번에 올리면 자동 병합" if multi else ""),
-        type=["xlsx"], key=f"up_{key}", accept_multiple_files=multi)
+        type=[_rawext], key=f"up_{key}", accept_multiple_files=multi)
     files = (up or []) if multi else ([up] if up is not None else [])
     if files:
         up_bytes = files[0].getvalue()      # raw 저장용(대표). multi(ESM)는 raw 미사용(모니터 전용)
@@ -325,14 +332,14 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
         else:
             # 네이티브 raw 필수 채널(filter형=쿠팡): '신규만 추가'(append_rows_to_raw=openpyxl)는
             #   원본을 inlineStr로 변질시켜 업로더가 거부 → 비활성화. '전체 교체'(업로드 바이트 verbatim)만.
-            native_raw = cfg.get("price_form", {}).get("mode") == "filter"
+            native_raw = cfg.get("price_form", {}).get("mode") in ("filter", "csv_filter")
             b1, b2 = st.columns(2)
             if b1.button("전체 교체 저장", type="primary", width="stretch",
                          help="최신 전체 다운로드로 덮어쓰기 (신규+가격변동 반영)"
                               + ("" if multi else " + 원본양식 저장")):
                 meta = _commit_listing(key, new_recs)
                 if not multi:                # multi(ESM)=모니터전용 → raw 불요
-                    _commit_raw(key, up_bytes)          # 원본 양식(전체 컬럼) 저장
+                    _commit_raw(key, up_bytes, _rawext)  # 원본 양식(전체 컬럼) 저장
                 _load_listing.clear()
                 committed = new_recs
                 flash = f"전체 교체 완료 — {meta['rows']:,}건 ({meta['updated_at']})"
@@ -347,11 +354,11 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
                 meta = _commit_listing(key, merged)
                 if not multi:                # multi(ESM)=raw 미사용 → append 생략
                     added_pids = {r["상품번호"] for r in new_recs} - {r["상품번호"] for r in (cur or [])}
-                    rcode, rawb = _gh_bytes(_raw_path(key))
+                    rcode, rawb = _gh_bytes(_raw_path(key, _rawext))
                     newraw = (up_bytes if cfg.get("consolidate")          # 알리 다중시트: openpyxl raw 병합 부적합 → 최신 업로드 유지(raw 미사용)
                               else cmm.append_rows_to_raw(rawb, up_bytes, added_pids, cfg)
                               if (rcode == 200 and rawb) else up_bytes)
-                    _commit_raw(key, newraw)
+                    _commit_raw(key, newraw, _rawext)
                 _load_listing.clear()
                 committed = merged
                 flash = f"신규 {added:,}건 추가 — 총 {meta['rows']:,}건"
@@ -549,7 +556,7 @@ if dc2.button(f"🛠️ 가격 일괄변경 양식 생성 (선택 {len(sel_pids)
             }
     elif pf and pf.get("mode") == "filter":
         # 쿠팡형: 원본 다운로드의 '변경요청' 컬럼(P/Q)에 권장가·가짜정가 기입, 선택만 남김(R/S 미변경).
-        rcode, raw = _gh_bytes(_raw_path(key))
+        rcode, raw = _gh_bytes(_raw_path(key, _raw_ext(cfg)))
         if rcode != 200 or not raw:
             st.session_state[f"form_{key}"] = {"error": "원본 양식(.xlsx)이 저장돼 있지 않습니다. '상품관리 갱신 → 전체 교체'를 1회 실행해 주세요."}
         else:
@@ -562,12 +569,28 @@ if dc2.button(f"🛠️ 가격 일괄변경 양식 생성 (선택 {len(sel_pids)
                     "preview": prev, "append": False, "filter": True,
                     "name": f"{channel}_가격변경_{datetime.now(_KST):%Y%m%d}.xlsx",
                 }
+    elif pf and pf.get("mode") == "csv_filter":
+        # 자사몰(카페24)형: CSV 다운로드 원본에서 선택 행만 남기고 T열(판매가)만 권장가로 교체 → xlsx.
+        #   상품가(S)는 미기입 — 카페24가 판매가에서 자동 재계산(구 VBA CAFE24Module2와 동일).
+        rcode, raw = _gh_bytes(_raw_path(key, _raw_ext(cfg)))
+        if rcode != 200 or not raw:
+            st.session_state[f"form_{key}"] = {"error": "원본 다운로드(.csv)가 저장돼 있지 않습니다. '상품관리 갱신 → 전체 교체'를 1회 실행해 주세요."}
+        else:
+            out, prev, skipped, missing = cmm.build_csv_filter_xlsx(raw, rows, sel_pids, cfg)
+            if not prev:
+                st.session_state[f"form_{key}"] = {"error": "선택 상품 중 권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
+            else:
+                st.session_state[f"form_{key}"] = {
+                    "bytes": out, "kept": len(prev), "skipped": skipped, "missing": missing,
+                    "preview": prev, "append": False, "csv_filter": True,
+                    "name": f"{channel}({datetime.now(_KST):%Y%m%d}).xlsx",
+                }
     else:
         new_prices, skipped = cmm.compute_new_prices(rows, recs, sel_pids)
         if not new_prices:
             st.session_state[f"form_{key}"] = {"error": "선택 상품 중 권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
         else:
-            rcode, raw = _gh_bytes(_raw_path(key))
+            rcode, raw = _gh_bytes(_raw_path(key, _raw_ext(cfg)))
             if rcode != 200 or not raw:
                 st.session_state[f"form_{key}"] = {"error": "원본 양식(.xlsx)이 저장돼 있지 않습니다. '상품관리 갱신 → 전체 교체'를 1회 실행해 주세요."}
             else:
@@ -619,6 +642,10 @@ if form:
             st.caption(f"★ {channel} 일괄수정 양식입니다. 선택 상품만 기입 — 판매단가=기준마진 달성 권장가, "
                        "정가/할인전단가는 판매단가 이상으로 보존, 고정값(변경타입·진열·수량 등)은 양식 규칙대로 채웠습니다. "
                        f"{channel}에 그대로 업로드하세요.")
+        elif form.get("csv_filter"):
+            st.caption(f"★ {channel} 업로드 파일입니다. 선택 상품만 남기고 **판매가(T열)만** "
+                       "기준마진 달성 권장가로 교체했습니다. 상품가는 카페24가 판매가에서 자동 재계산하므로 "
+                       "건드리지 않았습니다. 카페24 상품 엑셀 업로드에 그대로 올리세요.")
         elif form.get("filter"):
             st.caption(f"★ {channel} 가격 일괄변경 양식입니다. 선택 상품만 남기고 '변경 요청' 칸에 "
                        "판매가=기준마진 달성 권장가, 할인율기준가=무늬용 가짜정가(권장가+20~30%)를 기입했습니다. "
