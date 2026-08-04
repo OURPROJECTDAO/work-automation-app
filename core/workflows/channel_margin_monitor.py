@@ -836,6 +836,11 @@ def recs_to_csv(recs: list[dict]) -> str:
 def csv_text_to_recs(text: str) -> list[dict]:
     """저장 CSV 텍스트 → parse_download 호환 레코드 (추가 컬럼 포함, 구 CSV 하위호환)."""
     num_cols = {"판매가", "정가", "배송비", "즉시할인", "포인트"}
+    # ★ BOM 방어: 저장본에 UTF-8 BOM 이 붙어 있으면 DictReader 의 **첫 컬럼 키만**
+    #   '\ufeff상품번호' 가 되어 조용히 빈값이 된다(나머지 열은 정상 → 발견이 늦다).
+    #   상품번호가 비면 hapo 조회 실패 → N=1 폴백 → 선물세트 매입가 폭증(2026-08-04 사고).
+    if text.startswith("\ufeff"):
+        text = text.lstrip("\ufeff")
     recs = []
     for row in csv.DictReader(StringIO(text)):
         rec = {"상품번호": "", "코드": "", "상품명": "", "판매가": 0.0, "정가": 0.0,
