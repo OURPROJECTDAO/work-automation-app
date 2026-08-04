@@ -8,6 +8,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 import pandas as pd
 import streamlit as st
 
+from core.base import sanitize_ref_df
+
 _GITHUB_API = "https://api.github.com/repos/OURPROJECTDAO/work-automation-app/contents"
 _REF_PATH   = "reference"
 
@@ -89,6 +91,7 @@ def _load_csv(token: str, filename: str, dtypes: dict) -> pd.DataFrame:
 
 def _save_csv(token: str, filename: str, df: pd.DataFrame, commit_msg: str):
     sha = _github_get_sha(token, f"{_REF_PATH}/{filename}")
+    df = sanitize_ref_df(df)   # 붙여넣기 개행·유령 빈행 제거 (2026-08-04)
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
     b64 = base64.b64encode(csv_bytes).decode()
     _github_put(token, f"{_REF_PATH}/{filename}", b64, sha, commit_msg)
