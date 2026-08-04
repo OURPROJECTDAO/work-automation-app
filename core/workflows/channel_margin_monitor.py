@@ -270,6 +270,36 @@ CHANNEL_CONFIG: dict[str, dict] = {
             # jeong_field 없음 — 양식에 정가/할인전단가 칸 없음.
         },
     },
+    "자사몰": {
+        "key": "cafe24",
+        # 카페24 자체몰 — 판매수수료 없음. PG 결제수수료 3.3% 단일(사용자 확정 2026-08-04).
+        "commission": 0.033,
+        "ship_settle": 0.967,
+        "real_ship": 2700,                # 전 채널 표준 단일
+        "ship_fee_const": 3000,           # 다운로드에 배송비 숫자 없음(배송비 열 전건 공백) → 타 오픈마켓 동일 상수
+        "baseline_col": "자사몰",           # baseline_margin.csv 자사몰 컬럼(1,230건 기설정)
+        "apply_floor": True,
+        "n_source": "ref",                # 합포 N = hapo_multiplier(상품코드 P0000…) — 바코드 없음
+        # ★ 다운로드가 .xlsx 가 아니라 **CSV**(BOM UTF-8, 88열). file_format 분기로 파싱.
+        "file_format": "csv",
+        "sheet": None,
+        "header_row": 1,
+        "data_start": 2,
+        # cols(1-indexed): A=상품코드(키)·L(12)=모델명(관리코드)·H(8)=상품명·T(20)=판매가.
+        #   소비자가(Q=17)는 전건 0.00 → 정가 미사용. 상품가(S=19)=판매가/1.1(VAT제외) — 마진은 판매가만 사용.
+        "cols": {"상품번호": 1, "코드": 12, "상품명": 8, "판매가": 20},
+        # ★ 모델명이 '[45-11' 형태로 여는 대괄호가 붙어 나옴(468/468, 닫는 괄호 없음) → 제거 후 관리코드로.
+        "code_strip_chars": "[]",
+        # 가격변경 = 별도 양식 없음. 다운로드 원본에서 선택 행만 남기고 T열(판매가)만 교체해 재업로드.
+        #   구 VBA(CAFE24Module1~3)와 동일 절차 — 상품가(S)는 미기입(카페24가 판매가에서 자동 재계산).
+        #   입력 CSV → 출력 xlsx(사용자 확정): 원본 보존 이슈 없어 openpyxl 신규 생성으로 충분.
+        "price_form": {
+            "mode": "csv_filter",
+            "price_col": 20,              # T = 판매가
+            "sheet": "(자사몰)양식",         # 구 VBA 시트명 계승
+            # jeong 없음 — 소비자가 전건 0(정가 미사용).
+        },
+    },
 }
 
 
@@ -347,6 +377,63 @@ def _strip_external_links(xlsx_bytes: bytes) -> bytes:
                 data = re.sub(rb"<Override[^>]*externalLink[^>]*/>", b"", data)
             zout.writestr(item, data)
     return out.getvalue()
+
+
+def _strip_code(v, cfg: dict) -> str:
+    """관리코드 정규화 + cfg['code_strip_chars'] 양끝 문자 제거.
+
+    자사몰(카페24) 모델명이 '[45-11' 처럼 여는 대괄호를 달고 나온다(468/468, 닫는 괄호 없음).
+    이걸 안 벗기면 product_master 매칭이 전건 실패한다.
+    """
+    s = _nfc(v)
+    ch = cfg.get("code_strip_chars")
+    return s.strip(ch).strip() if ch and s else s
+
+
+def _parse_csv_download(src, cfg: dict) -> list[dict]:
+    """CSV 다운로드(자사몰=카페24) → 레코드 리스트. xlsx 경로와 동일 스키마 반환.
+
+    cfg['cols'] 는 xlsx 와 동일하게 **1-indexed 컬럼 위치**로 지정한다(헤더명 아님) —
+    카페24 다운로드는 열이 늘어날 수 있으나(86→88열, 제조사명/브랜드명 추가) A~T 구간은
+    고정이라 위치 지정이 안전하다.
+    """
+    data = src.read() if hasattr(src, "read") else src
+    if isinstance(data, (bytes, bytearray)):
+        text = data.decode("utf-8-sig")
+    else:
+        text = data
+    rdr = list(csv.reader(StringIO(text)))
+    col = cfg["cols"]
+    ship_const = cfg.get("ship_fee_const")
+
+    def cell(row, idx):
+        i = idx - 1
+        return row[i] if 0 <= i < len(row) else ""
+
+    def _opt(row, key, default=0.0):
+        c = col.get(key)
+        return _num(cell(row, c), default) if c else default
+
+    recs = []
+    for row in rdr[cfg["data_start"] - 1:]:
+        if not row:
+            continue
+        pid = cell(row, col["상품번호"])
+        if pid in (None, ""):
+            continue
+        recs.append({
+            "상품번호": _pid(pid),
+            "코드": _strip_code(cell(row, col["코드"]), cfg),
+            "상품명": _nfc(cell(row, col["상품명"])),
+            "판매가": _opt(row, "판매가"),
+            "배송비": float(ship_const) if ship_const is not None else _opt(row, "배송비"),
+            "즉시할인": _opt(row, "즉시할인"),
+            "포인트": _opt(row, "포인트"),
+            "정가": _opt(row, "정가"),
+            "바코드": None,
+            "오퍼코드": "", "옵션코드": "",
+        })
+    return recs
 
 
 def _pick_ws(wb, cfg):
@@ -558,6 +645,8 @@ def parse_download(file, cfg: dict) -> list[dict]:
       컬럼값 조건부(캐시노트: DVP212991→3000, 그외→0) ③ cfg['cols']['배송비'] 숫자(스마트스토어).
     """
     src = BytesIO(file) if isinstance(file, (bytes, bytearray)) else file
+    if cfg.get("file_format") == "csv":       # 자사몰(카페24): 다운로드가 CSV(BOM UTF-8)
+        return _parse_csv_download(src, cfg)
     wb = load_workbook(src, data_only=True)  # read_only 금지(pitfalls)
     con = cfg.get("consolidate")
     if con:                                   # 알리: 카테고리별 다중시트+다단헤더 → 정제 통합(매크로 대체)
@@ -593,7 +682,7 @@ def parse_download(file, cfg: dict) -> list[dict]:
         bc = col.get("바코드")
         rec = {
             "상품번호": _pid(pid),
-            "코드": _nfc(ws.cell(r, col["코드"]).value),
+            "코드": _strip_code(ws.cell(r, col["코드"]).value, cfg),
             "상품명": _nfc(ws.cell(r, col["상품명"]).value),
             "판매가": _opt(r, "판매가"),
             "배송비": _ship(r),
@@ -1044,6 +1133,72 @@ def build_price_form_append(template_xlsx: bytes, items: list[dict], pf: dict) -
     out = BytesIO()
     wb.save(out)
     return _strip_external_links(out.getvalue())  # 템플릿 딸린 고아 외부링크 제거(배민)
+
+
+def build_csv_filter_xlsx(raw_csv: bytes, rows: list[dict], pids,
+                          cfg: dict) -> tuple[bytes, list[dict], list[str], list[str]]:
+    """CSV 다운로드 원본(자사몰=카페24)에서 선택 행만 남기고 판매가를 권장가로 교체 → xlsx.
+
+    구 VBA(CAFE24Module1~3)의 3단계를 한 번에 대체한다:
+      ① 매크로파일 A열(상품코드) 대조해 해당 행 통째로 복사 → 여기선 pids 필터
+      ② 양식 T열(판매가)에 바꿀가격 기입           → pf['price_col'] 교체
+      ③ 양식 시트만 xlsx 저장                      → openpyxl 신규 생성
+
+    ★ 상품가(S=19)는 **미기입**. 구 VBA도 T열만 건드렸고 카페24가 판매가에서 자동 재계산한다.
+    ★ 입력이 CSV라 쿠팡 filter형의 zip 수술(네이티브 포맷 보존)이 불필요 — 새 통합문서로 생성.
+    반환: (xlsx bytes, preview, skipped, missing)
+    """
+    from openpyxl import Workbook
+
+    pf = cfg["price_form"]
+    price_col = int(pf["price_col"])
+    key_col = int(cfg["cols"]["상품번호"])
+    row_by = {r["상품번호"]: r for r in rows}
+
+    targets, skipped = {}, []
+    for pid in pids:
+        ro = row_by.get(pid)
+        if not ro or ro.get("권장가") is None:
+            skipped.append(pid)
+            continue
+        targets[pid] = int(ro["권장가"])
+
+    text = raw_csv.decode("utf-8-sig") if isinstance(raw_csv, (bytes, bytearray)) else raw_csv
+    rdr = list(csv.reader(StringIO(text)))
+    header_rows = rdr[:cfg["data_start"] - 1]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = pf.get("sheet") or "양식"
+    for hr in header_rows:
+        ws.append(hr)
+
+    seen, preview = set(), []
+    for row in rdr[cfg["data_start"] - 1:]:
+        if not row:
+            continue
+        pid = _pid(row[key_col - 1] if key_col - 1 < len(row) else "")
+        if pid not in targets:
+            continue
+        new_price = targets[pid]
+        out = list(row)
+        while len(out) < price_col:
+            out.append("")
+        cur = _num(out[price_col - 1])
+        out[price_col - 1] = new_price          # T열 판매가만 교체(상품가 S는 원본 유지)
+        ws.append(out)
+        ws.cell(ws.max_row, price_col).value = new_price   # 숫자셀 보장
+        seen.add(pid)
+        ro = row_by[pid]
+        preview.append({
+            "상품명": ro.get("상품명"), "현재판매가": int(cur), "새판매가": new_price,
+            "방향": "인상" if new_price > cur else ("인하" if new_price < cur else "유지"),
+        })
+
+    missing = [p for p in targets if p not in seen]   # 원본 CSV에 없는 상품번호(상품관리 전체 교체 필요)
+    out_io = BytesIO()
+    wb.save(out_io)
+    return out_io.getvalue(), preview, skipped, missing
 
 
 def build_bulk_price_xlsx(raw_xlsx: bytes, new_prices: dict,
