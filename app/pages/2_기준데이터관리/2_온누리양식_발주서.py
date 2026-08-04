@@ -6,6 +6,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))  # repo root
 import streamlit as st
 import pandas as pd
 
+from core.base import sanitize_ref_df
+
 REPO_ROOT = Path(__file__).parent.parent.parent.parent
 REF_DIR   = REPO_ROOT / "reference"
 REPO      = "OURPROJECTDAO/work-automation-app"
@@ -25,6 +27,7 @@ def _gh_get_sha(path: str, pat: str) -> str | None:
 def _gh_put_csv(path: str, df: pd.DataFrame, msg: str, pat: str) -> bool:
     url = f"https://api.github.com/repos/{REPO}/contents/{urllib.parse.quote(path)}"
     sha = _gh_get_sha(path, pat)
+    df = sanitize_ref_df(df)   # 붙여넣기 개행·유령 빈행 제거 (2026-08-04)
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
     payload: dict = {"message": msg, "content": base64.b64encode(csv_bytes).decode()}
     if sha: payload["sha"] = sha
