@@ -25,7 +25,7 @@ _REF = Path(__file__).parent.parent.parent / "reference"
 _APP_REPO = "OURPROJECTDAO/work-automation-app"
 _SKIP_PATH = "reference/upload_skip.csv"
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-_CODE_COLS = {"상품코드", "관리코드"}  # 엑셀 자동변환(앞0 제거·날짜화) 방지 → 텍스트 서식
+_CODE_COLS = {"상품코드", "관리코드", "소분코드", "PC코드"}  # 엑셀 자동변환(앞0 제거·날짜화) 방지 → 텍스트 서식
 
 
 def _to_xlsx(df, text_cols, sheet_name="업로드감시") -> bytes:
@@ -81,7 +81,9 @@ st.caption(
     "박스재고가 있는데 채널에 아직 등록 안 된 상품(업로드필요)과, 재고0인데 채널엔 살아있는 "
     "상품(품절처리필요)을 채널별로 점검합니다. 등록현황은 채널마진모니터 상품관리 스냅샷 기준, "
     "재고·매입가는 상품관리(product_master) 기준. 우선순위는 재고금액(박스재고×박스매입가)입니다. "
-    "낱개·박스·소분·합포 중 하나라도 올라가 있으면 등록된 것으로 봅니다."
+    "낱개·박스·소분·합포 중 하나라도 올라가 있으면 등록된 것으로 봅니다. "
+    "소분코드·PC코드 컬럼은 그 관리코드에서 파생돼 **등록된** 코드이며(미등록이면 빈칸), "
+    "판정에는 관여하지 않는 참고 정보입니다."
 )
 
 
@@ -154,7 +156,7 @@ else:
     st.caption("채널을 하나 이상 선택하면 해당 상태 컬럼과 컬럼 필터가 표시됩니다.")
 
 sc1, sc2, sc3, sc4 = st.columns([3, 1.5, 1.6, 1.4])
-search = sc1.text_input("🔍 검색", placeholder="관리코드 · 상품코드 · 상품명 (부분일치)",
+search = sc1.text_input("🔍 검색", placeholder="관리코드 · 상품코드 · 소분코드 · PC코드 · 상품명 (부분일치)",
                         label_visibility="collapsed")
 min_stock = sc2.number_input("박스재고 ≥", min_value=0, value=0, step=1,
                              help="박스재고가 이 값 이상인 상품만 (0=미적용)")
@@ -178,11 +180,13 @@ for k in selected:
 if search:
     q = um._nfc(search).lower()
     hay = (view["관리코드"].astype(str) + " ||| " + view["상품코드"].astype(str)
+           + " ||| " + view["소분코드"].astype(str) + " ||| " + view["PC코드"].astype(str)
            + " ||| " + view["상품명"].astype(str)).str.lower()
     view = view[hay.str.contains(q, regex=False, na=False)]
 
 # 표시: 기본정보 + 선택 채널 컬럼(재고금액 옆). 채널키→라벨 헤더.
-base_cols = ["상품코드", "관리코드", "상품명", "박스재고", "박스매입가", "재고금액"]
+base_cols = ["상품코드", "관리코드", "소분코드", "PC코드", "상품명",
+             "박스재고", "박스매입가", "재고금액"]
 view_reset = view.reset_index(drop=True)
 disp = view_reset[base_cols + selected].rename(columns=um.CHANNEL_LABEL)
 
