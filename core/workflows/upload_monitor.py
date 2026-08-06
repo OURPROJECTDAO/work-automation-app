@@ -147,6 +147,42 @@ def _load_skip(ref_dir) -> set[tuple[str, str]]:
         return parse_skip_text(f.read())
 
 
+# ── 파생코드 (소분 / PC낱개) ─────────────────────────────────────────────────
+# 원박스 관리코드에서 파생돼 "실제로 등록된" 코드만 보여준다(표시 전용·판정 무관).
+#   소분   = sobun.csv(변환관리코드→원코드) — resolve_identity가 쓰는 정본과 동일 소스.
+#   PC낱개 = unit_list.csv·sub_list.csv 의 PC 행(원코드 키). PC+상품코드 규칙상 코드는 늘
+#            만들 수 있지만, 여기선 **등록된 것만** — 미등록은 빈칸(신규 채번 대상).
+# 복수면 ', ' 결합. 판정(업로드필요/이상없음)에는 일절 관여하지 않는다.
+DERIVED_COLS = ["소분코드", "PC코드"]
+
+
+def _pc_origin_rows(ref_dir):
+    """unit_list·sub_list → (관리코드, 원코드) 제너레이터. 파일 없으면 건너뜀."""
+    for name in ("unit_list.csv", "sub_list.csv"):
+        p = Path(ref_dir) / name
+        if not p.exists():
+            continue
+        with open(p, encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                yield _nfc(row.get("관리코드")), _nfc(row.get("원코드"))
+
+
+def derived_code_map(ref_dir, refs: dict) -> dict[str, dict[str, str]]:
+    """원박스 관리코드 → {"소분코드": str, "PC코드": str}. 없으면 빈 문자열."""
+    sub: dict[str, list[str]] = {}
+    for code, r in (refs.get("sobun") or {}).items():
+        origin, c = _nfc(r.get("원코드")), _nfc(code)
+        if origin and c and c not in sub.setdefault(origin, []):
+            sub[origin].append(c)
+    pc: dict[str, list[str]] = {}
+    for code, origin in _pc_origin_rows(ref_dir):
+        if origin and code.upper().startswith("PC") and code not in pc.setdefault(origin, []):
+            pc[origin].append(code)
+    return {k: {"소분코드": ", ".join(sorted(sub.get(k, []))),
+                "PC코드": ", ".join(sorted(pc.get(k, [])))}
+            for k in set(sub) | set(pc)}
+
+
 def build_uploaded_sets(ref_dir, refs: dict, keys: list[str] | None = None) -> dict[str, set[str]]:
     """채널별 업로드된 상품코드 집합. {key: set(상품코드)}."""
     keys = keys or CHANNEL_KEYS
@@ -163,7 +199,8 @@ def build_gap_table(ref_dir, refs: dict | None = None,
                     skip_pairs: set | None = None) -> list[dict]:
     """업로드감시 메인 테이블 (재고금액 desc).
 
-    각 row: 상품코드·관리코드·상품명·박스재고·박스매입가·재고금액 + 채널키별 상태.
+    각 row: 상품코드·관리코드·소분코드·PC코드·상품명·박스재고·박스매입가·재고금액 + 채널키별 상태.
+    소분코드/PC코드 = 그 관리코드에서 파생돼 등록된 코드(표시 전용·미등록이면 빈칸).
     상태 = 이상없음 / 업로드필요 / 품절처리필요 / 업로드불필요 / 업로드제외.
     - 노이즈(재고≤0 & 어디에도 미업로드) 행은 제외.
     - 채널별 업로드제외(skip): (상품코드,채널) 쌍은 그 채널이 '업로드필요'일 때 '업로드제외'로 덮음(우선).
@@ -172,6 +209,7 @@ def build_gap_table(ref_dir, refs: dict | None = None,
     if refs is None:
         refs = load_references(ref_dir)
     uploaded = build_uploaded_sets(ref_dir, refs)
+    derived = derived_code_map(ref_dir, refs)
     exclude = _load_exclude(ref_dir)
     skip = _load_skip(ref_dir) if skip_pairs is None else set(skip_pairs)
     skip_by_sc: dict[str, set[str]] = {}
@@ -188,9 +226,13 @@ def build_gap_table(ref_dir, refs: dict | None = None,
         if stock <= 0 and not any_up:
             continue  # 노이즈 제외
         sc_skip = skip_by_sc.get(sc, set())
+        mg = _nfc(r.get("관리코드"))
+        dv = derived.get(mg, {})
         row = {
             "상품코드": sc,
-            "관리코드": _nfc(r.get("관리코드")),
+            "관리코드": mg,
+            "소분코드": dv.get("소분코드", ""),
+            "PC코드": dv.get("PC코드", ""),
             "상품명": _nfc(r.get("상품명")),
             "박스재고": stock,
             "박스매입가": buy,
