@@ -9,7 +9,7 @@ import json
 import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from io import StringIO
+from io import BytesIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # repo root
@@ -512,6 +512,56 @@ DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형"
            "매입가", "판매가", "배송비", "정산액", "마진율", "기준마진율", "탐지", "권장가/제한",
            "전월매출", "전월매출(전체)", "비고"]
 
+# ── 표 XLSX 내보내기 ────────────────────────────────────────────────────────
+#   ★ 코드류(상품번호·관리코드·규격)는 반드시 텍스트 — 숫자/날짜 자동변환 방지
+#     ('45-21'→날짜, 알리 상품번호 16자리→지수표기. 전역 pitfalls '코드 열은 문자열 유지').
+_X_TEXT = {"상품번호", "관리코드", "상품명", "규격", "코드유형", "탐지", "권장가/제한", "비고"}
+_X_PCT = {"마진율", "기준마진율"}
+_X_WIDTH = {"상품번호": 20, "관리코드": 20, "상품명": 46, "규격": 14, "코드유형": 10,
+            "탐지": 12, "권장가/제한": 16, "비고": 22, "전월매출": 14, "전월매출(전체)": 14,
+            "기준마진율": 11, "마진율": 10, "정산액": 12, "매입가": 12, "판매가": 12}
+
+
+def _export_xlsx(frame: pd.DataFrame, title: str) -> bytes:
+    """모니터 표 → xlsx(서식 포함). 헤더 고정·필터·금액 콤마·마진율 %·코드 텍스트."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "마진모니터"
+    cols = list(frame.columns)
+    for i, name in enumerate(cols, 1):
+        c = ws.cell(1, i, name)
+        c.font = Font(bold=True)
+        c.fill = PatternFill("solid", fgColor="EEF1F8")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    for ri, (_, row) in enumerate(frame.iterrows(), 2):
+        for ci, name in enumerate(cols, 1):
+            v = row[name]
+            if v is None or (isinstance(v, float) and pd.isna(v)) or (isinstance(v, str) and v == ""):
+                continue                                  # 빈칸 유지(0으로 채우지 않음)
+            cell = ws.cell(ri, ci)
+            if name in _X_TEXT:
+                cell.value = str(v)
+                cell.alignment = Alignment(horizontal="left")
+            else:
+                try:
+                    cell.value = float(v)
+                except (TypeError, ValueError):
+                    cell.value = str(v)
+                    continue
+                cell.number_format = "0.0%" if name in _X_PCT else "#,##0"
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{max(ws.max_row, 1)}"
+    for i, name in enumerate(cols, 1):
+        ws.column_dimensions[get_column_letter(i)].width = _X_WIDTH.get(name, 12)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 # ── 선택 — st.dataframe 다중행 선택(헤더 체크박스=전체선택 + 개별, 현재 필터/검색 기준) ──
 st.session_state.setdefault("cmm_tblver", 0)  # 저장 시 +1 → 표 선택 강제 초기화(두뇌④ mo_tblver 패턴)
 view_reset = view.reset_index(drop=True)
@@ -538,14 +588,12 @@ st.caption(f"표시 {len(view):,} / 전체 {len(df):,}건 · ✅ 선택 **{len(s
 # ── 내보내기: CSV / 가격 일괄변경 양식 ───────────────────────────────────────
 dc1, dc2 = st.columns(2)
 
-csv_src = df[df["상품번호"].isin(sel_pids)] if sel_pids else view
-csv_buf = StringIO()
-csv_src[DISPLAY].to_csv(csv_buf, index=False)
+xl_src = df[df["상품번호"].isin(sel_pids)] if sel_pids else view
 dc1.download_button(
-    f"📄 CSV 다운로드 ({'선택 '+str(len(sel_pids)) if sel_pids else '현재필터 '+str(len(view))}건)",
-    data=csv_buf.getvalue().encode("utf-8-sig"),
-    file_name=f"{channel}_마진모니터.csv",
-    mime="text/csv",
+    f"📄 XLSX 다운로드 ({'선택 '+str(len(sel_pids)) if sel_pids else '현재필터 '+str(len(view))}건)",
+    data=_export_xlsx(xl_src[DISPLAY], channel),
+    file_name=f"{channel}_마진모니터_{datetime.now(_KST):%Y%m%d}.xlsx",
+    mime=_XLSX_MIME,
     width="stretch",
 )
 
