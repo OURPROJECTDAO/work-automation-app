@@ -230,7 +230,15 @@ CHANNEL_CONFIG: dict[str, dict] = {
             },
         },
         # consolidate 채널은 cols/sheet 미사용(다중시트). 즉시할인·포인트·배송비·바코드·정가 없음.
-        # 가격변경 미구현(AliExpress 가격/재고 업로드도 동일 다중시트 양식 → 별도 검증 후).
+        # 가격 일괄변경 = **multi_filter**(2026-08-11): AliExpress 가격 수정도 같은 대량등록 양식이라
+        #   저장된 원본(listing_ali.xlsx)에서 보이는 카테고리 시트마다 선택 상품 행만 남기고
+        #   '*제품 소매 가격'(E)만 권장가로 교체 → zip 수술(시트보호·데이터유효성·숨김시트 원본 보존).
+        #   재고(F)·상품명 등 나머지 컬럼은 미변경. 정가 칸 없음(할인 개념 없음 → jeong 없음).
+        "price_form": {
+            "mode": "multi_filter",
+            "price_label": "*제품 소매 가격",   # consolidate.labels['판매가']와 동일(가격 기입 대상)
+            "price_decimals": 2,               # 원본 표기 '22600.00' 유지(텍스트 셀)
+        },
     },
     "esm": {
         "key": "esm",
@@ -1204,6 +1212,164 @@ def build_csv_filter_xlsx(raw_csv: bytes, rows: list[dict], pids,
     out_io = BytesIO()
     wb.save(out_io)
     return out_io.getvalue(), preview, skipped, missing
+
+
+def _sheet_parts(zin: zipfile.ZipFile) -> list[tuple[str, str, str]]:
+    """workbook.xml 순서대로 [(시트명, 파트경로, state)] — state는 'visible'/'hidden' 등."""
+    out = []
+    try:
+        wbxml = zin.read("xl/workbook.xml").decode("utf-8")
+        rels = zin.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+    except KeyError:
+        return out
+    rid2tgt = {}
+    for m in re.finditer(r"<Relationship\b[^>]*/>", rels):
+        tag = m.group(0)
+        i = re.search(r'Id="([^"]*)"', tag)
+        t = re.search(r'Target="([^"]*)"', tag)
+        if i and t:
+            tgt = t.group(1).lstrip("/")
+            if not tgt.startswith("xl/"):
+                tgt = "xl/" + tgt
+            rid2tgt[i.group(1)] = tgt
+    names = set(zin.namelist())
+    for m in re.finditer(r"<sheet\b[^>]*?/>", wbxml):
+        tag = m.group(0)
+        nm = re.search(r'name="([^"]*)"', tag)
+        rid = re.search(r'r:id="([^"]*)"', tag)
+        st = re.search(r'state="([^"]*)"', tag)
+        if not (nm and rid):
+            continue
+        tgt = rid2tgt.get(rid.group(1), "")
+        if tgt in names:
+            from xml.sax.saxutils import unescape as _un
+            out.append((_un(nm.group(1)), tgt, st.group(1) if st else "visible"))
+    return out
+
+
+def _set_text_cell(row_xml: str, ref: str, text: str) -> str:
+    """행 청크의 ref 셀을 inlineStr 텍스트로 기입(스타일 s= 보존). 셀이 없으면 컬럼 순서로 삽입."""
+    from xml.sax.saxutils import escape
+    existing = _cell_in_row(row_xml, ref)
+    val = f"<is><t>{escape(text)}</t></is>"
+    if existing is not None:
+        sm = re.search(r'\ss="(\d+)"', existing)
+        style = f' s="{sm.group(1)}"' if sm else ""
+        return row_xml.replace(existing, f'<c r="{ref}"{style} t="inlineStr">{val}</c>', 1)
+    want = _col_idx(re.match(r"[A-Z]+", ref).group(0))
+    last = None
+    for m in re.finditer(r'<c r="([A-Z]+)\d+"[^>]*?(?:/>|>.*?</c>)', row_xml, re.S):
+        if _col_idx(m.group(1)) < want:
+            last = m
+        else:
+            break
+    new_cell = f'<c r="{ref}" t="inlineStr">{val}</c>'
+    if last:
+        return row_xml[:last.end()] + new_cell + row_xml[last.end():]
+    return row_xml.replace("</row>", new_cell + "</row>", 1)
+
+
+def build_multi_filter_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
+                            cfg: dict) -> tuple[bytes, list[dict], list[str], list[str]]:
+    """다중시트 원본(알리 ALIPRODUCT 대량등록 export)에서 선택 상품만 남기고 가격을 권장가로 교체.
+
+    - 대상 시트 = **보이는 시트**만(숨김 `*_hide`/`global_hide`·skip_sheets 제외) — 정제(parse)와 동일 기준.
+    - 컬럼 위치는 헤더행(consolidate.header_row)의 **라벨로 조회**(시트마다 열 순서가 달라도 안전).
+    - `data_start` 이전 행(헤더·설명)과 **비숫자 id 행(예시 '--')은 원본 그대로 보존**, 숫자 id 행 중
+      선택분만 남긴다(미선택 삭제 → 행 연속 재번호).
+    - 기입은 가격 컬럼 1개뿐(재고·상품명 등 나머지 전 컬럼 원본 유지).
+    - ★ openpyxl 미사용 zip 수술 — 시트보호(password)·데이터유효성(OFFSET → 숨김시트)·서식·
+      워크북 보호가 원본 그대로 보존된다(openpyxl 라운드트립은 이들을 변형/유실시킬 수 있음).
+
+    returns (xlsx bytes, preview, skipped(권장가 없음), missing(원본에 없는 상품번호)).
+    """
+    con = cfg.get("consolidate") or {}
+    pf = cfg.get("price_form") or {}
+    header_row = con.get("header_row", 1)
+    start = con.get("data_start", header_row + 1)
+    skip = set(con.get("skip_sheets") or [])
+    labels = con.get("labels") or {}
+    id_label = labels.get("상품번호")
+    price_label = pf.get("price_label") or labels.get("판매가")
+    dec = int(pf.get("price_decimals", 0))
+
+    row_by = {r["상품번호"]: r for r in rows}
+    targets, skipped = {}, []
+    for pid in pids:
+        ro = row_by.get(pid)
+        if not ro or ro.get("권장가") is None:
+            skipped.append(pid)
+            continue
+        targets[pid] = (int(ro["권장가"]), ro)
+
+    zin = zipfile.ZipFile(BytesIO(raw_xlsx))
+    sst = _read_sst(zin)
+    patched: dict[str, bytes] = {}
+    found = set()
+    for name, part, state in _sheet_parts(zin):
+        if state != "visible" or name in skip:
+            continue
+        sml = zin.read(part).decode("utf-8")
+        sd = re.search(r"<sheetData[^>]*>", sml)
+        if not sd or "</sheetData>" not in sml:
+            continue
+        sd_close = sml.index("</sheetData>")
+        prefix, body, suffix = sml[:sd.end()], sml[sd.end():sd_close], sml[sd_close:]
+        chunks = re.findall(r"<row\b[^>]*>.*?</row>", body, re.S)
+        # 헤더행 라벨 → 컬럼 문자
+        hdr = next((c for c in chunks
+                    if int(re.search(r'<row r="(\d+)"', c).group(1)) == header_row), None)
+        if hdr is None:
+            continue
+        lab2col = {}
+        for m in re.finditer(r'<c r="([A-Z]+)\d+"[^>]*?(?:/>|>.*?</c>)', hdr, re.S):
+            lab2col.setdefault(_cell_text(m.group(0), sst).strip(), m.group(1))
+        c_id, c_price = lab2col.get(id_label), lab2col.get(price_label)
+        if not c_id or not c_price:
+            continue                                   # 라벨 없는 시트(구조 상이) → 손대지 않음
+        out_rows, new_idx, touched = [], 1, False
+        for rx in chunks:
+            r_old = int(re.search(r'<row r="(\d+)"', rx).group(1))
+            if r_old < start:
+                out_rows.append(_renumber_row(rx, r_old, new_idx)); new_idx += 1
+                continue
+            key = _deflo(_cell_text(_cell_in_row(rx, f"{c_id}{r_old}"), sst).strip())
+            if con.get("require_numeric_id") and not key.isdigit():
+                out_rows.append(_renumber_row(rx, r_old, new_idx)); new_idx += 1
+                continue                               # 예시행('--')·설명행 보존
+            if key not in targets:
+                touched = True
+                continue                               # 미선택 상품 행 삭제
+            price = targets[key][0]
+            rx = _set_text_cell(rx, f"{c_price}{r_old}",
+                                f"{price:.{dec}f}" if dec else str(price))
+            out_rows.append(_renumber_row(rx, r_old, new_idx))
+            found.add(key)
+            new_idx += 1
+            touched = True
+        if not touched:
+            continue
+        new_sml = prefix + "".join(out_rows) + suffix
+        new_sml = re.sub(r'(<dimension ref="[A-Z]+\d+:[A-Z]+)\d+(")',
+                         rf"\g<1>{max(new_idx - 1, 1)}\g<2>", new_sml)
+        patched[part] = new_sml.encode("utf-8")
+
+    out = BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            zout.writestr(item, patched.get(item.filename) or zin.read(item.filename))
+
+    prev = []
+    for pid in pids:
+        if pid not in found:
+            continue
+        price, ro = targets[pid]
+        cur = int(_num(ro.get("판매가")))
+        prev.append({"상품명": ro.get("상품명", ""), "현재판매가": cur, "새판매가": price,
+                     "권장가(net)": ro.get("권장가"),
+                     "방향": "인상" if price > cur else ("인하" if price < cur else "유지")})
+    missing = [p for p in targets if p not in found]
+    return out.getvalue(), prev, skipped, missing
 
 
 def build_bulk_price_xlsx(raw_xlsx: bytes, new_prices: dict,
