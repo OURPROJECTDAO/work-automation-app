@@ -339,9 +339,12 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
         if not _pat():
             st.error("저장용 PAT(st.secrets GITHUB_PAT)가 없어 커밋할 수 없습니다.")
         else:
-            # 네이티브 raw 필수 채널(filter형=쿠팡): '신규만 추가'(append_rows_to_raw=openpyxl)는
-            #   원본을 inlineStr로 변질시켜 업로더가 거부 → 비활성화. '전체 교체'(업로드 바이트 verbatim)만.
-            native_raw = cfg.get("price_form", {}).get("mode") in ("filter", "csv_filter")
+            # 원본(raw) 자체가 가격변경 양식의 출처인 채널 → '전체 교체'(업로드 바이트 verbatim)만.
+            #   filter/csv_filter(쿠팡·자사몰): '신규만 추가'(append_rows_to_raw=openpyxl)가 원본을
+            #     inlineStr로 변질시켜 업로더가 거부.
+            #   multi_filter(알리): 다중시트라 raw 병합 자체가 불가(부분 export가 raw가 되면
+            #     가격변경 양식에서 나머지 상품이 통째로 누락).
+            native_raw = cfg.get("price_form", {}).get("mode") in ("filter", "csv_filter", "multi_filter")
             b1, b2 = st.columns(2)
             if b1.button("전체 교체 저장", type="primary", width="stretch",
                          help="최신 전체 다운로드로 덮어쓰기 (신규+가격변동 반영)"
@@ -352,8 +355,8 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
                 _load_listing.clear()
                 committed = new_recs
                 flash = f"전체 교체 완료 — {meta['rows']:,}건 ({meta['updated_at']})"
-            _merge_help = ("이 채널은 네이티브 포맷 보존을 위해 '전체 교체'만 사용합니다 "
-                           "(신규만 추가=openpyxl 저장이 원본을 inlineStr로 변질 → 업로드 거부)"
+            _merge_help = ("이 채널은 원본 보존을 위해 '전체 교체'만 사용합니다 "
+                           "(가격변경 양식이 저장된 원본에서 생성되므로 항상 전체 export가 필요)"
                            if native_raw else
                            "기존 유지 + 새 상품번호만 병합 (기존 상품의 가격변동은 미반영 → 갱신은 '전체 교체')")
             if b2.button("신규만 추가", width="stretch",
@@ -372,7 +375,7 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
                 committed = merged
                 flash = f"신규 {added:,}건 추가 — 총 {meta['rows']:,}건"
             if native_raw:
-                st.caption("ℹ️ 이 채널은 '전체 교체'만 사용 — 원본 네이티브 포맷 보존(쿠팡 업로드 호환). "
+                st.caption("ℹ️ 이 채널은 '전체 교체'만 사용 — 저장된 원본이 가격변경 양식의 출처입니다. "
                            "신규만 추가는 비활성화됨.")
 
 if committed is not None:
@@ -578,6 +581,22 @@ if dc2.button(f"🛠️ 가격 일괄변경 양식 생성 (선택 {len(sel_pids)
                     "preview": prev, "append": False, "filter": True,
                     "name": f"{channel}_가격변경_{datetime.now(_KST):%Y%m%d}.xlsx",
                 }
+    elif pf and pf.get("mode") == "multi_filter":
+        # 알리형: 저장된 원본(다중시트 대량등록 양식)에서 보이는 시트마다 선택 행만 남기고
+        #   가격 컬럼(*제품 소매 가격)만 권장가로 교체 → zip 수술(보호·유효성·서식 원본 보존).
+        rcode, raw = _gh_bytes(_raw_path(key, _raw_ext(cfg)))
+        if rcode != 200 or not raw:
+            st.session_state[f"form_{key}"] = {"error": "원본 양식(.xlsx)이 저장돼 있지 않습니다. '상품관리 갱신 → 전체 교체'를 1회 실행해 주세요."}
+        else:
+            out, prev, skipped, missing = cmm.build_multi_filter_xlsx(raw, rows, sel_pids, cfg)
+            if not prev:
+                st.session_state[f"form_{key}"] = {"error": "선택 상품 중 권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
+            else:
+                st.session_state[f"form_{key}"] = {
+                    "bytes": out, "kept": len(prev), "skipped": skipped, "missing": missing,
+                    "preview": prev, "append": False, "multi_filter": True,
+                    "name": f"{channel}_가격변경_{datetime.now(_KST):%Y%m%d}.xlsx",
+                }
     elif pf and pf.get("mode") == "csv_filter":
         # 자사몰(카페24)형: CSV 다운로드 원본에서 선택 행만 남기고 T열(판매가)만 권장가로 교체 → xlsx.
         #   상품가(S)는 미기입 — 카페24가 판매가에서 자동 재계산(구 VBA CAFE24Module2와 동일).
@@ -651,6 +670,10 @@ if form:
             st.caption(f"★ {channel} 일괄수정 양식입니다. 선택 상품만 기입 — 판매단가=기준마진 달성 권장가, "
                        "정가/할인전단가는 판매단가 이상으로 보존, 고정값(변경타입·진열·수량 등)은 양식 규칙대로 채웠습니다. "
                        f"{channel}에 그대로 업로드하세요.")
+        elif form.get("multi_filter"):
+            st.caption(f"★ {channel} 대량등록(가격수정) 양식입니다. 카테고리 시트별로 **선택 상품 행만** 남기고 "
+                       "**'*제품 소매 가격'만** 기준마진 달성 권장가로 교체했습니다(재고·상품명 등 나머지 컬럼과 "
+                       "시트 보호·목록 유효성은 원본 그대로). 알리 대량등록 업로드에 그대로 올리세요.")
         elif form.get("csv_filter"):
             st.caption(f"★ {channel} 업로드 파일입니다. 선택 상품만 남기고 **판매가(T열)만** "
                        "기준마진 달성 권장가로 교체했습니다. 상품가는 카페24가 판매가에서 자동 재계산하므로 "
