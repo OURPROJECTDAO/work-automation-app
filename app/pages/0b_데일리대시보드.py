@@ -379,7 +379,8 @@ def _reco_lookup(pairs, buffer=0.0):
 
 
 def _supports_price_change(cfg) -> bool:
-    """가격변경 시트 생성 가능 채널? price_form(append/filter) 또는 스마트스토어형 bulk(즉시할인 cols·consolidate 아님). 알리=불가."""
+    """가격변경 시트 생성 가능 채널? price_form(append/filter/csv_filter/multi_filter) 또는
+    스마트스토어형 bulk(즉시할인 cols). 알리도 multi_filter로 지원(2026-08-11)."""
     if cfg.get("price_form"):
         return True
     cols = cfg.get("cols") or {}
@@ -401,6 +402,17 @@ def _gen_price_form(channel, cfg, pf, recs, rows, pids):
             if rc != 200 or not raw:
                 return {"channel": channel, "error": f"{channel} 원본양식(.xlsx)이 없습니다. 채널마진모니터에서 '상품관리 갱신 → 전체 교체'를 1회 실행하세요."}
             out, prev, _sk, _ms = cmm.build_filter_price_xlsx(raw, rows, pids, cfg)
+            if not prev:
+                return {"channel": channel, "error": "권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
+        elif mode in ("multi_filter", "csv_filter"):
+            ext = "csv" if mode == "csv_filter" else "xlsx"
+            path = (f"reference/listing_{cfg['key']}_raw.csv" if ext == "csv"
+                    else f"reference/listing_{cfg['key']}.xlsx")
+            rc, raw = _gh_raw(path)
+            if rc != 200 or not raw:
+                return {"channel": channel, "error": f"{channel} 원본 다운로드(.{ext})가 없습니다. 채널마진모니터에서 '상품관리 갱신 → 전체 교체'를 1회 실행하세요."}
+            build = cmm.build_multi_filter_xlsx if mode == "multi_filter" else cmm.build_csv_filter_xlsx
+            out, prev, _sk, _ms = build(raw, rows, pids, cfg)
             if not prev:
                 return {"channel": channel, "error": "권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
         else:  # 스마트스토어 bulk(원본 filter)
@@ -426,8 +438,8 @@ def _do_price_change(channel, codes):
     cfg = cmm.CHANNEL_CONFIG.get(_cmm_key(channel)) or {}
     pf = cfg.get("price_form")
     if not _supports_price_change(cfg):
-        st.info(f"**{channel}**는 가격변경 양식이 아직 없습니다(예: 알리). "
-                "지원: 스마트스토어·식봄·캐시노트·배민상회·쿠팡·올웨이즈·ESM.")
+        st.info(f"**{channel}**는 가격변경 양식이 아직 없습니다. "
+                "지원: 스마트스토어·식봄·캐시노트·배민상회·쿠팡·올웨이즈·ESM·알리·자사몰.")
         return
     data = _cmm_listing(channel)
     if not data:
