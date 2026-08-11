@@ -240,6 +240,39 @@ CHANNEL_CONFIG: dict[str, dict] = {
             "price_decimals": 2,               # 원본 표기 '22600.00' 유지(텍스트 셀)
         },
     },
+    "리테일앤인사이트": {
+        "key": "retail",
+        # B2B 공급처(토마토 플랫폼). 정산 = 판매가×(1−2%) · 배송비 수입 없음 · 실택배비 우리 부담.
+        #   (retail-insight-pricing 워크플로우에서 사용자 확정한 공식과 동일)
+        "commission": 0.02,
+        "ship_settle": 0.967,      # 배송비 수입 0이라 미사용(형식 유지)
+        "real_ship": 2700,
+        "ship_fee_const": 0,       # 배송비 항상 0(정산에 미반영)
+        "baseline_col": "토마토",   # baseline_margin.csv 열 이름(=플랫폼명). 채널 표시명은 리테일앤인사이트.
+        "apply_floor": True,
+        "n_source": "ref",         # N = 변환표 N override → 없으면 hapo_multiplier(바코드) → 1
+        # ★ 다운로드에 **우리 관리코드가 없고 바코드(EAN-13)만** 온다 → 변환표로 해소(cmm 최초 사례).
+        #   조회 시점 변환이라 변환표만 갱신하면 재다운로드 없이 즉시 반영(기준데이터관리에서 편집).
+        "code_map": {"file": "retail_barcode_map.csv"},
+        "sheet": None,
+        "header_row": 1,
+        "data_start": 3,           # r1=헤더 · r2=배송유형 서브헤더
+        # cols(1-indexed): B(2)=상품코드(바코드, 키이자 코드) · C(3)=상품명 · P(16)=정상가 · Q(17)=기본등급 할인가.
+        #   즉시할인·포인트·배송비 컬럼 없음. 정상가==할인가 전건 동일(할인율 0)이라 정가는 표시용.
+        "cols": {"상품번호": 2, "코드": 2, "상품명": 3, "판매가": 17, "정가": 16},
+        # 리테일 쪽 상태/규격 보존(가격변경 양식엔 불필요하나 대조용).
+        "extra_cols": {"리테일규격": 4, "입수": 5, "품절여부": 15},
+        # 가격 일괄변경 = 알리와 같은 방식(**multi_filter**): 별도 양식이 없어 다운로드 원본이 곧 업로드 양식.
+        #   선택 행만 남기고 정상가·기본등급 할인가 두 칸을 권장가로 교체(둘이 항상 같은 값이라 함께 기입).
+        "price_form": {
+            "mode": "multi_filter",
+            "header_row": 1,
+            "data_start": 3,
+            "id_label": "상품코드",
+            "price_labels": ["정상가", "기본등급 할인가"],
+            "price_cell": "num",       # 숫자 셀(알리는 '22600.00' 텍스트)
+        },
+    },
     "esm": {
         "key": "esm",
         "commission": 0.175,       # 17.5% 단일 (골든 정산=가격×0.825=×(1−0.175) 정확 재현, 사용자 확정 2026-06-12).
@@ -457,8 +490,8 @@ def _pick_ws(wb, cfg):
 
 
 # ── reference 로딩 ──────────────────────────────────────────────────────────
-def load_references(ref_dir) -> dict:
-    """app reference/ 에서 4종 로드 → dict."""
+def load_references(ref_dir, code_map_file: str | None = None) -> dict:
+    """app reference/ 에서 4종(+선택 code_map) 로드 → dict."""
     ref_dir = Path(ref_dir)
     pm_by_mgmt: dict[str, dict] = {}
     pm_by_prod: dict[str, dict] = {}
@@ -489,6 +522,18 @@ def load_references(ref_dir) -> dict:
                 if k and k not in hapo:
                     hapo[k] = _num(row.get("합포량"), 1.0)
 
+    # 채널 다운로드에 우리 관리코드가 없고 **바코드만** 오는 채널(리테일앤인사이트)용 변환표.
+    #   {바코드: {관리코드, N(선택 override), 상품명}}. 파일 없으면 빈 dict(무영향).
+    code_map: dict[str, dict] = {}
+    if code_map_file:
+        cmp_path = ref_dir / code_map_file
+        if cmp_path.exists():
+            with open(cmp_path, encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    k = _nfc(row.get("바코드"))
+                    if k:
+                        code_map.setdefault(k, row)
+
     return {
         "pm_by_mgmt": pm_by_mgmt,
         "pm_by_prod": pm_by_prod,
@@ -496,6 +541,7 @@ def load_references(ref_dir) -> dict:
         "baseline": _load("baseline_margin.csv", "관리코드"),
         "floor": _load("margin_floor.csv", "관리코드"),
         "hapo": hapo,
+        "code_map": code_map,
     }
 
 
@@ -729,27 +775,35 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
         else:
             comm = cfg["commission"]
         rate = 1 - comm                        # 판매가net에 곱하는 정산비율
-        typ, base, stock, spec, note = resolve_code(rec["코드"], refs)
+        # ★ 바코드형 채널(리테일앤인사이트): 다운로드 '코드'=바코드 → 변환표로 관리코드 해소.
+        #   **조회 시점 변환**(parse 시점 아님) → 변환표만 갱신하면 재다운로드 없이 즉시 반영.
+        cmrow = refs.get("code_map", {}).get(rec["코드"]) if cfg.get("code_map") else None
+        code = _nfc(cmrow.get("관리코드")) if cmrow and _nfc(cmrow.get("관리코드")) else rec["코드"]
+        typ, base, stock, spec, note = resolve_code(code, refs)
+        if cmrow is None and cfg.get("code_map"):
+            note = "바코드 미매핑"                # 변환표에 없음 → 등록 유도(관리코드 미등록과 구분)
         if cfg.get("n_source") == "ref":
-            nv = refs.get("hapo", {}).get(rec["상품번호"], 1.0)  # 합포량(상품번호) 기본 1
+            # 변환표 N(채널 전용 override) 우선 → 없으면 hapo_multiplier(상품번호=바코드) → 1
+            nov = _num(cmrow.get("N"), 0) if cmrow else 0
+            nv = nov if nov else refs.get("hapo", {}).get(rec["상품번호"], 1.0)
             N = 1.0 if not nv else nv
         else:
             n_raw = _num(rec["바코드"], 0)
             N = 1.0 if n_raw == 0 else n_raw  # 빈값/0 → 1, 분수 허용
         row = {
-            "상품번호": rec["상품번호"], "관리코드": rec["코드"], "상품명": rec["상품명"],
+            "상품번호": rec["상품번호"], "관리코드": code, "상품명": rec["상품명"],
             "규격": spec, "코드유형": typ, "N": N, "재고": stock,
             "매입가": None, "판매가": rec["판매가"], "정가": rec.get("정가", 0), "배송비": rec["배송비"],
             "정산액": None, "마진율": None, "기준마진율": None, "탐지": None,
             "권장가": None, "제한": "", "비고": note,
         }
         # baseline 확정마진율 (판매자상품코드 직조인)
-        bm = refs["baseline"].get(rec["코드"], {})
+        bm = refs["baseline"].get(code, {})
         bv = bm.get(bcol, "")
         base_margin = _num(bv, None) if bv not in (None, "") else None
         row["기준마진율"] = base_margin
         # 마진제한 텍스트
-        fl = refs["floor"].get(rec["코드"]) if apply_floor else None
+        fl = refs["floor"].get(code) if apply_floor else None
         if fl:
             row["제한"] = _nfc(fl.get("제한내용")) or _nfc(fl.get("비고"))
 
@@ -797,7 +851,7 @@ def compute_listing(recs: list[dict], channel: str, ref_dir, baseline_override=N
     """
     if channel not in CHANNEL_CONFIG:
         raise ValueError(f"지원하지 않는 채널: {channel}")
-    refs = load_references(ref_dir)
+    refs = load_references(ref_dir, (CHANNEL_CONFIG[channel].get("code_map") or {}).get("file"))
     if baseline_override is not None:
         refs["baseline"] = baseline_override
     if floor_override is not None:
@@ -1285,13 +1339,16 @@ def build_multi_filter_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
     """
     con = cfg.get("consolidate") or {}
     pf = cfg.get("price_form") or {}
-    header_row = con.get("header_row", 1)
-    start = con.get("data_start", header_row + 1)
-    skip = set(con.get("skip_sheets") or [])
     labels = con.get("labels") or {}
-    id_label = labels.get("상품번호")
-    price_label = pf.get("price_label") or labels.get("판매가")
+    # 기하/라벨은 price_form 우선 → consolidate(알리) → 채널 기본. 단일시트 채널도 같은 빌더로 처리.
+    header_row = pf.get("header_row", con.get("header_row", cfg.get("header_row", 1)))
+    start = pf.get("data_start", con.get("data_start", cfg.get("data_start", header_row + 1)))
+    skip = set(pf.get("skip_sheets") or con.get("skip_sheets") or [])
+    id_label = pf.get("id_label") or labels.get("상품번호")
+    price_labels = pf.get("price_labels") or [pf.get("price_label") or labels.get("판매가")]
     dec = int(pf.get("price_decimals", 0))
+    as_num = pf.get("price_cell") == "num"
+    req_num = pf.get("require_numeric_id", con.get("require_numeric_id"))
 
     row_by = {r["상품번호"]: r for r in rows}
     targets, skipped = {}, []
@@ -1324,8 +1381,9 @@ def build_multi_filter_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
         lab2col = {}
         for m in re.finditer(r'<c r="([A-Z]+)\d+"[^>]*?(?:/>|>.*?</c>)', hdr, re.S):
             lab2col.setdefault(_cell_text(m.group(0), sst).strip(), m.group(1))
-        c_id, c_price = lab2col.get(id_label), lab2col.get(price_label)
-        if not c_id or not c_price:
+        c_id = lab2col.get(id_label)
+        c_prices = [lab2col[l] for l in price_labels if l in lab2col]
+        if not c_id or not c_prices:
             continue                                   # 라벨 없는 시트(구조 상이) → 손대지 않음
         out_rows, new_idx, touched = [], 1, False
         for rx in chunks:
@@ -1334,15 +1392,17 @@ def build_multi_filter_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
                 out_rows.append(_renumber_row(rx, r_old, new_idx)); new_idx += 1
                 continue
             key = _deflo(_cell_text(_cell_in_row(rx, f"{c_id}{r_old}"), sst).strip())
-            if con.get("require_numeric_id") and not key.isdigit():
+            if req_num and not key.isdigit():
                 out_rows.append(_renumber_row(rx, r_old, new_idx)); new_idx += 1
                 continue                               # 예시행('--')·설명행 보존
             if key not in targets:
                 touched = True
                 continue                               # 미선택 상품 행 삭제
             price = targets[key][0]
-            rx = _set_text_cell(rx, f"{c_price}{r_old}",
-                                f"{price:.{dec}f}" if dec else str(price))
+            for c_price in c_prices:                   # 가격 칸이 여럿(정상가·할인가)이면 같은 값 기입
+                rx = (_set_num_cell(rx, f"{c_price}{r_old}", price) if as_num
+                      else _set_text_cell(rx, f"{c_price}{r_old}",
+                                          f"{price:.{dec}f}" if dec else str(price)))
             out_rows.append(_renumber_row(rx, r_old, new_idx))
             found.add(key)
             new_idx += 1
