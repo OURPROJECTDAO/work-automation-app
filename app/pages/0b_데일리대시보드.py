@@ -404,6 +404,10 @@ def _gen_price_form(channel, cfg, pf, recs, rows, pids):
             out, prev, _sk, _ms = cmm.build_filter_price_xlsx(raw, rows, pids, cfg)
             if not prev:
                 return {"channel": channel, "error": "권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
+        elif mode == "simple":
+            out, prev, _sk = cmm.build_simple_price_xlsx(rows, pids, cfg, channel)
+            if not prev:
+                return {"channel": channel, "error": "권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
         elif mode in ("multi_filter", "csv_filter"):
             ext = "csv" if mode == "csv_filter" else "xlsx"
             path = (f"reference/listing_{cfg['key']}_raw.csv" if ext == "csv"
