@@ -262,15 +262,12 @@ CHANNEL_CONFIG: dict[str, dict] = {
         "cols": {"상품번호": 2, "코드": 2, "상품명": 3, "판매가": 17, "정가": 16},
         # 리테일 쪽 상태/규격 보존(가격변경 양식엔 불필요하나 대조용).
         "extra_cols": {"리테일규격": 4, "입수": 5, "품절여부": 15},
-        # 가격 일괄변경 = 알리와 같은 방식(**multi_filter**): 별도 양식이 없어 다운로드 원본이 곧 업로드 양식.
-        #   선택 행만 남기고 정상가·기본등급 할인가 두 칸을 권장가로 교체(둘이 항상 같은 값이라 함께 기입).
+        # 가격 일괄변경 = **simple**(2026-08-11 사용자 확정): 리테일 업로드 양식이 따로 없어
+        #   담당자에게 보낼 4컬럼 목록(바코드·상품명·현재가·제안가)을 새로 만든다.
+        #   → 저장 원본(raw) 불필요 = '신규만 추가' 병합도 그대로 사용 가능.
         "price_form": {
-            "mode": "multi_filter",
-            "header_row": 1,
-            "data_start": 3,
-            "id_label": "상품코드",
-            "price_labels": ["정상가", "기본등급 할인가"],
-            "price_cell": "num",       # 숫자 셀(알리는 '22600.00' 텍스트)
+            "mode": "simple",
+            "columns": ["바코드", "상품명", "현재가", "제안가"],
         },
     },
     "esm": {
@@ -1321,6 +1318,67 @@ def _set_text_cell(row_xml: str, ref: str, text: str) -> str:
     if last:
         return row_xml[:last.end()] + new_cell + row_xml[last.end():]
     return row_xml.replace("</row>", new_cell + "</row>", 1)
+
+
+def build_simple_price_xlsx(rows: list[dict], pids, cfg: dict,
+                            channel: str = "") -> tuple[bytes, list[dict], list[str]]:
+    """업로드 양식이 없는 채널(리테일앤인사이트)용 — 가격변경 요청 목록을 새 xlsx로 작성.
+
+    컬럼은 `price_form["columns"]` 순서 그대로(기본 바코드·상품명·현재가·제안가).
+    제안가 = 기준마진 달성 권장가(마진하한 적용 후). 바코드는 **텍스트 셀**로 박제한다
+    (EAN-13이 숫자로 들어가면 지수표기로 깨짐 — 전역 pitfalls '코드 열은 문자열 유지').
+
+    returns (xlsx bytes, preview, skipped(권장가 없음)).
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    pf = cfg.get("price_form") or {}
+    cols = list(pf.get("columns") or ["바코드", "상품명", "현재가", "제안가"])
+    row_by = {r["상품번호"]: r for r in rows}
+
+    items, prev, skipped = [], [], []
+    for pid in pids:
+        ro = row_by.get(pid)
+        if not ro or ro.get("권장가") is None:
+            skipped.append(pid)
+            continue
+        cur = int(_num(ro.get("판매가")))
+        new = int(ro["권장가"])
+        items.append((pid, ro.get("상품명", ""), cur, new))
+        prev.append({"상품명": ro.get("상품명", ""), "현재판매가": cur, "새판매가": new,
+                     "권장가(net)": ro.get("권장가"),
+                     "방향": "인상" if new > cur else ("인하" if new < cur else "유지")})
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "가격변경요청"
+    for i, name in enumerate(cols, 1):
+        c = ws.cell(1, i, name)
+        c.font = Font(bold=True)
+        c.fill = PatternFill("solid", fgColor="D9E2F3")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    for ri, (pid, nm, cur, new) in enumerate(items, 2):
+        vals = {"바코드": pid, "상품명": nm, "현재가": cur, "제안가": new}
+        for ci, name in enumerate(cols, 1):
+            v = vals.get(name, "")
+            cell = ws.cell(ri, ci)
+            if name in ("현재가", "제안가"):
+                cell.value = v
+                cell.number_format = "#,##0"
+            else:
+                cell.value = str(v)          # 바코드·상품명은 텍스트(지수표기 방지)
+    widths = {"바코드": 18, "상품명": 46, "현재가": 12, "제안가": 12}
+    for i, name in enumerate(cols, 1):
+        ws.column_dimensions[get_column_letter(i)].width = widths.get(name, 14)
+    ws.freeze_panes = "A2"
+    if items:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{len(items) + 1}"
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), prev, skipped
 
 
 def build_multi_filter_xlsx(raw_xlsx: bytes, rows: list[dict], pids,
