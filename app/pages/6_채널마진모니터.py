@@ -344,6 +344,7 @@ with st.expander("📥 상품관리 갱신 (새 다운로드 업로드)"):
             #     inlineStr로 변질시켜 업로더가 거부.
             #   multi_filter(알리): 다중시트라 raw 병합 자체가 불가(부분 export가 raw가 되면
             #     가격변경 양식에서 나머지 상품이 통째로 누락).
+            #   simple(리테일앤인사이트)은 raw를 안 쓰므로 해당 없음 — '신규만 추가' 그대로 사용 가능.
             native_raw = cfg.get("price_form", {}).get("mode") in ("filter", "csv_filter", "multi_filter")
             b1, b2 = st.columns(2)
             if b1.button("전체 교체 저장", type="primary", width="stretch",
@@ -629,6 +630,18 @@ if dc2.button(f"🛠️ 가격 일괄변경 양식 생성 (선택 {len(sel_pids)
                     "preview": prev, "append": False, "filter": True,
                     "name": f"{channel}_가격변경_{datetime.now(_KST):%Y%m%d}.xlsx",
                 }
+    elif pf and pf.get("mode") == "simple":
+        # 리테일앤인사이트형: 업로드 양식이 없어 4컬럼 요청 목록(바코드·상품명·현재가·제안가)을 새로 작성.
+        #   저장 원본(raw)이 필요 없다.
+        out, prev, skipped = cmm.build_simple_price_xlsx(rows, sel_pids, cfg, channel)
+        if not prev:
+            st.session_state[f"form_{key}"] = {"error": "선택 상품 중 권장가 산출 가능 항목이 없습니다(미매칭/기준 미설정)."}
+        else:
+            st.session_state[f"form_{key}"] = {
+                "bytes": out, "kept": len(prev), "skipped": skipped, "missing": [],
+                "preview": prev, "append": False, "simple": True,
+                "name": f"{channel}_가격변경요청_{datetime.now(_KST):%Y%m%d}.xlsx",
+            }
     elif pf and pf.get("mode") == "multi_filter":
         # 알리형: 저장된 원본(다중시트 대량등록 양식)에서 보이는 시트마다 선택 행만 남기고
         #   가격 컬럼(*제품 소매 가격)만 권장가로 교체 → zip 수술(보호·유효성·서식 원본 보존).
@@ -718,6 +731,10 @@ if form:
             st.caption(f"★ {channel} 일괄수정 양식입니다. 선택 상품만 기입 — 판매단가=기준마진 달성 권장가, "
                        "정가/할인전단가는 판매단가 이상으로 보존, 고정값(변경타입·진열·수량 등)은 양식 규칙대로 채웠습니다. "
                        f"{channel}에 그대로 업로드하세요.")
+        elif form.get("simple"):
+            st.caption("★ 담당자 회신용 **가격변경 요청 목록**입니다(바코드·상품명·현재가·제안가). "
+                       "이 채널은 별도 업로드 양식이 없어 목록으로 전달합니다. "
+                       "제안가 = 기준마진 달성 권장가(마진하한 적용 후).")
         elif form.get("multi_filter"):
             st.caption(f"★ {channel} 대량등록(가격수정) 양식입니다. 카테고리 시트별로 **선택 상품 행만** 남기고 "
                        "**'*제품 소매 가격'만** 기준마진 달성 권장가로 교체했습니다(재고·상품명 등 나머지 컬럼과 "
