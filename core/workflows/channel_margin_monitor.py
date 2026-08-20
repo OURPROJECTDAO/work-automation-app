@@ -315,6 +315,13 @@ CHANNEL_CONFIG: dict[str, dict] = {
         "ship_settle": 0.967,
         "real_ship": 2700,                # 전 채널 표준 단일
         "ship_fee_const": 3000,           # 다운로드에 배송비 숫자 없음(배송비 열 전건 공백) → 타 오픈마켓 동일 상수
+        # ★ 무료배송 리스팅 예외(2026-08-20): 카페24 '공급사'는 사실상 배송조건 그룹이다.
+        #   S00000HC/HD/HE/HJ/HK/HL = 일반합포2/3/4/5/6/8(배송비 3,000 수취),
+        #   S00000HM = 무료배송(배송비 수취 0, 판매가에 3,000 내재화).
+        #   상품명의 '무료배송' 문자열로는 판정 불가 — 이름에 없는데 HM인 건(P0000BCK)과
+        #   이름에 있는데 HM이 아닌 건(P00000QM)이 실제로 공존한다.
+        #   공급사는 A~T 밖(50열)이라 위치가 흔들릴 수 있어 헤더명 우선 + 위치 폴백.
+        "ship_fee_zero_if": {"col_name": "공급사", "values": ["S00000HM"], "col_fallback": 50},
         "baseline_col": "자사몰",           # baseline_margin.csv 자사몰 컬럼(1,230건 기설정)
         "apply_floor": True,
         "n_source": "ref",                # 합포 N = hapo_multiplier(상품코드 P0000…) — 바코드 없음
@@ -452,6 +459,25 @@ def _parse_csv_download(src, cfg: dict) -> list[dict]:
         c = col.get(key)
         return _num(cell(row, c), default) if c else default
 
+    # 행별 배송비 0 예외(무료배송 공급사 등). 헤더명으로 컬럼을 찾고, 없으면 위치 폴백.
+    zero_if = cfg.get("ship_fee_zero_if")
+    zero_col, zero_vals = None, ()
+    if zero_if:
+        hrow = rdr[cfg.get("header_row", 1) - 1] if rdr else []
+        name = zero_if.get("col_name")
+        for i, lbl in enumerate(hrow, start=1):
+            if _nfc(lbl) == name:
+                zero_col = i
+                break
+        if zero_col is None:
+            zero_col = zero_if.get("col_fallback")
+        zero_vals = tuple(zero_if.get("values", ()))
+
+    def _ship(row):
+        if zero_col and zero_vals and _nfc(cell(row, zero_col)) in zero_vals:
+            return 0.0
+        return float(ship_const) if ship_const is not None else _opt(row, "배송비")
+
     recs = []
     for row in rdr[cfg["data_start"] - 1:]:
         if not row:
@@ -464,7 +490,7 @@ def _parse_csv_download(src, cfg: dict) -> list[dict]:
             "코드": _strip_code(cell(row, col["코드"]), cfg),
             "상품명": _nfc(cell(row, col["상품명"])),
             "판매가": _opt(row, "판매가"),
-            "배송비": float(ship_const) if ship_const is not None else _opt(row, "배송비"),
+            "배송비": _ship(row),
             "즉시할인": _opt(row, "즉시할인"),
             "포인트": _opt(row, "포인트"),
             "정가": _opt(row, "정가"),
