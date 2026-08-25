@@ -259,9 +259,16 @@ CHANNEL_CONFIG: dict[str, dict] = {
         "data_start": 3,           # r1=헤더 · r2=배송유형 서브헤더
         # cols(1-indexed): B(2)=상품코드(바코드, 키이자 코드) · C(3)=상품명 · P(16)=정상가 · Q(17)=기본등급 할인가.
         #   즉시할인·포인트·배송비 컬럼 없음. 정상가==할인가 전건 동일(할인율 0)이라 정가는 표시용.
-        "cols": {"상품번호": 2, "코드": 2, "상품명": 3, "판매가": 17, "정가": 16},
+        # ★ 양식이 수시로 바뀐다(2026-08-25 17열 → 9열, 컬럼 전체가 한 칸 밀림) → 위치 고정 불가.
+        #   **헤더명 매핑**으로 해소. 판매가는 앞에서부터 있는 것 채택:
+        #   구양식=기본등급 할인가 / 신양식=정상가(수수료 2% 붙기 전 가격, 사용자 확정 2026-08-25).
+        "cols_by_header": {
+            "상품번호": "상품코드", "코드": "상품코드", "상품명": "상품명",
+            "판매가": ["기본등급 할인가", "정상가"],
+            "정가": "정상가",
+        },
         # 리테일 쪽 상태/규격 보존(가격변경 양식엔 불필요하나 대조용).
-        "extra_cols": {"리테일규격": 4, "입수": 5, "품절여부": 15},
+        "extra_cols_by_header": {"리테일규격": "규격", "입수": "입수", "품절여부": "품절여부"},
         # 가격 일괄변경 = **simple**(2026-08-11 사용자 확정): 리테일 업로드 양식이 따로 없어
         #   담당자에게 보낼 4컬럼 목록(바코드·상품명·현재가·제안가)을 새로 만든다.
         #   → 저장 원본(raw) 불필요 = '신규만 추가' 병합도 그대로 사용 가능.
@@ -713,6 +720,50 @@ def _consolidate_parse(wb, cfg: dict, con: dict) -> list[dict]:
     return recs
 
 
+_REQUIRED_COLS = ("상품번호", "코드", "상품명", "판매가")
+
+
+def _resolve_cols_by_header(ws, cfg: dict) -> tuple[dict, dict, set]:
+    """헤더 라벨 → 컬럼 인덱스 해소 (cols_by_header 채널 전용).
+
+    리테일앤인사이트처럼 **다운로드 양식이 수시로 바뀌는** 채널용. 컬럼을 위치가 아니라
+    헤더 이름으로 잡으므로 열이 밀리거나 빠져도 이름만 같으면 붙는다.
+    값은 str 또는 list(앞에서부터 있는 것 채택 — 예 판매가=["기본등급 할인가","정상가"]).
+    필수 키가 안 잡히면 **조용히 틀리지 않고 즉시 예외** — 위치 고정 파싱이 상품명을
+    코드로 읽어 전건 미매칭 + 판매가 0 으로 listing 을 오염시킨 사고(2026-08-25) 재발 방지.
+    반환 = (cols, extra_cols, 헤더라벨 집합[서브헤더 행 방어용]).
+    """
+    hrow = cfg.get("header_row", 1)
+    found = {}
+    for c in range(1, ws.max_column + 1):
+        lab = _nfc(ws.cell(hrow, c).value)
+        if lab and lab not in found:
+            found[lab] = c
+
+    def pick(spec):
+        for name in ([spec] if isinstance(spec, str) else spec):
+            if _nfc(name) in found:
+                return found[_nfc(name)]
+        return None
+
+    col, miss = {}, []
+    for key, spec in cfg["cols_by_header"].items():
+        c = pick(spec)
+        if c:
+            col[key] = c
+        elif key in _REQUIRED_COLS:
+            miss.append(f"{key}({spec})")
+    if miss:
+        raise ValueError("다운로드 양식에서 필수 컬럼을 못 찾았습니다: " + ", ".join(miss)
+                         + " / 이 파일의 헤더: " + ", ".join(found))
+    extra = {}
+    for name, spec in cfg.get("extra_cols_by_header", {}).items():
+        c = pick(spec)
+        if c:
+            extra[name] = c
+    return col, extra, set(found)
+
+
 def parse_download(file, cfg: dict) -> list[dict]:
     """채널 상품관리 다운로드(.xlsx) → 레코드 리스트.
 
@@ -729,7 +780,12 @@ def parse_download(file, cfg: dict) -> list[dict]:
     if con:                                   # 알리: 카테고리별 다중시트+다단헤더 → 정제 통합(매크로 대체)
         return _consolidate_parse(wb, cfg, con)
     ws = _pick_ws(wb, cfg)
-    col = cfg["cols"]
+    by_header = bool(cfg.get("cols_by_header"))
+    _hdr_labels = set()
+    if by_header:                             # 리테일: 양식 가변 → 헤더명으로 컬럼 해소
+        col, _extra_cols, _hdr_labels = _resolve_cols_by_header(ws, cfg)
+    else:
+        col, _extra_cols = cfg["cols"], cfg.get("extra_cols", {})
     ship_const = cfg.get("ship_fee_const")
     ship_policy = cfg.get("ship_fee_policy")  # {col, map, default} — 컬럼값 조건부 배송비(캐시노트)
     excl_col = cfg.get("exclude_row_if_col_filled")  # 그 컬럼에 값 있으면 행 제외(쿠팡 바코드=로켓그로스)
@@ -752,6 +808,8 @@ def parse_download(file, cfg: dict) -> list[dict]:
         pid = ws.cell(r, col["상품번호"]).value
         if pid in (None, ""):
             continue
+        if by_header and _nfc(pid) in _hdr_labels:
+            continue                              # 서브헤더 행(양식별로 위치가 달라 data_start 만으론 불충분)
         if excl_col is not None and ws.cell(r, excl_col).value not in (None, ""):
             continue                              # 로켓그로스(바코드 값 존재) → 판매자택배 모니터 제외
         if incl is not None and _nfc(ws.cell(r, incl["col"]).value) != incl["value"]:
@@ -769,7 +827,7 @@ def parse_download(file, cfg: dict) -> list[dict]:
             "바코드": ws.cell(r, bc).value if bc else None,
             "오퍼코드": "", "옵션코드": "",          # 가격변경 양식 A/D용(캐시노트). 그 외 채널 공백
         }
-        for name, c in cfg.get("extra_cols", {}).items():   # 다운로드 추가 컬럼 보존(OFR/SKU·옵션번호 등)
+        for name, c in _extra_cols.items():                 # 다운로드 추가 컬럼 보존(OFR/SKU·옵션번호 등)
             rec[name] = _pid(ws.cell(r, c).value)           # 숫자ID(옵션번호) float '..0' 방지 — _pid 정수화
         recs.append(rec)
     dk = cfg.get("dedup_key")
