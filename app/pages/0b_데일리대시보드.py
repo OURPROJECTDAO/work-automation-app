@@ -826,12 +826,22 @@ else:
             _ev = st.dataframe(_disp[_order], hide_index=True, width="stretch", height=460,
                                on_select="rerun", selection_mode="multi-row", key="d_table",
                                column_config=_ccfg)
-            st.download_button("📥 XLSX (전체 이상치)", _to_xlsx(anom, "당일마진이상"),
-                               "당일마진_이상.xlsx", key="d_dl")
             try:
                 _sel = list(_ev.selection["rows"])
             except Exception:
                 _sel = []
+            _dc = st.columns([1, 1, 2])
+            with _dc[0]:
+                st.download_button("📥 XLSX (전체 이상치)", _to_xlsx(anom, "당일마진이상"),
+                                   "당일마진_이상.xlsx", key="d_dl", width="stretch")
+            with _dc[1]:
+                # 선택행은 화면에 보이는 _disp(권장가·판정·월매출 포함) 기준으로 그대로 내보낸다
+                _seldf = _disp[_order].iloc[_sel] if _sel else _disp[_order].iloc[0:0]
+                st.download_button(
+                    f"☑️ XLSX (선택 {len(_sel)}건)", _to_xlsx(_seldf, "선택상품"),
+                    f"당일마진_선택{len(_sel)}건.xlsx", key="d_dl_sel",
+                    disabled=not _sel, width="stretch",
+                    help="왼쪽 체크박스로 고른 행만. 검색·보기 필터가 적용된 화면 기준.")
             if _sel:
                 _selrows = _show.iloc[_sel]
                 _selch = sorted(set(_selrows["채널"]))
