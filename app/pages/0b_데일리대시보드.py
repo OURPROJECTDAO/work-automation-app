@@ -724,10 +724,37 @@ else:
         _gsty = _gd.style.format({"매출(net)": "{:,.0f}", "원가": "{:,.0f}", "마진": "{:,.0f}",
                                   "택배(박스)": "{:,.0f}", "마진%": "{:.1f}", "품목수": "{:,.0f}"})
         st.dataframe(_gsty, hide_index=True, width="stretch")
-        _view = st.radio("보기", ["이상치만", "전체"], horizontal=True, key="d_view")
+        _vc = st.columns([1, 2])
+        with _vc[0]:
+            _view = st.radio("보기", ["이상치만", "전체"], horizontal=True, key="d_view")
+        with _vc[1]:
+            _q = st.text_input(
+                "검색 (관리코드·상품명·채널)", key="d_q",
+                placeholder="예: 45-07 / 스팸 8호 / 코카콜라, 스프라이트",
+                help="공백=AND(모두 포함) · 쉼표=OR(하나라도). 대소문자·자모 정규화 무시.")
         _show = (anom if _view == "이상치만" else ddf).reset_index(drop=True)
+        _q = (_q or "").strip()
+        _hit_all = len(_show)
+        if _q:
+            # 관리코드+상품명+채널을 한 문자열로 합쳐 검색(_nfc 로 자모 정규화 — 코드 표기 흔들림 대응)
+            _hay = (_show["관리코드"].astype(str) + " " + _show["상품명"].astype(str)
+                    + " " + _show["채널"].astype(str)).map(lambda v: _nfc(v).lower())
+            _mask = pd.Series(False, index=_show.index)
+            for _grp in _q.split(","):                       # 쉼표 = OR
+                _terms = [_nfc(t).lower() for t in _grp.split() if t.strip()]
+                if not _terms:
+                    continue
+                _sub = pd.Series(True, index=_show.index)
+                for _t in _terms:                            # 공백 = AND
+                    _sub &= _hay.str.contains(_t, regex=False, na=False)
+                _mask |= _sub
+            _show = _show[_mask].reset_index(drop=True)
+            st.caption(f"🔎 검색 `{_q}` — {len(_show)} / {_hit_all} 건")
         if _show.empty:
-            st.success("✅ 당일 역마진·기준 미달 상품이 없습니다.")
+            if _q:
+                st.info("검색 결과가 없습니다. 검색어를 지우거나 '전체' 보기로 바꿔보세요.")
+            else:
+                st.success("✅ 당일 역마진·기준 미달 상품이 없습니다.")
         else:
             _lk = _reco_lookup({(ch, _nfc(mc)) for ch, mc in zip(_show["채널"], _show["관리코드"])}, buffer=float(buffer))
             _disp = _show.copy()
