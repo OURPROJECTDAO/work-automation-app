@@ -188,6 +188,46 @@ def _commit_floor(new_text: str):
     _gh(_FLOOR_PATH, "PUT", payload)
 
 
+_COUPON_PATH = "reference/channel_coupon.csv"
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_coupon_text() -> str:
+    """channel_coupon.csv 를 GitHub 라이브로 읽음 → 쿠폰율 편집 즉시 반영."""
+    code, text = _gh(_COUPON_PATH, raw=True)
+    return text if code == 200 else ""
+
+
+def _commit_coupon(new_text: str):
+    code, m = _gh(_COUPON_PATH)
+    payload = {"message": "data(coupon): 채널 의무쿠폰 갱신(대시보드 편집)",
+               "content": base64.b64encode(new_text.encode("utf-8")).decode()}
+    if code == 200:
+        payload["sha"] = m["sha"]
+    _gh(_COUPON_PATH, "PUT", payload)
+
+
+_COUPON_COLS = ["채널", "쿠폰율", "적용대상", "시작일", "종료일", "비고"]
+
+
+def _coupon_rows(text: str) -> list[dict]:
+    if not text.strip():
+        return []
+    rd = csv.DictReader(io.StringIO(text.lstrip("\ufeff")))
+    return [{c: (r.get(c) or "").strip() for c in _COUPON_COLS} for r in rd]
+
+
+def _coupon_text(rows: list[dict]) -> str:
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=_COUPON_COLS, lineterminator="\n")
+    w.writeheader()
+    for r in rows:
+        if not str(r.get("채널", "")).strip():
+            continue
+        w.writerow({c: str(r.get(c, "") or "").strip() for c in _COUPON_COLS})
+    return buf.getvalue()
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _load_refs():
     """canonical_code용 reference(sobun·pm_by_prod 등). 가벼운 csv 로드."""
@@ -276,17 +316,23 @@ def _col_config(cfg: dict, prev_ym=None) -> dict:
                    help="리스팅 판매가. 정산액엔 즉시할인·포인트 차감 후(net) 반영"),
         "배송비": NC("배송비", format="localized",
                    help=f"정산 반영 배송비 — {ship_src}. 정산액에 ×{settle} 가산"),
+        "쿠폰율": NC("쿠폰율", format="percent",
+                   help=("채널 의무쿠폰(channel_coupon.csv). 수수료는 쿠폰 **전** 판매가 기준이라 "
+                         "정산비율에서 **차감**(승산 아님) · 배송비엔 미적용 · 0=미대상")),
         "정산액": NC("정산액", format="localized",
-                   help=f"= (판매가 − 즉시할인 − 포인트) × {rate_txt} + 배송비 × {settle}   (수수료 {comm_txt})"),
+                   help=f"= (판매가 − 즉시할인 − 포인트) × ({rate_txt} − 쿠폰율) + 배송비 × {settle}   (수수료 {comm_txt})"),
         "마진율": NC("마진율", format="percent",
-                   help=f"= (정산액 − 매입가 − {ship:,}) ÷ 정산액   (실택배비 {ship:,}원)"),
+                   help=f"= (정산액 − 매입가 − {ship:,}) ÷ 정산액   (실택배비 {ship:,}원). **의무쿠폰 반영 실질값**"),
+        "쿠폰전마진율": NC("쿠폰전마진율", format="percent",
+                      help="의무쿠폰을 뺐을 때의 마진율(참고). 쿠폰 미대상 상품은 빈칸"),
         "기준마진율": NC("기준마진율", format="percent",
                      help=f"baseline_margin '{cfg['baseline_col']}' 컬럼의 확정마진율"),
         "탐지": NC("탐지(현-기준)", format="percent",
                   help="= 마진율 − 기준마진율. -1%p 미만이면 '마진미달'"),
         "권장가/제한": TC("권장가 / 제한",
                       help=(f"기준마진 달성 판매가(net 기준, 100원 올림): "
-                            f"⌈((매입가+{ship:,})÷(1−기준마진율) − 배송비×{settle})÷{rate_txt}⌉. "
+                            f"⌈((매입가+{ship:,})÷(1−기준마진율) − 배송비×{settle})÷({rate_txt}−쿠폰율)⌉. "
+                            "의무쿠폰 대상이면 쿠폰까지 메우는 가격이 나옵니다. "
                             "제한상품은 제한 텍스트.")),
         "전월매출": NC("전월매출(이채널)", format="localized",
                     help=(f"{prev_ym or '최근 적재월'} 이 채널 판매금액(천년경영 정산). "
@@ -308,6 +354,17 @@ st.caption(
     f"실택배비 {cfg['real_ship']:,}원 · 기준마진 '{cfg['baseline_col']}'"
     + (" · 마진제한 적용" if cfg.get("apply_floor") else "")
 )
+_cp_def = (cmm.load_coupon(str(_REF)) or {}).get(cfg["baseline_col"])
+_cp_live = {r["채널"]: r for r in _coupon_rows(_load_coupon_text())}.get(cfg["baseline_col"])
+if _cp_live and cmm._num(_cp_live.get("쿠폰율"), 0) > 0:
+    _cr = cmm._num(_cp_live["쿠폰율"], 0)
+    st.warning(
+        f"🎫 **의무쿠폰 {_cr*100:.0f}% 반영 중** — 대상 **{_cp_live.get('적용대상') or '전체'}**"
+        f"{('  ·  ' + _cp_live['시작일'] + '~' + (_cp_live['종료일'] or '무기한')) if _cp_live.get('시작일') else ''}. "
+        f"수수료는 쿠폰 **전** 판매가 기준이라 정산비율이 **감산**됩니다 → "
+        f"`(1 − {cfg.get('commission', 0):.2f} − {_cr:.2f}) = {1 - cfg.get('commission', 0) - _cr:.2f}`. "
+        "표의 **마진율·권장가는 쿠폰 반영 실질값**입니다(쿠폰전마진율 컬럼에 원래 값)."
+    )
 
 # ── 상품관리 갱신 ─────────────────────────────────────────────────────────────
 committed = None
@@ -424,6 +481,18 @@ c3.metric("마진 미달", f"{stats['마진미달']:,}", help="기준마진율�
 c4.metric("제한 상품", f"{stats['제한상품']:,}")
 c5.metric("기준 미설정", f"{stats['미설정']:,}")
 c6.metric("미매칭", f"{stats['미매칭']:,}")
+if stats.get("쿠폰적용"):
+    _gsr = [r for r in rows if r.get("쿠폰율") and r["마진율"] is not None]
+    _k1, _k2, _k3 = st.columns(3)
+    _k1.metric("🎫 쿠폰 적용", f"{stats['쿠폰적용']:,}", help="의무쿠폰 대상 리스팅 수")
+    if _gsr:
+        _b = [r["쿠폰전마진율"] for r in _gsr if r.get("쿠폰전마진율") is not None]
+        _a = [r["마진율"] for r in _gsr]
+        _k2.metric("쿠폰 대상 평균마진", f"{sum(_a)/len(_a)*100:.2f}%",
+                   delta=f"{(sum(_a)/len(_a) - sum(_b)/len(_b))*100:.2f}%p" if _b else None,
+                   help="쿠폰 반영 실질 / delta = 쿠폰 전 대비")
+        _k3.metric("쿠폰 후 3% 미만", f"{sum(1 for r in _gsr if r['마진율'] < 0.03):,}",
+                   help="마진 하한 3% 미달 — 가격 재설정 필요")
 
 # ── 필터 ──────────────────────────────────────────────────────────────────────
 df = pd.DataFrame(rows)
@@ -510,17 +579,19 @@ if only_miss:
     view = view[view["매입가"].isna()]
 
 DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형", "N", "재고",
-           "매입가", "판매가", "배송비", "정산액", "마진율", "기준마진율", "탐지", "권장가/제한",
+           "매입가", "판매가", "배송비", "쿠폰율", "정산액", "마진율", "쿠폰전마진율",
+           "기준마진율", "탐지", "권장가/제한",
            "전월매출", "전월매출(전체)", "비고"]
 
 # ── 표 XLSX 내보내기 ────────────────────────────────────────────────────────
 #   ★ 코드류(상품번호·관리코드·규격)는 반드시 텍스트 — 숫자/날짜 자동변환 방지
 #     ('45-21'→날짜, 알리 상품번호 16자리→지수표기. 전역 pitfalls '코드 열은 문자열 유지').
 _X_TEXT = {"상품번호", "관리코드", "상품명", "규격", "코드유형", "탐지", "권장가/제한", "비고"}
-_X_PCT = {"마진율", "기준마진율"}
+_X_PCT = {"마진율", "기준마진율", "쿠폰율", "쿠폰전마진율"}
 _X_WIDTH = {"상품번호": 20, "관리코드": 20, "상품명": 46, "규격": 14, "코드유형": 10,
             "탐지": 12, "권장가/제한": 16, "비고": 22, "전월매출": 14, "전월매출(전체)": 14,
-            "기준마진율": 11, "마진율": 10, "정산액": 12, "매입가": 12, "판매가": 12}
+            "기준마진율": 11, "마진율": 10, "정산액": 12, "매입가": 12, "판매가": 12,
+            "쿠폰율": 9, "쿠폰전마진율": 12}
 
 
 def _export_xlsx(frame: pd.DataFrame, title: str) -> bytes:
