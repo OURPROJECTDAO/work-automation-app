@@ -309,6 +309,10 @@ def _col_config(cfg: dict, prev_ym=None) -> dict:
         "상품명": TC("상품명", help="리스팅 상품명"),
         "규격": TC("규격", help="코드해석 규격(product_master / 소분)"),
         "코드유형": TC("코드유형", help="박스 · PC낱개 · 소분 · 합포 · 빈코드"),
+        "세트구분": TC("세트구분",
+                    help=("시즌라인업 = giftset_lineup_2026.csv(시즌 정본) · "
+                          "선물세트 = product_attributes 최종분류(라인업 외) · 빈칸 = 일반상품. "
+                          "표시·필터 전용이며 마진 계산엔 영향 없음")),
         "N": NC("N", format="%.4g", help=n_help),
         "재고": NC("재고", format="localized",
                   help="product_master 재고. 박스=박스재고 · PC낱개=그 상품코드의 박스재고 · 소분=원코드 박스재고 · 합포=Σ구성코드 박스재고"),
@@ -532,7 +536,15 @@ exclude_kw = sc2.text_input("🚫 제외", placeholder="상품명에서 제외�
 q = cmm._nfc(search).lower() if search else ""
 
 types = sorted(df["코드유형"].unique().tolist())
-fc1, fc2 = st.columns([2, 3])
+fc0, fc1, fc2 = st.columns([1.4, 1.6, 3])
+with fc0:
+    # 선물세트 = product_attributes 최종분류 · 시즌라인업 = giftset_lineup_2026(정본, 라인업⊂선물세트)
+    _n_lu = int((df["세트구분"] == "시즌라인업").sum())
+    _n_gs = int((df["세트구분"] != "").sum())
+    setpick = st.selectbox(
+        "세트구분", ["전체", "선물세트만", "시즌라인업만", "일반상품만"], index=0,
+        help=(f"선물세트 {_n_gs}건 · 그중 시즌라인업 {_n_lu}건. "
+              "선물세트 = product_attributes 최종분류 · 시즌라인업 = giftset_lineup_2026(정본)"))
 with fc1:
     pick = st.multiselect("코드유형", types, default=types)
 with fc2:
@@ -551,6 +563,12 @@ sales_max = nc3.number_input("전월매출(이채널) ≤", min_value=0, value=0
                              help="전월매출(이채널) 최대 (0=상한 없음)")
 
 view = df[df["코드유형"].isin(pick)].copy()
+if setpick == "선물세트만":
+    view = view[view["세트구분"] != ""]
+elif setpick == "시즌라인업만":
+    view = view[view["세트구분"] == "시즌라인업"]
+elif setpick == "일반상품만":
+    view = view[view["세트구분"] == ""]
 if q:
     hay = (view["상품번호"].astype(str) + " ||| " + view["관리코드"].astype(str)
            + " ||| " + view["상품명"].astype(str)).str.lower()
@@ -580,7 +598,7 @@ if only_not_floor:
 if only_miss:
     view = view[view["매입가"].isna()]
 
-DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형", "N", "재고",
+DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형", "세트구분", "N", "재고",
            "매입가", "판매가", "배송비", "쿠폰율", "정산액", "마진율", "쿠폰전마진율",
            "기준마진율", "탐지", "권장가/제한",
            "전월매출", "전월매출(전체)", "비고"]
@@ -588,12 +606,12 @@ DISPLAY = ["상품번호", "관리코드", "상품명", "규격", "코드유형"
 # ── 표 XLSX 내보내기 ────────────────────────────────────────────────────────
 #   ★ 코드류(상품번호·관리코드·규격)는 반드시 텍스트 — 숫자/날짜 자동변환 방지
 #     ('45-21'→날짜, 알리 상품번호 16자리→지수표기. 전역 pitfalls '코드 열은 문자열 유지').
-_X_TEXT = {"상품번호", "관리코드", "상품명", "규격", "코드유형", "탐지", "권장가/제한", "비고"}
+_X_TEXT = {"상품번호", "관리코드", "상품명", "규격", "코드유형", "세트구분", "탐지", "권장가/제한", "비고"}
 _X_PCT = {"마진율", "기준마진율", "쿠폰율", "쿠폰전마진율"}
 _X_WIDTH = {"상품번호": 20, "관리코드": 20, "상품명": 46, "규격": 14, "코드유형": 10,
             "탐지": 12, "권장가/제한": 16, "비고": 22, "전월매출": 14, "전월매출(전체)": 14,
             "기준마진율": 11, "마진율": 10, "정산액": 12, "매입가": 12, "판매가": 12,
-            "쿠폰율": 9, "쿠폰전마진율": 12}
+            "쿠폰율": 9, "쿠폰전마진율": 12, "세트구분": 11}
 
 
 def _export_xlsx(frame: pd.DataFrame, title: str) -> bytes:
@@ -640,7 +658,7 @@ def _export_xlsx(frame: pd.DataFrame, title: str) -> bytes:
 st.session_state.setdefault("cmm_tblver", 0)  # 저장 시 +1 → 표 선택 강제 초기화(두뇌④ mo_tblver 패턴)
 view_reset = view.reset_index(drop=True)
 # 키에 행 수 포함 → 데이터/필터로 행 수가 바뀌면 위젯 리셋(어긋난 선택 복원 방지)
-filter_sig = hash((tuple(sorted(pick)), only_under, only_over, min_stock, sales_min, sales_max, only_floor, only_not_floor, only_miss, q, exclude_kw, len(view_reset)))
+filter_sig = hash((setpick, tuple(sorted(pick)), only_under, only_over, min_stock, sales_min, sales_max, only_floor, only_not_floor, only_miss, q, exclude_kw, len(view_reset)))
 
 event = st.dataframe(
     view_reset[DISPLAY],
