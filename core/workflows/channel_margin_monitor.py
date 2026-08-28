@@ -8,7 +8,12 @@
 매입가 = (코드해석 base) × N,  N = 판매자바코드(빈값/0→1, 분수 가능).
 정산액 = 판매가net×(1-수수료) + 배송비×정산계수.
 이익   = 정산액 - 매입가 - 실택배비.   마진율 = 이익/정산액.
-권장가 = ⌈((매입가+실택배비)/(1-확정마진율) - 배송비×정산계수)/(1-수수료)⌉ (100원 올림).
+권장가 = ⌈((매입가+실택배비)/(1-확정마진율) - 배송비×정산계수)/(1-수수료-쿠폰율)⌉ (100원 올림).
+
+★ 의무쿠폰(channel_coupon.csv): 채널이 의무적으로 발행하는 정률 쿠폰. 수수료는 **쿠폰 전 판매가**에
+  부과되므로(사용자 확정 2026-08-28, 불리한 쪽) 승산(×(1-쿠폰))이 아니라 **감산**:
+      정산액 = 판매가net × (1 - 수수료 - 쿠폰율) + 배송비 × 정산계수
+  배송비엔 쿠폰 미적용. 미정의 채널은 쿠폰율 0 → 기존 동작과 완전 동일.
 
 reference: product_master.csv · baseline_margin.csv · sobun.csv · margin_floor.csv (app reference/).
 공식·근거 = workflows/channel-margin-monitor.md. (검증: 2026-06-10 골든 705/706)
@@ -16,6 +21,7 @@ reference: product_master.csv · baseline_margin.csv · sobun.csv · margin_floo
 from __future__ import annotations
 
 import csv
+import datetime as _dt
 import math
 import random
 import re
@@ -520,6 +526,54 @@ def _pick_ws(wb, cfg):
 
 
 # ── reference 로딩 ──────────────────────────────────────────────────────────
+# ── 의무쿠폰 (channel_coupon.csv) ──────────────────────────────────────────
+COUPON_FILE = "channel_coupon.csv"
+
+
+def load_coupon(ref_dir) -> dict:
+    """reference/channel_coupon.csv → {채널: {rate, scope, start, end}}.
+
+    채널 키는 CHANNEL_CONFIG의 **baseline_col**(=채널 표시명)과 맞춘다.
+    파일 없거나 빈 값이면 빈 dict → 전 채널 쿠폰 0(기존 동작).
+    """
+    out: dict[str, dict] = {}
+    p = Path(ref_dir) / COUPON_FILE
+    if not p.exists():
+        return out
+    with open(p, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            ch = _nfc(row.get("채널"))
+            r = _num(row.get("쿠폰율"), 0.0)
+            if not ch or r <= 0:
+                continue
+            out.setdefault(ch, {
+                "rate": r,
+                "scope": _nfc(row.get("적용대상")) or "전체",
+                "start": _nfc(row.get("시작일")),
+                "end": _nfc(row.get("종료일")),
+            })
+    return out
+
+
+def coupon_rate(code: str, cfg: dict, refs: dict, today: str | None = None) -> float:
+    """이 (채널, 관리코드)에 적용되는 의무쿠폰율. 미해당 0.0.
+
+    scope='전체' → 무조건 / 그 외 → product_attributes 최종분류 == scope(예 '선물세트').
+    시작일·종료일은 비었으면 무기한. 날짜는 YYYY-MM-DD 문자열 비교(ISO라 사전순=시간순).
+    """
+    cp = (refs.get("coupon") or {}).get(_nfc(cfg.get("baseline_col")))
+    if not cp:
+        return 0.0
+    d = today or _dt.date.today().isoformat()
+    if cp["start"] and d < cp["start"]:
+        return 0.0
+    if cp["end"] and d > cp["end"]:
+        return 0.0
+    if cp["scope"] != "전체" and (refs.get("attrs") or {}).get(_nfc(code)) != cp["scope"]:
+        return 0.0
+    return cp["rate"]
+
+
 def load_references(ref_dir, code_map_file: str | None = None) -> dict:
     """app reference/ 에서 4종(+선택 code_map) 로드 → dict."""
     ref_dir = Path(ref_dir)
@@ -564,9 +618,21 @@ def load_references(ref_dir, code_map_file: str | None = None) -> dict:
                     if k:
                         code_map.setdefault(k, row)
 
+    # 상품속성(최종분류) — 의무쿠폰 '선물세트' 적용대상 판정용. 파일 없으면 빈 dict(무영향).
+    attrs: dict[str, str] = {}
+    ap = ref_dir / "product_attributes.csv"
+    if ap.exists():
+        with open(ap, encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                k = _nfc(row.get("관리코드"))
+                if k and k not in attrs:
+                    attrs[k] = _nfc(row.get("최종분류"))
+
     return {
         "pm_by_mgmt": pm_by_mgmt,
         "pm_by_prod": pm_by_prod,
+        "attrs": attrs,
+        "coupon": load_coupon(ref_dir),
         "sobun": _load("sobun.csv", "변환관리코드"),
         "baseline": _load("baseline_margin.csv", "관리코드"),
         "floor": _load("margin_floor.csv", "관리코드"),
@@ -855,7 +921,7 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
                 + cfg.get("commission_add", 0.0)
         else:
             comm = cfg["commission"]
-        rate = 1 - comm                        # 판매가net에 곱하는 정산비율
+        # rate는 관리코드 해소 뒤에 확정(의무쿠폰이 상품 속성에 따라 달라짐) — 아래 참조
         # ★ 바코드형 채널(리테일앤인사이트): 다운로드 '코드'=바코드 → 변환표로 관리코드 해소.
         #   **조회 시점 변환**(parse 시점 아님) → 변환표만 갱신하면 재다운로드 없이 즉시 반영.
         cmrow = refs.get("code_map", {}).get(rec["코드"]) if cfg.get("code_map") else None
@@ -863,6 +929,10 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
         typ, base, stock, spec, note = resolve_code(code, refs)
         if cmrow is None and cfg.get("code_map"):
             note = "바코드 미매핑"                # 변환표에 없음 → 등록 유도(관리코드 미등록과 구분)
+        # ★ 의무쿠폰 — 수수료는 쿠폰 전 판매가 기준이라 **감산**(승산 아님). 배송비엔 미적용.
+        coup = coupon_rate(code, cfg, refs)
+        rate = 1 - comm - coup                 # 판매가net에 곱하는 정산비율
+        rate0 = 1 - comm                       # 쿠폰 전(비교표시용)
         if cfg.get("n_source") == "ref":
             # 변환표 N(채널 전용 override) 우선 → 없으면 hapo_multiplier(상품번호=바코드) → 1
             nov = _num(cmrow.get("N"), 0) if cmrow else 0
@@ -875,7 +945,8 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
             "상품번호": rec["상품번호"], "관리코드": code, "상품명": rec["상품명"],
             "규격": spec, "코드유형": typ, "N": N, "재고": stock,
             "매입가": None, "판매가": rec["판매가"], "정가": rec.get("정가", 0), "배송비": rec["배송비"],
-            "정산액": None, "마진율": None, "기준마진율": None, "탐지": None,
+            "쿠폰율": coup, "정산액": None, "마진율": None, "쿠폰전마진율": None,
+            "기준마진율": None, "탐지": None,
             "권장가": None, "제한": "", "비고": note,
         }
         # baseline 확정마진율 (판매자상품코드 직조인)
@@ -899,6 +970,10 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
         if 정산액 > 0:
             마진율 = (정산액 - 매입가 - ship) / 정산액
             row["마진율"] = round(마진율, 4)
+            if coup:                            # 쿠폰 전 마진율(참고) — 쿠폰 없으면 동일하므로 생략
+                정산액0 = 판매가net * rate0 + rec["배송비"] * settle
+                if 정산액0 > 0:
+                    row["쿠폰전마진율"] = round((정산액0 - 매입가 - ship) / 정산액0, 4)
             if base_margin is not None:
                 row["탐지"] = round(마진율 - base_margin, 4)
         # 권장가 (기준마진 달성 판매가, 100원 올림 → 기준마진 이상 보장)
@@ -917,6 +992,7 @@ def _stats(rows: list[dict]) -> dict:
         "미설정": sum(1 for r in rows if r["기준마진율"] is None and r["매입가"] is not None),
         "마진미달": sum(1 for r in rows if r["탐지"] is not None and r["탐지"] < MARGIN_UNDER_THRESHOLD),
         "제한상품": sum(1 for r in rows if r["제한"]),
+        "쿠폰적용": sum(1 for r in rows if r.get("쿠폰율")),
         "평균마진율": round(sum(margins) / len(margins), 4) if margins else None,
     }
 
