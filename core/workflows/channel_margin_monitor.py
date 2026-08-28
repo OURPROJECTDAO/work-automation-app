@@ -528,6 +528,20 @@ def _pick_ws(wb, cfg):
 # ── reference 로딩 ──────────────────────────────────────────────────────────
 # ── 의무쿠폰 (channel_coupon.csv) ──────────────────────────────────────────
 COUPON_FILE = "channel_coupon.csv"
+LINEUP_FILE = "giftset_lineup_2026.csv"     # 시즌 선물세트 라인업 정본
+
+
+def load_lineup(ref_dir) -> set:
+    """reference/giftset_lineup_2026.csv → {관리코드}. 없으면 빈 set(무영향).
+
+    ★ 이 파일이 시즌 라인업의 **정본**이다. product_attributes/unit_list로 유추하지 말 것
+    (미등록 상품이 빠진다 — 2026-08-27).
+    """
+    p = Path(ref_dir) / LINEUP_FILE
+    if not p.exists():
+        return set()
+    with open(p, encoding="utf-8-sig") as f:
+        return {_nfc(r.get("관리코드")) for r in csv.DictReader(f) if _nfc(r.get("관리코드"))}
 
 
 def load_coupon(ref_dir) -> dict:
@@ -633,6 +647,7 @@ def load_references(ref_dir, code_map_file: str | None = None) -> dict:
         "pm_by_prod": pm_by_prod,
         "attrs": attrs,
         "coupon": load_coupon(ref_dir),
+        "lineup": load_lineup(ref_dir),
         "sobun": _load("sobun.csv", "변환관리코드"),
         "baseline": _load("baseline_margin.csv", "관리코드"),
         "floor": _load("margin_floor.csv", "관리코드"),
@@ -929,6 +944,13 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
         typ, base, stock, spec, note = resolve_code(code, refs)
         if cmrow is None and cfg.get("code_map"):
             note = "바코드 미매핑"                # 변환표에 없음 → 등록 유도(관리코드 미등록과 구분)
+        # 세트구분 — 시즌라인업(정본) ⊃ 선물세트(attributes). 필터·표시 전용, 계산엔 무영향.
+        if code in (refs.get("lineup") or set()):
+            setcls = "시즌라인업"
+        elif (refs.get("attrs") or {}).get(code) == "선물세트":
+            setcls = "선물세트"
+        else:
+            setcls = ""
         # ★ 의무쿠폰 — 수수료는 쿠폰 전 판매가 기준이라 **감산**(승산 아님). 배송비엔 미적용.
         coup = coupon_rate(code, cfg, refs)
         rate = 1 - comm - coup                 # 판매가net에 곱하는 정산비율
@@ -943,7 +965,7 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
             N = 1.0 if n_raw == 0 else n_raw  # 빈값/0 → 1, 분수 허용
         row = {
             "상품번호": rec["상품번호"], "관리코드": code, "상품명": rec["상품명"],
-            "규격": spec, "코드유형": typ, "N": N, "재고": stock,
+            "규격": spec, "코드유형": typ, "세트구분": setcls, "N": N, "재고": stock,
             "매입가": None, "판매가": rec["판매가"], "정가": rec.get("정가", 0), "배송비": rec["배송비"],
             "쿠폰율": coup, "정산액": None, "마진율": None, "쿠폰전마진율": None,
             "기준마진율": None, "탐지": None,
@@ -993,6 +1015,7 @@ def _stats(rows: list[dict]) -> dict:
         "마진미달": sum(1 for r in rows if r["탐지"] is not None and r["탐지"] < MARGIN_UNDER_THRESHOLD),
         "제한상품": sum(1 for r in rows if r["제한"]),
         "쿠폰적용": sum(1 for r in rows if r.get("쿠폰율")),
+        "시즌라인업": sum(1 for r in rows if r.get("세트구분") == "시즌라인업"),
         "평균마진율": round(sum(margins) / len(margins), 4) if margins else None,
     }
 
