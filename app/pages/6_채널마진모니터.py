@@ -5,6 +5,8 @@
 공식·근거 = KB workflows/channel-margin-monitor.md.
 """
 import base64
+import csv
+import io
 import json
 import sys
 import urllib.request
@@ -952,3 +954,69 @@ else:
             st.session_state["cmm_tblver"] += 1
             st.success(f"제한 저장 완료 — 등록/수정 {_na} · 해제 {_nr} 관리코드. 표에 즉시 반영됩니다.")
             st.rerun()
+
+
+# ── 🎫 채널 의무쿠폰 설정 (channel_coupon.csv — 채널이 강제하는 정률 쿠폰) ──
+# 정산 반영: rate = 1 − 수수료 − 쿠폰율 (수수료가 쿠폰 **전** 판매가에 부과되므로 감산·불리한 쪽).
+# 배송비엔 미적용. 편집 즉시 표·권장가에 반영(코어는 로컬 reference를 읽으므로 커밋 후 재배포 반영).
+st.divider()
+st.markdown("#### 🎫 채널 의무쿠폰 설정")
+st.caption("채널이 **의무적으로 발행하게 하는 정률 쿠폰**을 등록하면, 그 채널의 대상 상품 마진율·권장가가 "
+           "쿠폰을 반영한 **실질값**으로 계산됩니다. 적용대상은 `선물세트`처럼 product_attributes의 "
+           "**최종분류** 값을 쓰거나 `전체`. 쿠폰율을 **0으로 저장하면 해제**됩니다. "
+           "시작일·종료일은 비우면 무기한입니다.")
+
+_cp_rows = _coupon_rows(_load_coupon_text())
+_cp_cur = {r["채널"]: r for r in _cp_rows}
+_cp_this = _cp_cur.get(cfg["baseline_col"], {})
+if not _pat():
+    st.warning("저장용 PAT(st.secrets GITHUB_PAT)가 없어 커밋할 수 없습니다.")
+else:
+    _cc1, _cc2, _cc3 = st.columns([1, 1, 1])
+    _new_rate = _cc1.number_input(
+        f"쿠폰율(%) — {channel}", min_value=0.0, max_value=50.0, step=0.5,
+        value=float(cmm._num(_cp_this.get("쿠폰율"), 0.0)) * 100,
+        help="0 = 해제. 정산비율에서 차감됩니다.", key=f"cp_rate_{key}")
+    _new_scope = _cc2.text_input(
+        "적용대상", value=_cp_this.get("적용대상") or "선물세트",
+        help="product_attributes 최종분류 값(예 선물세트) 또는 '전체'", key=f"cp_scope_{key}")
+    _new_start = _cc3.text_input(
+        "시작일(YYYY-MM-DD)", value=_cp_this.get("시작일") or "",
+        help="비우면 즉시 적용", key=f"cp_start_{key}")
+    _cc4, _cc5 = st.columns([1, 2])
+    _new_end = _cc4.text_input("종료일(YYYY-MM-DD)", value=_cp_this.get("종료일") or "",
+                               help="비우면 무기한", key=f"cp_end_{key}")
+    _new_note = _cc5.text_input("비고", value=_cp_this.get("비고") or "", key=f"cp_note_{key}")
+
+    if _new_rate > 0:
+        _r = _new_rate / 100
+        _c0 = cfg.get("commission")
+        if _c0 is not None:
+            st.info(f"적용 시 정산비율: `1 − {_c0:.2f} − {_r:.2f}` = **{1 - _c0 - _r:.2f}** "
+                    f"(현재 {1 - _c0:.2f}) · 대상 = **{_new_scope or '전체'}**")
+        else:
+            st.info(f"적용 시 정산비율에서 **{_r:.2f}** 차감(이 채널은 상품별 수수료) · "
+                    f"대상 = **{_new_scope or '전체'}**")
+
+    if st.button("💾 의무쿠폰 저장 (커밋)", type="primary", key=f"cp_save_{key}"):
+        _out = [r for r in _cp_rows if r["채널"] != cfg["baseline_col"]]
+        if _new_rate > 0:
+            _out.append({"채널": cfg["baseline_col"], "쿠폰율": f"{_new_rate/100:g}",
+                         "적용대상": (_new_scope or "전체").strip(),
+                         "시작일": _new_start.strip(), "종료일": _new_end.strip(),
+                         "비고": _new_note.strip()})
+        _out.sort(key=lambda r: r["채널"])
+        _commit_coupon(_coupon_text(_out))
+        _load_coupon_text.clear()
+        st.session_state["cmm_tblver"] += 1
+        st.success(
+            (f"의무쿠폰 저장 완료 — {channel} {_new_rate:.1f}% (대상 {_new_scope or '전체'})."
+             if _new_rate > 0 else f"의무쿠폰 해제 완료 — {channel}.")
+            + "  ⚠️ 표 계산에 반영되려면 배포(1~2분) 후 새로고침이 필요합니다.")
+        st.rerun()
+
+if _cp_rows:
+    st.caption("현재 등록된 의무쿠폰")
+    st.dataframe(pd.DataFrame(_cp_rows), hide_index=True, width="stretch")
+else:
+    st.caption("등록된 의무쿠폰이 없습니다.")
