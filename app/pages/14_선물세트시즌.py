@@ -266,6 +266,40 @@ def _gen_price_form(channel, cfg, pf, recs, rows, pids):
         return {"channel": channel, "error": f"생성 오류: {e}"}
 
 
+def _upload_scope(raw_bytes: bytes, pat: str, repo: str):
+    """업로드 파일의 (행수·기간·거래처수·합계)를 찍고, 같은 구간 파케이와 거래처 수를 대조.
+
+    ★2026-09-07 실사고 — 같은 파일명·같은 타임스탬프로 전사 export(192거래처)와
+      인터넷사업부 export(57거래처)가 번갈아 올라왔다. 파일명은 동일성 근거가 아니다.
+      사업부 export를 적재하면 그 구간 전사 파케이가 덮여 오프라인이 소멸한다.
+    """
+    try:
+        df = pd.read_excel(io.BytesIO(raw_bytes))
+        df = df[df["거래일자"].notna()]
+        df["거래일자"] = pd.to_datetime(df["거래일자"], errors="coerce")
+        lo, hi = df["거래일자"].min(), df["거래일자"].max()
+        n_store = int(df["상호명"].nunique())
+        stat = (f"{len(df):,}행 · {lo:%Y-%m-%d}~{hi:%Y-%m-%d} · "
+                f"거래처 **{n_store}곳** · 합계 {df['판매금액'].sum():,.0f}원")
+        base = None
+        for ym in _months_between(lo, hi):
+            part = store.read_partition(pat, repo, ym)
+            if part is None or not len(part):
+                continue
+            part = part.copy()
+            part["거래일자"] = pd.to_datetime(part["거래일자"], errors="coerce")
+            part = part[part["거래일자"].between(lo, hi)]
+            if len(part):
+                base = max(base or 0, int(part["상호명"].nunique()))
+        if base and n_store < base * 0.7:
+            return stat, (f"같은 구간 파케이는 거래처 **{base}곳**인데 올린 파일은 "
+                          f"**{n_store}곳**뿐입니다. **인터넷사업부 필터 export일 가능성이 큽니다** — "
+                          f"적재하면 이 구간의 오프라인 거래처 약 {base - n_store}곳이 삭제됩니다.")
+        return stat, None
+    except Exception as e:  # noqa: BLE001
+        return None, f"파일을 읽지 못했습니다: {e}"
+
+
 def _append_division(names: list, grp: str):
     """화이트리스트 CSV에 상호명을 추가하고 커밋. 기존 행은 건드리지 않는다."""
     import base64
@@ -670,10 +704,24 @@ with tabs[4]:
     except Exception as e:  # noqa: BLE001
         st.info(f"적재 현황을 읽지 못했습니다: {e}")
 
-    up = st.file_uploader("영업이익현황 (.xlsx)", type=["xlsx"], key="gs_up")
+    st.error(
+        "🚫 **인터넷사업부 필터 export를 여기 올리지 마세요.** 적재는 올린 파일의 날짜 구간을 "
+        "통째로 교체하므로(`date_range_replace`), 사업부 export를 올리면 그 기간의 **전사 파케이가 "
+        "사업부 거래처만으로 덮여 오프라인 매출이 사라집니다**. 대시보드·재고지능 등 다른 페이지가 "
+        "전부 이 전사 파케이를 씁니다. 사업부 export는 위 **미분류 편입**에만 쓰세요."
+    )
+    up = st.file_uploader("영업이익현황 (.xlsx) — **전사 export만**", type=["xlsx"], key="gs_up")
     if up is not None:
         st.caption(f"업로드: **{up.name}**")
-        if st.button("📥 파케이에 적재", type="primary", key="gs_ing"):
+        _stat, _warn = _upload_scope(up.getvalue(), pat, repo)
+        if _stat:
+            st.info(f"스코프 점검 — {_stat}")
+        if _warn:
+            st.error(f"⚠️ {_warn}")
+            _ok = st.checkbox("위 경고를 확인했고 그래도 적재한다", key="gs_force")
+        else:
+            _ok = True
+        if _ok and st.button("📥 파케이에 적재", type="primary", key="gs_ing"):
             with st.spinner("적재 중..."):
                 try:
                     info = store.ingest(pat, repo, io.BytesIO(up.getvalue()))
