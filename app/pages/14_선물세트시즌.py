@@ -71,13 +71,40 @@ def _config() -> dict:
     return gsn.load_config(text if code == 200 else None)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _part_index() -> dict:
+    """master/ 파티션의 {YYYY-MM: blob sha}. ★sha를 캐시 키에 넣어야 '월 목록은 그대로인데
+    내용만 갱신된' 경우(다른 페이지에서 그 달을 재적재)를 잡는다. 이게 없으면 TTL 만료 전까지
+    옛 파케이를 그대로 내준다(2026-09-07 실사고)."""
+    pat, repo = _data_secret()
+    if not pat:
+        return {}
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/contents/master?ref=main",
+            headers={"Authorization": f"Bearer {pat}",
+                     "Accept": "application/vnd.github+json"},
+        )
+        import json as _json
+        items = _json.load(urllib.request.urlopen(req))
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for it in items:
+        n = it.get("name", "")
+        if n.startswith("sales_") and n.endswith(".parquet"):
+            out[n[6:13]] = it.get("sha", "")
+    return out
+
+
 @st.cache_data(ttl=600, show_spinner="매출자료 불러오는 중...")
-def _sales(months: tuple) -> pd.DataFrame:
-    """data repo master/sales_YYYY-MM.parquet 지정 월 로드."""
+def _sales(months: tuple, _index: tuple) -> pd.DataFrame:
+    """data repo master/sales_YYYY-MM.parquet 지정 월 로드.
+    `_index` = (월, sha) 튜플 — 캐시 무효화 전용 키(값 자체는 안 씀)."""
     pat, repo = _data_secret()
     if not pat:
         return pd.DataFrame()
-    avail = set(store.list_partition_months(pat, repo))
+    avail = {m for m, _ in _index}
     parts = []
     for ym in months:
         if ym not in avail:
@@ -86,6 +113,12 @@ def _sales(months: tuple) -> pd.DataFrame:
         if p is not None and len(p):
             parts.append(p)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+def _load_sales(a, b) -> pd.DataFrame:
+    months = _months_between(a, b)
+    idx = _part_index()
+    return _sales(months, tuple(sorted((m, idx.get(m, "")) for m in months)))
 
 
 def _months_between(a, b) -> tuple:
@@ -235,6 +268,7 @@ with st.sidebar:
     st.subheader("⚙️ 시즌 설정")
     st.caption(f"**{cfg['시즌명']}** · D-day {cfg['dday']}")
     base_day = st.date_input("기준일", value=pd.Timestamp.now().date())
+    st.caption("다른 페이지(데이터현황)에서 적재했는데 반영이 안 되면 아래를 누르세요.")
     if st.button("🔄 데이터 새로고침"):
         st.cache_data.clear()
         st.rerun()
@@ -269,8 +303,8 @@ if pm.empty:
     st.error("product_master를 불러오지 못했습니다.")
     st.stop()
 
-cur = _sales(_months_between(win["start"], win["end"]))
-prev = _sales(_months_between(win["ly_start"], win["ly_end"]))
+cur = _load_sales(win["start"], win["end"])
+prev = _load_sales(win["ly_start"], win["ly_end"])
 if cur.empty:
     st.warning("시즌창에 해당하는 매출 파티션이 없습니다. **[데이터 적재]** 탭에서 "
                "영업이익현황을 올리세요.")
@@ -309,6 +343,15 @@ st.caption(
     "요일 배치가 어긋나는 구간에서는 두 값을 **함께** 봐야 합니다(한쪽만 보면 오독). "
     "목표·밴드는 **오픈마켓 한정**이며 리테일·자사몰·나들·오프라인은 참고 집계입니다."
 )
+
+_last = pd.to_datetime(cur["거래일자"], errors="coerce").max() if len(cur) else None
+if _last is not None and pd.notna(_last):
+    _gap = (pd.Timestamp(base_day) - _last.normalize()).days
+    _txt = f"📥 적재된 매출 최신 거래일 **{_last:%Y-%m-%d}** (기준일 대비 {_gap}일 전)"
+    (st.caption if _gap <= 1 else st.warning)(
+        _txt if _gap <= 1 else _txt + " — 최근 매출이 빠져 있습니다. "
+        "**[데이터 적재]** 탭에서 올리거나, 다른 페이지에서 적재했다면 사이드바 "
+        "**🔄 데이터 새로고침**을 누르세요.")
 
 tabs = st.tabs(["📊 진도판", "📋 관제판", "📦 재고 경보", "🛠️ 가격변경", "⬆️ 데이터 적재"])
 
@@ -533,8 +576,9 @@ with tabs[4]:
             with st.spinner("적재 중..."):
                 try:
                     info = store.ingest(pat, repo, io.BytesIO(up.getvalue()))
-                    st.success(f"적재 완료 — {info}")
                     st.cache_data.clear()
+                    st.success(f"적재 완료 — {info}. 관제판을 다시 계산합니다.")
+                    st.rerun()
                 except Exception as e:  # noqa: BLE001
                     st.error(f"적재 실패: {e}")
     st.caption("적재는 **올린 파일의 날짜 구간만 교체**합니다(`date_range_replace`) — "
