@@ -66,6 +66,12 @@ def _ref_csv(name: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def _division() -> dict:
+    code, text = _gh_raw("reference/internet_division_stores.csv")
+    return gsn.load_division(text if code == 200 else None)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def _config() -> dict:
     code, text = _gh_raw(_CFG_PATH)
     return gsn.load_config(text if code == 200 else None)
@@ -260,6 +266,50 @@ def _gen_price_form(channel, cfg, pf, recs, rows, pids):
         return {"channel": channel, "error": f"생성 오류: {e}"}
 
 
+def _append_division(names: list, grp: str):
+    """화이트리스트 CSV에 상호명을 추가하고 커밋. 기존 행은 건드리지 않는다."""
+    import base64
+    import csv
+    import json as _json
+    path = "reference/internet_division_stores.csv"
+    api = f"{_APP_API}/{path}"
+    hdr = {"Authorization": f"Bearer {_pat()}", "Accept": "application/vnd.github+json",
+           "Content-Type": "application/json"}
+    try:
+        meta = _json.load(urllib.request.urlopen(urllib.request.Request(api, headers=hdr)))
+        code, body = _gh_raw(path)
+        if code != 200:
+            return False, "기존 CSV를 읽지 못했습니다."
+        text = body.decode("utf-8-sig")
+        rows = list(csv.DictReader(io.StringIO(text)))
+        have = {gsn._nfc(r.get("상호명")) for r in rows}
+        cols = list(rows[0].keys()) if rows else ["상호명", "구분", "첫확인", "출처", "비고"]
+        added = 0
+        today = datetime.now().strftime("%Y-%m-%d")
+        for n in names:
+            if gsn._nfc(n) in have:
+                continue
+            rows.append({**{c: "" for c in cols}, "상호명": n, "구분": grp,
+                         "첫확인": today, "출처": "앱 등록(미분류 편입)"})
+            added += 1
+        if not added:
+            return False, "이미 전부 등록되어 있습니다."
+        buf = io.StringIO()
+        wcsv = csv.DictWriter(buf, fieldnames=cols)
+        wcsv.writeheader()
+        wcsv.writerows(rows)
+        payload = _json.dumps({
+            "message": f"ref(giftset): 인터넷사업부 화이트리스트 +{added}곳 ({grp})",
+            "content": base64.b64encode(buf.getvalue().encode()).decode(),
+            "sha": meta["sha"],
+        }).encode()
+        urllib.request.urlopen(urllib.request.Request(api, data=payload,
+                                                      method="PUT", headers=hdr))
+        return True, f"{added}곳을 `{grp}` 로 등록했습니다."
+    except Exception as e:  # noqa: BLE001
+        return False, f"등록 실패: {e}"
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 ui.page_header("선물세트 시즌", icon="🎁")
 cfg = _config()
@@ -272,6 +322,7 @@ with st.sidebar:
     if st.button("🔄 데이터 새로고침"):
         st.cache_data.clear()
         st.rerun()
+    st.caption(f"측정창 D-{cfg.get('측정창_일수',55)} · 운영창 D-{cfg.get('운영창_일수',31)}")
     st.caption(f"목표 {float(cfg['매출목표'])/1e8:.1f}억(오픈마켓) · "
                f"계획마진 {float(cfg['계획마진'])*100:.1f}% · "
                f"하한 {float(cfg['마진하한'])*100:.1f}% · "
@@ -286,10 +337,12 @@ if not _data_secret()[0]:
     st.stop()
 
 # 비시즌 안내 (D-day 15일 경과 후 ~ 시즌창 개시 전)
-if D > int(cfg.get("시즌창_일수", 75)) or D < -15:
+_open_d = int(cfg.get("운영창_일수", 31))
+if D > _open_d or D < -15:
     st.info(
         f"**지금은 시즌 밖입니다.** ({cfg['시즌명']} D-day `{cfg['dday']}` 기준 D{D:+d})\n\n"
-        f"시즌 트랙은 **D-{cfg.get('시즌창_일수', 75)} 개시 ~ D+15 정산**까지만 운영합니다. "
+        f"시즌 트랙은 **운영창 D-{_open_d} 개시 ~ D+15 정산**까지만 엽니다"
+        f"(매출 누적 범위인 **측정창 D-{cfg.get('측정창_일수', 55)}** 와 다릅니다). "
         f"다음 명절을 시작하려면 `{_CFG_PATH}` 의 `시즌명`·`dday`·`작년_dday`·`매출목표`를 "
         "갈아끼우세요. 나머지 로직(유니버스 자동 산출·밴드·판정)은 그대로 재사용됩니다."
     )
@@ -309,7 +362,8 @@ if cur.empty:
     st.warning("시즌창에 해당하는 매출 파티션이 없습니다. **[데이터 적재]** 탭에서 "
                "영업이익현황을 올리세요.")
 
-res = gsn.build_board(pm, attrs, lineup, cur, prev, cfg, now=base_day)
+division = _division()
+res = gsn.build_board(pm, attrs, lineup, cur, prev, cfg, now=base_day, division=division)
 b, k = res["board"], res["kpi"]
 if b.empty:
     st.info("표시할 선물세트가 없습니다(재고 0 · 시즌매출 0).")
@@ -329,8 +383,8 @@ def _pct(v):
     return "-" if v is None or pd.isna(v) else f"{v*100:.1f}%"
 
 
-c[4].metric("작년 동기 대비", _pct(k["YoY달력"]),
-            f"영업일 정렬 {_pct(k['YoY영업일'])}", delta_color="off")
+c[4].metric("YoY (7일 블록)", _pct(k["YoY블록"]),
+            f"직전 블록 {_pct(k['YoY블록_직전'])}", delta_color="off")
 
 if band:
     msg = (f"D-{D} 진도 밴드 **{band[0]*100:.0f}~{band[1]*100:.0f}%** · "
@@ -339,8 +393,11 @@ if band:
     (st.error if k["밴드판정"] == "🔴" else
      st.success if k["밴드판정"] == "🟢" else st.info)(f"{k['밴드판정']} {msg}")
 st.caption(
-    f"작년 대조 시점 — 달력 `{k['작년달력'].date()}` / 영업일 정렬 `{k['작년영업일'].date()}`. "
-    "요일 배치가 어긋나는 구간에서는 두 값을 **함께** 봐야 합니다(한쪽만 보면 오독). "
+    f"**진도 정본은 7일 블록 YoY** — 같은 D 구간을 주말 포함 통째로 잘라 비교하므로 "
+    f"요일 효과가 상쇄됩니다. 참고: 누적 YoY 달력 {_pct(k['YoY달력'])} "
+    f"(`{k['작년달력'].date()}`) / 영업일 정렬 {_pct(k['YoY영업일'])} "
+    f"(`{k['작년영업일'].date()}`, 잔여 영업일 {k['잔여영업일']}일 기준). "
+    "요일 배치가 어긋나는 구간에서 누적 YoY만 보면 오독합니다. "
     "목표·밴드는 **오픈마켓 한정**이며 리테일·자사몰·나들·오프라인은 참고 집계입니다."
 )
 
@@ -352,6 +409,47 @@ if _last is not None and pd.notna(_last):
         _txt if _gap <= 1 else _txt + " — 최근 매출이 빠져 있습니다. "
         "**[데이터 적재]** 탭에서 올리거나, 다른 페이지에서 적재했다면 사이드바 "
         "**🔄 데이터 새로고침**을 누르세요.")
+
+dc = st.columns(4)
+dc[0].metric("인터넷사업부 계", _won(k["사업부매출"]),
+             f"마진 {k['사업부마진']*100:.2f}%", delta_color="off")
+dc[1].metric("사업부 진도", "-" if pd.isna(k["사업부진도"]) else f"{k['사업부진도']*100:.1f}%",
+             f"기준선 {_won(k['사업부기준선'])} ({k['사업부기준선출처']})", delta_color="off")
+dc[2].metric("사업부 YoY", _pct(k["사업부YoY"]), "작년 동기(달력)", delta_color="off")
+dc[3].metric("오픈마켓 비중",
+             f"{k['오픈마켓매출']/k['사업부매출']*100:.1f}%" if k["사업부매출"] else "-",
+             "목표 스코프가 차지하는 몫", delta_color="off")
+st.caption(
+    "**인터넷사업부 = 주요 채널(오픈마켓·자사몰) + 나들 + 온라인 B2B.** 오프라인 영업부는 "
+    "제외합니다 — `master/sales_*.parquet` 은 **전사 데이터**라 "
+    "`reference/internet_division_stores.csv` 화이트리스트로 걸러냅니다. "
+    "⚠️ **작년 온라인 B2B는 가를 수 없어 사업부 YoY·진도는 과소 집계**입니다"
+    "(작년 시즌창 354곳 중 화이트리스트 히트 18곳뿐). 작년 인터넷사업부 export가 있어야 정확해집니다."
+)
+
+_unk = k.get("미분류")
+if _unk:
+    with st.expander(f"⚠️ 화이트리스트 미등재 {_unk['곳']}곳 / {_won(_unk['매출'])} — "
+                     "사업부 안팎 미판정", expanded=False):
+        st.caption("온라인 B2B는 1회성이라 매 시즌 새 상호명이 생깁니다. 오프라인으로 "
+                   "단정하지 않고 여기 모아둡니다. **현재 어느 집계에도 포함되지 않습니다.** "
+                   "인터넷사업부 export를 [데이터 적재] 탭에 올리면 자동으로 편입됩니다.")
+        st.dataframe(_unk["목록"].rename("매출").reset_index(), hide_index=True, width="stretch")
+        _names = list(_unk["목록"].index)
+        _pick = st.multiselect("화이트리스트에 편입할 상호명", _names, default=_names,
+                               key="gs_unk_pick")
+        _grp = st.radio("구분", ["온라인B2B", "사업부밖", "주요-오픈마켓", "주요-자사몰",
+                                "나들", "제외"], horizontal=True, key="gs_unk_grp")
+        st.caption("`사업부밖` = 오프라인 확정(관제판 집계에서 빠집니다). "
+                   "측정창이 인터넷사업부 export 커버 기간 안이라면, export에 없는 상호명은 "
+                   "오프라인으로 확정해도 됩니다.")
+        if _pick and st.button(f"📝 {len(_pick)}곳을 `{_grp}` 로 등록",
+                               type="primary", key="gs_unk_go"):
+            _ok, _msg = _append_division(_pick, _grp)
+            (st.success if _ok else st.error)(_msg)
+            if _ok:
+                st.cache_data.clear()
+                st.rerun()
 
 tabs = st.tabs(["📊 진도판", "📋 관제판", "📦 재고 경보", "🛠️ 가격변경", "⬆️ 데이터 적재"])
 
@@ -376,8 +474,8 @@ with tabs[0]:
                                       "세트": "{:,.0f}", "마진": "{:.2%}"}),
                      hide_index=True, width="stretch")
 
-    ui.section_head("일별 추이 (온라인)", icon="📈")
-    on = sc[sc["채널군"].isin(gsn.ONLINE_GROUPS)]
+    ui.section_head("일별 추이 (주요 채널)", icon="📈")
+    on = sc[sc["채널군"].isin(gsn.MAIN_GROUPS)]
     if len(on):
         dd = on.groupby(on["거래일자"].dt.date)["판매금액"].sum().tail(21)
         st.bar_chart(dd, height=220)
@@ -412,7 +510,7 @@ with tabs[1]:
 
     cols = (["관리코드", "상품명", "박스재고", "세트재고", "재고금액",
              "시즌매출", "시즌이익", "마진율", "판매세트",
-             "온라인계", "일평균세트7", "소진예측일", "잔여시즌일", "마감후잔여세트",
+             "주요채널계", "온라인B2B계", "사업부계", "일평균세트7", "소진예측일", "잔여시즌일", "마감후잔여세트",
              "작년동기_달력", "YoY", "작년시즌", "작년진도", "판정", "결손"]
             + gsn.channel_columns())
     view = v[cols].sort_values("시즌매출", ascending=False)
@@ -420,7 +518,8 @@ with tabs[1]:
         view.style.format({
             "박스재고": "{:,.0f}", "세트재고": "{:,.0f}", "재고금액": "{:,.0f}",
             "시즌매출": "{:,.0f}", "시즌이익": "{:,.0f}", "마진율": "{:.2%}",
-            "판매세트": "{:,.0f}", "온라인계": "{:,.0f}",
+            "판매세트": "{:,.0f}", "주요채널계": "{:,.0f}",
+            "온라인B2B계": "{:,.0f}", "사업부계": "{:,.0f}",
             "일평균세트7": "{:,.1f}", "소진예측일": "{:,.1f}",
             "마감후잔여세트": "{:,.0f}", "작년동기_달력": "{:,.0f}", "YoY": "{:.1%}",
             "작년시즌": "{:,.0f}", "작년진도": "{:.1%}",
@@ -493,19 +592,21 @@ with tabs[2]:
         st.caption("`재고음수 = True` 는 매입 전표 지연일 가능성이 높습니다(시즌 중 흔함). "
                    "전표가 아니라 실물이 없는 것이면 즉시 판매중지 대상입니다.")
 
-    ui.section_head("온라인 무매출 · 저마진", icon="⚠️")
-    watch = b[(b["온라인계"] <= 0) | ((b["시즌매출"] > 0)
+    ui.section_head("주요채널 무매출 · 저마진", icon="⚠️")
+    watch = b[(b["주요채널계"] <= 0) | ((b["시즌매출"] > 0)
                                     & (b["마진율"] < float(cfg["절대하한"])))]
     if len(watch):
         st.dataframe(
-            watch[["관리코드", "상품명", "박스재고", "재고금액", "온라인계", "시즌매출",
+            watch[["관리코드", "상품명", "박스재고", "재고금액", "주요채널계", "온라인B2B계", "시즌매출",
                    "마진율", "작년시즌", "판정"]].sort_values(
                        "재고금액", ascending=False).style.format({
                            "박스재고": "{:,.0f}", "재고금액": "{:,.0f}",
-                           "온라인계": "{:,.0f}", "시즌매출": "{:,.0f}",
+                           "주요채널계": "{:,.0f}", "온라인B2B계": "{:,.0f}",
+                           "시즌매출": "{:,.0f}",
                            "마진율": "{:.2%}", "작년시즌": "{:,.0f}"}),
             hide_index=True, width="stretch")
-        st.caption("`온라인계 = 0` 은 오프라인·나들로만 나가고 있다는 뜻입니다(등재·노출 점검 대상). "
+        st.caption("`주요채널계 = 0` 은 오픈마켓·자사몰엔 안 나가고 나들·온라인B2B로만 "
+                   "빠지고 있다는 뜻입니다(등재·노출 점검 대상). "
                    f"마진 {float(cfg['절대하한'])*100:.0f}% 미만은 절대하한 관통입니다. "
                    "나들은 floor anchor라 낮은 게 정상이지만 **0%·역마진은 정상이 아닙니다**.")
     else:
