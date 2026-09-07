@@ -37,6 +37,7 @@ pg = st.navigation({
     "": [
         st.Page(_P / "0_지도로드맵.py", title="지도·로드맵", icon="🗺️"),
         st.Page(_P / "0b_데일리대시보드.py", title="데일리 대시보드", icon="📅"),
+        st.Page(_P / "14_선물세트시즌.py", title="선물세트 시즌", icon="🎁"),
         st.Page(_P / "1_파일처리.py", title="파일처리", icon="📂"),
         st.Page(_P / "5_송장처리.py", title="송장처리", icon="🏷️"),
     ],
