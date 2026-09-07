@@ -23,13 +23,18 @@ import pandas as pd
 
 # ── 채널 규칙 (상호명 → 채널군·채널) ────────────────────────────────────────
 GRP_OPEN = "오픈마켓"
-GRP_RETAIL = "리테일"
 GRP_MALL = "자사몰"
 GRP_NADL = "나들"
-GRP_OFF = "오프라인"
-GRP_SKIP = "제외"
+GRP_B2B = "온라인B2B"
+GRP_UNK = "미분류"          # 화이트리스트 미등재 — 사업부 안팎을 아직 모르는 상태
+GRP_OUT = "사업부밖"        # 오프라인 확정 (관제판 집계 제외)
+GRP_SKIP = "제외"           # 위탁재고·파손보상 등 매출처 아닌 계정
 
-ONLINE_GROUPS = (GRP_OPEN, GRP_RETAIL, GRP_MALL)
+#: 인터넷사업부 = 주요 채널(오픈마켓·자사몰) + 나들 + 온라인 B2B.
+#: ★2026-09-07 확정 — 오프라인은 사업부 밖이라 시즌 관제판에서 아예 뺀다.
+#:   리테일앤인사이트·제이티유통 같은 **상시 B2B 공급처도 온라인 B2B**로 분류한다(사용자 확정).
+DIVISION_GROUPS = (GRP_OPEN, GRP_MALL, GRP_NADL, GRP_B2B)
+MAIN_GROUPS = (GRP_OPEN, GRP_MALL)
 
 # (채널명, 상호명에 포함되면 매칭) — 오픈마켓 하위 채널. 순서 = 판정 우선순위.
 OPEN_CHANNELS = [
@@ -43,8 +48,8 @@ OPEN_CHANNELS = [
     ("배민", ("우아한형제들",)),
     ("토스", ("토스뱅크",)),
 ]
-# 위탁재고 계정 — 매출처가 아니므로 어느 집계에도 넣지 않는다(pitfalls 2026-08-05).
-EXCLUDE_STORES = ("쿠팡(로켓창고)",)
+# 매출처가 아닌 계정 — 어느 집계에도 넣지 않는다(pitfalls 2026-08-05).
+EXCLUDE_STORES = ("쿠팡(로켓창고)", "한진택배 파손")
 
 # 판정 라벨 (§6 4분면)
 V_CUT = "🔴 인하 집행"
@@ -56,8 +61,12 @@ V_NOSALE = "⚫ 무매출"
 DEFAULT_CONFIG = {
     "시즌명": "추석 2026",
     "dday": "2026-09-25",
-    "시즌창_일수": 75,
+    "측정창_일수": 55,      # ★D-55. 추석26 기준 정확히 8/1. 근거는 §10 실측표 참조:
+                            #  D-75~D-56 구간 매출이 시즌의 0.17%뿐이고 램프는 D-45부터 붙는다.
+                            #  달력 8/1 고정이 아니라 D-오프셋이어야 YoY가 대칭이고 설에도 돈다.
+    "운영창_일수": 31,      # 트랙을 여닫는 시점(준비 국면 마감 D-31). 측정창과 다르다.
     "마감_D": 5,
+    "사업부목표": None,     # 인터넷사업부 통합 목표(미설정 시 작년 시즌 실적을 기준선으로)
     "작년_dday": "2025-10-06",
     "매출목표": 1_500_000_000,
     "계획마진": 0.088,
@@ -107,29 +116,73 @@ def _num(v, default=0.0) -> float:
         return default
 
 
-def classify_store(name) -> tuple[str, str]:
-    """상호명 → (채널군, 채널). 오픈마켓만 하위 채널을 가른다."""
+def _auto_group(s: str) -> str:
+    """상호명 표기 규칙만으로 판정 가능한 구분. 화이트리스트에 없어도 이건 확실하다."""
+    if s in EXCLUDE_STORES:
+        return GRP_SKIP
+    if "나들커뮤니케이션" in s:
+        return GRP_NADL
+    if "자사몰" in s:
+        return GRP_MALL
+    if s.startswith("오픈마켓"):
+        return GRP_OPEN
+    return ""
+
+
+def load_division(text: bytes | str | None) -> dict:
+    """reference/internet_division_stores.csv → {상호명: 구분}.
+
+    ★`master/sales_*.parquet` 은 **전사 데이터**다(2026-08 기준 264개 거래처 40억).
+      인터넷사업부 export는 그중 33개 거래처 10.7억뿐. 즉 파케이를 그냥 집계하면
+      오프라인 영업부 매출(푸드앤플러스·삼일유통 등)이 통째로 섞인다.
+      이 화이트리스트가 그 경계다(2026-09-07 확정).
+    """
+    if not text:
+        return {}
+    if isinstance(text, bytes):
+        text = text.decode("utf-8-sig")
+    import csv
+    import io as _io
+    out = {}
+    for r in csv.DictReader(_io.StringIO(text)):
+        name = _nfc(r.get("상호명"))
+        grp = _nfc(r.get("구분"))
+        if name and grp:
+            out[name] = grp
+    return out
+
+
+def classify_store(name, division: dict | None = None) -> tuple[str, str]:
+    """상호명 → (채널군, 채널).
+
+    판정 순서: ① 표기 규칙(오픈마켓/자사몰/나들/제외 계정) → ② 화이트리스트 →
+    ③ 둘 다 아니면 **미분류**. 미분류를 오프라인으로 단정하지 않는 이유는
+    온라인 B2B가 1회성이라 **매 시즌 새 상호명이 계속 생기기 때문**이다.
+    조용히 오프라인으로 버리면 매출이 사라진다 → 화면에 경고로 띄운다.
+    """
     s = _nfc(name)
     if not s:
-        return GRP_OFF, "미상"
-    if s in EXCLUDE_STORES:
-        return GRP_SKIP, "제외"
-    if "나들커뮤니케이션" in s:
-        return GRP_NADL, "나들"
-    if "리테일앤인사이트" in s:
-        return GRP_RETAIL, "리테일"
-    if "자사몰" in s:
-        return GRP_MALL, "자사몰"
-    if s.startswith("오픈마켓"):
+        return GRP_UNK, "미상"
+    auto = _auto_group(s)
+    if auto == GRP_OPEN:
         for ch, keys in OPEN_CHANNELS:
             if any(k in s for k in keys):
                 return GRP_OPEN, ch
         return GRP_OPEN, "기타오픈마켓"
-    return GRP_OFF, s
+    if auto:
+        return auto, {GRP_NADL: "나들", GRP_MALL: "자사몰", GRP_SKIP: "제외"}[auto]
+    grp = (division or {}).get(s, "")
+    if grp in ("온라인B2B",):
+        return GRP_B2B, s
+    if grp in ("제외",):
+        return GRP_SKIP, "제외"
+    if grp in ("사업부밖", "오프라인"):
+        return GRP_OUT, s
+    return GRP_UNK, s
 
 
 def channel_columns() -> list[str]:
-    return [c for c, _ in OPEN_CHANNELS] + ["리테일", "자사몰", "나들", "오프라인"]
+    return [c for c, _ in OPEN_CHANNELS] + [GRP_MALL, GRP_NADL, GRP_B2B]
 
 
 # ── 시즌 창 / D-day ──────────────────────────────────────────────────────────
@@ -138,7 +191,7 @@ def season_window(cfg: dict, now=None) -> dict:
     now = pd.Timestamp(now or pd.Timestamp.now().normalize()).normalize()
     dday = pd.Timestamp(cfg["dday"])
     ly_dday = pd.Timestamp(cfg["작년_dday"])
-    span = int(cfg.get("시즌창_일수", 75))
+    span = int(cfg.get("측정창_일수", cfg.get("시즌창_일수", 55)))
     start = dday - pd.Timedelta(days=span)
     ly_start = ly_dday - pd.Timedelta(days=span)
     D = int((dday - now).days)
@@ -147,6 +200,7 @@ def season_window(cfg: dict, now=None) -> dict:
         "now": now, "dday": dday, "start": start, "end": now,
         "ly_dday": ly_dday, "ly_start": ly_start, "ly_end": ly_dday,
         "D": D,
+        "운영창_일수": int(cfg.get("운영창_일수", 31)),
         "잔여일": max(int(D - close_d), 0),          # D-5(배송 마감)까지 남은 판매일
         "경과영업일": len(pd.bdate_range(start, now)),
     }
@@ -156,14 +210,38 @@ def ly_aligned_dates(win: dict) -> dict:
     """작년 대조 시점 2종.
 
     - 달력: 작년 같은 D-day 오프셋.
-    - 영업일: 올해 경과 영업일 수와 같은 순번의 작년 영업일 **달력 날짜**.
-      ★평일 필터 후 cumsum 금지(작년 주말 매출이 통째로 소실 — pitfalls 2026-09-03).
-        반드시 '그 날짜까지 주말 포함 누적'과 대조한다.
+    - 영업일: **D-day에서 거꾸로 센 잔여 영업일**이 같아지는 작년 날짜.
+      ★2026-09-07 정정 — 이전엔 '측정창 시작부터 경과한 영업일 순번'으로 잡았는데,
+        그러면 **측정창 길이를 바꾸는 순간 정렬점이 밀린다**(75→55일로 줄이자 작년
+        대조점이 D-19→D-20으로 옮겨가 YoY가 93%→148%로 튀었다). D-day 역산은
+        측정창과 무관하므로 이 결함이 없다.
+    ★평일 필터 후 cumsum 금지 — 반드시 '그 날짜까지 주말 포함 누적'과 대조한다
+      (작년 토요일 매출이 통째로 소실됨 · pitfalls 2026-09-03).
     """
     cal = win["ly_dday"] - pd.Timedelta(days=max(win["D"], 0))
-    bd = pd.bdate_range(win["ly_start"], win["ly_dday"])
-    n = min(max(win["경과영업일"], 1), len(bd))
-    return {"달력": cal, "영업일": bd[n - 1]}
+    left = len(pd.bdate_range(win["now"] + pd.Timedelta(days=1), win["dday"]))
+    d = win["ly_dday"]
+    while d > win["ly_start"]:
+        if len(pd.bdate_range(d + pd.Timedelta(days=1), win["ly_dday"])) >= left:
+            break
+        d -= pd.Timedelta(days=1)
+    return {"달력": cal, "영업일": d, "잔여영업일": left}
+
+
+def block_yoy(cur: pd.DataFrame, prev: pd.DataFrame, win: dict,
+              groups: tuple, days: int = 7) -> float:
+    """최근 N일 **D-정렬 블록** YoY. 요일 배치가 어긋나는 시즌의 진도 정본.
+
+    ★2026 추석은 주말 온라인 매출이 0인데(작년은 토요일 1.45억) 달력 누적 YoY가
+      구조적으로 불리하게 나오고, 영업일 정렬은 D가 밀려 과대해진다. 같은 D 구간을
+      통째로(주말 포함) 잘라 비교하면 요일 효과가 상쇄된다.
+    """
+    hi, lo = win["D"] + days - 1, win["D"]
+    a = cur[(win["dday"] - cur["거래일자"]).dt.days.between(lo, hi)]
+    b = prev[(win["ly_dday"] - prev["거래일자"]).dt.days.between(lo, hi)]
+    a = a[a["채널군"].isin(groups)]["판매금액"].sum()
+    b = b[b["채널군"].isin(groups)]["판매금액"].sum()
+    return a / b if b else np.nan
 
 
 # ── 유니버스 ─────────────────────────────────────────────────────────────────
@@ -227,7 +305,8 @@ def build_universe(pm: pd.DataFrame, attrs: pd.DataFrame, lineup: pd.DataFrame,
 
 
 # ── 매출 집계 ────────────────────────────────────────────────────────────────
-def scope_sales(sales: pd.DataFrame, start, end, codes: set | None = None) -> pd.DataFrame:
+def scope_sales(sales: pd.DataFrame, start, end, codes: set | None = None,
+                division: dict | None = None) -> pd.DataFrame:
     """시즌창으로 자르고 채널군·채널을 붙인다."""
     if sales is None or sales.empty:
         return pd.DataFrame(columns=["거래일자", "관리코드", "채널군", "채널",
@@ -239,10 +318,10 @@ def scope_sales(sales: pd.DataFrame, start, end, codes: set | None = None) -> pd
     d["관리코드"] = d["관리코드"].map(_nfc)
     if codes is not None:
         d = d[d["관리코드"].isin(codes)]
-    cls = d["상호명"].map(classify_store)
+    cls = d["상호명"].map(lambda x: classify_store(x, division))
     d["채널군"] = [c[0] for c in cls]
     d["채널"] = [c[1] for c in cls]
-    d = d[d["채널군"] != GRP_SKIP]
+    d = d[~d["채널군"].isin((GRP_SKIP, GRP_OUT))]   # 매출처 아닌 계정·오프라인 확정 제외
     for c in ("수량", "판매금액", "판매이익"):
         d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
     return d
@@ -254,6 +333,7 @@ def channel_pivot(scoped: pd.DataFrame, value: str = "판매금액") -> pd.DataF
         return pd.DataFrame()
     d = scoped.copy()
     d["열"] = np.where(d["채널군"] == GRP_OPEN, d["채널"], d["채널군"])
+    d = d[d["열"].isin(channel_columns())]
     p = d.pivot_table(index="관리코드", columns="열", values=value,
                       aggfunc="sum", fill_value=0.0)
     for c in channel_columns():
@@ -307,12 +387,13 @@ def judge_row(sets_left: float, daily: float, days_left: int,
     return V_UP
 
 
-def build_board(pm, attrs, lineup, sales, prev_sales, cfg, now=None) -> dict:
+def build_board(pm, attrs, lineup, sales, prev_sales, cfg, now=None,
+                division: dict | None = None) -> dict:
     """관제판 한 판. 반환 = {'board': DataFrame, 'win':…, 'kpi':…, 'group':…}"""
     win = season_window(cfg, now)
     ly = ly_aligned_dates(win)
 
-    cur_all = scope_sales(sales, win["start"], win["end"])
+    cur_all = scope_sales(sales, win["start"], win["end"], division=division)
     uni = build_universe(pm, attrs, lineup, set(cur_all["관리코드"]) if len(cur_all) else set())
     if uni.empty:
         return {"board": pd.DataFrame(), "win": win, "kpi": {},
@@ -321,7 +402,7 @@ def build_board(pm, attrs, lineup, sales, prev_sales, cfg, now=None) -> dict:
     codes = set(uni["관리코드"])
 
     cur = cur_all[cur_all["관리코드"].isin(codes)]
-    prev = scope_sales(prev_sales, win["ly_start"], win["ly_end"], codes)
+    prev = scope_sales(prev_sales, win["ly_start"], win["ly_end"], codes, division)
     prev_cal = prev[prev["거래일자"] <= ly["달력"]]
     prev_bd = prev[prev["거래일자"] <= ly["영업일"]]
 
@@ -338,10 +419,11 @@ def build_board(pm, attrs, lineup, sales, prev_sales, cfg, now=None) -> dict:
     b["마진율"] = np.where(b["시즌매출"] > 0, b["시즌이익"] / b["시즌매출"], np.nan)
 
     # 채널군 소계 — ★'무매출'은 온라인 기준으로 봐야 한다(오프라인/나들로만 나가는 코드가 흔하다)
-    for g, label in [(GRP_OPEN, "오픈마켓계"), (GRP_NADL, "나들계"), (GRP_OFF, "오프라인계")]:
+    for g, label in [(GRP_OPEN, "오픈마켓계"), (GRP_NADL, "나들계"), (GRP_B2B, "온라인B2B계")]:
         b[label] = b["관리코드"].map(_sum(cur[cur["채널군"] == g])).fillna(0.0)
-    b["온라인계"] = b["관리코드"].map(
-        _sum(cur[cur["채널군"].isin(ONLINE_GROUPS)])).fillna(0.0)
+    b["주요채널계"] = b["관리코드"].map(_sum(cur[cur["채널군"].isin(MAIN_GROUPS)])).fillna(0.0)
+    b["사업부계"] = b["관리코드"].map(
+        _sum(cur[cur["채널군"].isin(DIVISION_GROUPS)])).fillna(0.0)
 
     d7 = depletion_sets(cur, win["end"], 7)
     d30 = depletion_sets(cur, win["end"], 30)
@@ -367,7 +449,7 @@ def build_board(pm, attrs, lineup, sales, prev_sales, cfg, now=None) -> dict:
     for c in channel_columns():
         b[c] = b["관리코드"].map(amt[c] if c in amt.columns else pd.Series(dtype=float)).fillna(0.0)
 
-    # ── KPI (오픈마켓 = 목표 스코프)
+    # ── KPI (오픈마켓 = ADR 0030 목표 스코프 / 사업부계 = 통합 진도)
     om = cur[cur["채널군"] == GRP_OPEN]
     om_amt, om_prof = om["판매금액"].sum(), om["판매이익"].sum()
     target = float(cfg["매출목표"])
@@ -389,6 +471,41 @@ def build_board(pm, attrs, lineup, sales, prev_sales, cfg, now=None) -> dict:
     for lab, cut in [("YoY달력", ly["달력"]), ("YoY영업일", ly["영업일"])]:
         base = pa_om[pa_om["거래일자"] <= cut]["판매금액"].sum()
         kpi[lab] = om_amt / base if base else np.nan
+    kpi["잔여영업일"] = ly["잔여영업일"]
+    kpi["YoY블록"] = block_yoy(cur, prev, win, (GRP_OPEN,), 7)
+    kpi["YoY블록_직전"] = block_yoy(
+        cur, prev, {**win, "D": win["D"] + 7, "dday": win["dday"],
+                    "ly_dday": win["ly_dday"]}, (GRP_OPEN,), 7)
+
+    # 사업부 통합 — 목표 미설정 시 작년 시즌 실적을 기준선으로 진도를 낸다
+    div = cur[cur["채널군"].isin(DIVISION_GROUPS)]
+    pdiv = prev[prev["채널군"].isin(DIVISION_GROUPS)]
+    div_amt, div_prof = div["판매금액"].sum(), div["판매이익"].sum()
+    ly_div_full = pdiv["판매금액"].sum()
+    dtarget = cfg.get("사업부목표") or ly_div_full or 0.0
+    kpi["사업부매출"] = div_amt
+    kpi["사업부이익"] = div_prof
+    kpi["사업부마진"] = div_prof / div_amt if div_amt else 0.0
+    kpi["사업부기준선"] = dtarget
+    kpi["사업부기준선출처"] = "설정 목표" if cfg.get("사업부목표") else "작년 시즌 실적"
+    kpi["사업부진도"] = div_amt / dtarget if dtarget else np.nan
+    base = pdiv[pdiv["거래일자"] <= ly["달력"]]["판매금액"].sum()
+    kpi["사업부YoY"] = div_amt / base if base else np.nan
+
+    # ★작년 온라인 B2B는 화이트리스트로 못 가른다(2026-09-07 실측: 작년 시즌창
+    #   '주요채널·나들 아님' 354곳 50.3억 중 화이트리스트 히트 18곳 1.58억뿐).
+    #   따라서 온라인B2B·사업부계의 작년 대비는 **과소 집계**다. 화면에 그대로 알린다.
+    kpi["작년B2B신뢰"] = False
+    kpi["미분류"] = None
+    unk = scope_sales(sales, win["start"], win["end"], codes, division)
+    unk = unk[unk["채널군"] == GRP_UNK]
+    if len(unk):
+        kpi["미분류"] = {
+            "곳": int(unk["상호명"].nunique()),
+            "매출": float(unk["판매금액"].sum()),
+            "목록": (unk.groupby("상호명")["판매금액"].sum()
+                    .sort_values(ascending=False).head(30)),
+        }
 
     behind = kpi["밴드판정"] == "🔴"
     b["판정"] = [
@@ -397,7 +514,8 @@ def build_board(pm, attrs, lineup, sales, prev_sales, cfg, now=None) -> dict:
         for _, r in b.iterrows()
     ]
 
-    grp = cur.groupby("채널군").agg(매출=("판매금액", "sum"), 이익=("판매이익", "sum"))
+    grp = cur[cur["채널군"].isin(DIVISION_GROUPS + (GRP_UNK,))].groupby("채널군").agg(
+        매출=("판매금액", "sum"), 이익=("판매이익", "sum"))
     grp["마진"] = np.where(grp["매출"] > 0, grp["이익"] / grp["매출"], np.nan)
     return {"board": b, "win": win, "kpi": kpi, "group": grp.reset_index(),
             "이익피벗": prof, "scoped": cur}
