@@ -35,11 +35,13 @@ _CFG_PATH = "reference/giftset_season.json"
 
 # 상품 상태 — 재고 경보 판단축. 데이터로 유도 불가한 영업 판단이라 참조 CSV에 영속한다.
 _STATUS_PATH = "reference/giftset_status.csv"
-_STATUS_COLS = ["관리코드", "상태", "비고", "갱신일"]
+_STATUS_COLS = ["관리코드", "상태", "촉진", "비고", "갱신일"]
 _STATUS_UNSET = "미지정"
 _STATUS_OPTS = ["판매중", "일시품절(재입고예정)", "추가입고없음", "판매중지"]
 # 추가 매입·재입고 여지가 없는 상태 = 품절 임박 판단에서 걸러낼 대상
 _STATUS_DEAD = ("추가입고없음", "판매중지")
+# 촉진 = 상태와 직교하는 축. "밀어내야 하는 물건"이지 "팔 수 있는 상태인가"가 아니다.
+_PROMO_ON = ("Y", "y", "1", "TRUE", "True", "true", "O", "o")
 
 
 def _pat() -> str:
@@ -100,8 +102,9 @@ def _status_map() -> dict:
     out = {}
     for r in rows:
         c, v = gsn._nfc(r.get("관리코드")), gsn._nfc(r.get("상태"))
-        if c and v:
-            out[c] = {"상태": v, "비고": gsn._nfc(r.get("비고")),
+        promo = gsn._nfc(r.get("촉진")) in _PROMO_ON
+        if c and (v or promo):          # 상태 미지정이어도 촉진만 걸린 행이 있을 수 있다
+            out[c] = {"상태": v, "촉진": promo, "비고": gsn._nfc(r.get("비고")),
                       "갱신일": gsn._nfc(r.get("갱신일"))}
     return out
 
@@ -399,8 +402,10 @@ def _save_status(edits: list):
                 sha = meta.get("sha")
                 for r in csv.DictReader(io.StringIO(body.decode("utf-8-sig"))):
                     c, v = gsn._nfc(r.get("관리코드")), gsn._nfc(r.get("상태"))
-                    if c and v:
+                    pr = gsn._nfc(r.get("촉진"))
+                    if c and (v or pr in _PROMO_ON):
                         remote[c] = {"관리코드": c, "상태": v,
+                                     "촉진": "Y" if pr in _PROMO_ON else "",
                                      "비고": gsn._nfc(r.get("비고")),
                                      "갱신일": gsn._nfc(r.get("갱신일"))}
             # 원격이 CDN stale 이어도 이번 세션 저장분이 뒤집히지 않게 스냅샷이 우선.
@@ -413,18 +418,23 @@ def _save_status(edits: list):
                 c = gsn._nfc(e.get("관리코드"))
                 v = gsn._nfc(e.get("상태"))
                 memo = gsn._nfc(e.get("비고"))
+                pr = "Y" if bool(e.get("촉진")) else ""
                 if not c:
                     continue
-                if v in ("", _STATUS_UNSET):
+                # 상태가 미지정이고 촉진도 꺼져 있어야 행을 지운다(촉진만 걸린 행 보존)
+                if v in ("", _STATUS_UNSET) and not pr:
                     if cur.pop(c, None) is not None:
                         n_del += 1
                     dead.add(c)
                     continue
                 dead.discard(c)
                 prev = cur.get(c) or {}
-                if prev.get("상태") == v and gsn._nfc(prev.get("비고")) == memo:
+                if (prev.get("상태") == ("" if v == _STATUS_UNSET else v)
+                        and gsn._nfc(prev.get("촉진")) == pr
+                        and gsn._nfc(prev.get("비고")) == memo):
                     continue
-                cur[c] = {"관리코드": c, "상태": v, "비고": memo, "갱신일": today}
+                cur[c] = {"관리코드": c, "상태": "" if v == _STATUS_UNSET else v,
+                          "촉진": pr, "비고": memo, "갱신일": today}
                 n_set += 1
             if not n_set and not n_del:
                 return False, "변경된 항목이 없습니다."
@@ -514,6 +524,7 @@ if b.empty:
 
 _smap = _status_current()
 b["상태"] = [(_smap.get(c) or {}).get("상태") or _STATUS_UNSET for c in b["관리코드"]]
+b["촉진"] = [bool((_smap.get(c) or {}).get("촉진")) for c in b["관리코드"]]
 b["상태비고"] = [(_smap.get(c) or {}).get("비고", "") for c in b["관리코드"]]
 
 # ── 상단 KPI ────────────────────────────────────────────────────────────────
@@ -638,10 +649,13 @@ with tabs[1]:
     verdicts = f[2].multiselect("판정", [gsn.V_CUT, gsn.V_BUY, gsn.V_HOLD,
                                         gsn.V_UP, gsn.V_NOSALE])
     q = f[3].text_input("검색", placeholder="코드·상품명")
+    promo_only_mb = st.checkbox("🚀 촉진 대상만", value=False, key="gs_promo_only_mb")
 
     v = b.copy()
     if only_line:
         v = v[v["시즌라인업"]]
+    if promo_only_mb:
+        v = v[v["촉진"]]
     if verdicts:
         v = v[v["판정"].isin(verdicts)]
     if q.strip():
@@ -655,7 +669,7 @@ with tabs[1]:
             for cc in gsn.channel_columns():
                 v[cc] = v["관리코드"].map(pv[cc] if cc in pv.columns else pd.Series(dtype=float)).fillna(0.0)
 
-    cols = (["관리코드", "상품명", "상태", "박스재고", "세트재고", "재고금액",
+    cols = (["관리코드", "상품명", "상태", "촉진", "박스재고", "세트재고", "재고금액",
              "시즌매출", "시즌이익", "마진율", "판매세트",
              "주요채널계", "온라인B2B계", "사업부계", "일평균세트7", "소진예측일", "잔여시즌일", "마감후잔여세트",
              "작년동기_달력", "YoY", "작년시즌", "작년진도", "판정", "결손"]
@@ -700,13 +714,53 @@ with tabs[2]:
                                 help="비우면 전체. 상태는 아래 [상품 상태 설정]에서 지정합니다.")
     hide_dead = sf[1].checkbox("추가입고없음·판매중지 숨기기", value=False,
                                key="gs_st_hide")
+    only_promo = sf[1].checkbox("🚀 촉진 대상만", value=False, key="gs_promo_only")
     bb = b
     if st_pick:
         bb = bb[bb["상태"].isin(st_pick)]
     if hide_dead:
         bb = bb[~bb["상태"].isin(_STATUS_DEAD)]
+    if only_promo:
+        bb = bb[bb["촉진"]]
     sf[2].caption(f"경보 대상 **{len(bb)}종** / 전체 {len(b)}종 · "
-                  f"미지정 {int((b['상태'] == _STATUS_UNSET).sum())}종")
+                  f"미지정 {int((b['상태'] == _STATUS_UNSET).sum())}종 · "
+                  f"촉진 {int(b['촉진'].sum())}종")
+
+    # ── 판매 촉진 대상 ──────────────────────────────────────────────────────
+    promo = b[b["촉진"]].copy()
+    if len(promo):
+        _stuck = float(promo["마감후잔여세트"].sum())
+        _stuck_won = float(promo["이월재고금액"].sum())
+        ui.section_head(f"판매 촉진 대상 — {len(promo)}종 / 재고 {_won(promo['재고금액'].sum())}",
+                        icon="🚀")
+        st.caption(
+            f"현재 속도로 D-{cfg.get('마감_D', 5)}까지 팔면 **{_stuck:,.0f}세트 "
+            f"({_won(_stuck_won)})가 남습니다.** 인하 재원 잔액 {_won(k['재원잔액'])} · "
+            f"개별 절대하한 {float(cfg['절대하한'])*100:.0f}%. "
+            "이월 비용률보다 큰 인하폭이 필요하면 인하가 아니라 이월이 낫습니다(§7)."
+        )
+        promo = promo.sort_values("이월재고금액", ascending=False)
+        st.dataframe(
+            promo[["관리코드", "상품명", "상태", "세트재고", "일평균세트7", "소진예측일",
+                   "잔여시즌일", "마감후잔여세트", "이월재고금액", "마진율",
+                   "주요채널계", "사업부계", "작년시즌", "YoY", "판정"]].style.format({
+                       "세트재고": "{:,.0f}", "일평균세트7": "{:,.1f}",
+                       "소진예측일": "{:,.1f}", "마감후잔여세트": "{:,.0f}",
+                       "이월재고금액": "{:,.0f}", "마진율": "{:.2%}",
+                       "주요채널계": "{:,.0f}", "사업부계": "{:,.0f}",
+                       "작년시즌": "{:,.0f}", "YoY": "{:.1%}"}),
+            hide_index=True, width="stretch")
+        _blind = promo[(promo["주요채널계"] <= 0)
+                       | (promo["주요채널계"] < promo["사업부계"] * 0.2)]
+        if len(_blind):
+            st.warning(
+                "⚠️ **주요채널(오픈마켓·자사몰) 몫이 사업부계의 20% 미만**인 종목 "
+                f"{len(_blind)}건 — " + " · ".join(_blind["관리코드"].tolist()) +
+                ". 물건은 나가는데 온라인만 뒤처지는 것이므로 **가격이 아니라 노출·등재 "
+                "문제**일 수 있습니다(가격을 깎아도 안 보이면 안 팔립니다).")
+        st.download_button("⬇️ 촉진 대상 XLSX", _to_xlsx(promo, "촉진대상"),
+                           f"선물세트_촉진대상_{pd.Timestamp(base_day):%Y%m%d}.xlsx",
+                           key="gs_promo_dl")
     st.caption(
         f"**인하 vs 이월 손익분기** — 이월 비용률 {carry*100:.1f}%. "
         f"D-{cfg.get('마감_D',5)}까지 못 빼는 물량은 이월 비용이 붙으므로, "
@@ -784,7 +838,10 @@ with tabs[2]:
         "`reference/giftset_status.csv` 에 남깁니다.  \n"
         "**판매중** 정상 판매 · **일시품절(재입고예정)** 지금 없지만 들어옴 → 채널 유지 · "
         "**추가입고없음** 이번 시즌 재입고 불가, 잔여 소진으로 종료 → 저마진 채널부터 정리 · "
-        "**판매중지** 채널에서 내림. `미지정`으로 되돌리면 행이 삭제됩니다."
+        "**판매중지** 채널에서 내림.  \n"
+        "**🚀 촉진**은 상태와 **직교하는 축**입니다 — \"팔 수 있는 상태인가\"가 아니라 "
+        "\"밀어내야 하는가\". `판매중`이면서 촉진일 수 있고, 촉진만 켜도 행이 남습니다. "
+        "상태 `미지정` + 촉진 해제 시에만 행이 삭제됩니다."
     )
     eq = st.text_input("편집 대상 검색", placeholder="코드·상품명 (비우면 전체)",
                        key="gs_st_q")
@@ -793,7 +850,8 @@ with tabs[2]:
         _s = eq.strip()
         src = b[b["관리코드"].str.contains(_s, case=False, na=False)
                 | b["상품명"].str.contains(_s, case=False, na=False)]
-    ed = (src[["관리코드", "상품명", "박스재고", "세트재고", "시즌매출", "상태", "상태비고"]]
+    ed = (src[["관리코드", "상품명", "박스재고", "세트재고", "시즌매출",
+               "상태", "촉진", "상태비고"]]
           .rename(columns={"상태비고": "비고"})
           .sort_values(["상태", "시즌매출"], ascending=[True, False])
           .reset_index(drop=True))
@@ -805,6 +863,9 @@ with tabs[2]:
                 "상태": st.column_config.SelectboxColumn(
                     "상태", options=[_STATUS_UNSET] + _STATUS_OPTS, required=True,
                     width="medium"),
+                "촉진": st.column_config.CheckboxColumn(
+                    "🚀 촉진", help="밀어내야 하는 물건. 상태와 별개 축이라 "
+                                  "`판매중`이면서 촉진일 수 있습니다."),
                 "비고": st.column_config.TextColumn("비고", max_chars=60,
                                                    help="재입고 예정일·중단 사유 등"),
                 "박스재고": st.column_config.NumberColumn(format="%d"),
