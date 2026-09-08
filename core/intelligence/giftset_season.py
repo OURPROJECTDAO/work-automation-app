@@ -182,7 +182,20 @@ def classify_store(name, division: dict | None = None) -> tuple[str, str]:
 
 
 def channel_columns() -> list[str]:
-    return [c for c, _ in OPEN_CHANNELS] + [GRP_MALL, GRP_NADL, GRP_B2B]
+    """★GRP_UNK(미분류)까지 넣는다 — 빼면 `시즌매출`에는 들어가는데 채널 열 어디에도
+    안 잡혀 표에서 금액이 조용히 사라진다(2026-09-08 실측 5.55억)."""
+    return [c for c, _ in OPEN_CHANNELS] + [GRP_MALL, GRP_NADL, GRP_B2B, GRP_UNK]
+
+
+# 화면·엑셀 표기용 이름. 내부 컬럼명은 그대로 두고 표시할 때만 바꾼다.
+DISPLAY_NAMES = {
+    "작년동기_달력": "작년 이맘때까지",
+    "작년동기_영업일": "작년 이맘때까지(영업일)",
+    "YoY": "작년 이맘때 대비",
+    "작년시즌": "작년 시즌 전체",
+    "작년진도": "작년 전체 대비",
+    "마감후잔여세트": "마감후잔여세트(예상)",
+}
 
 
 # ── 시즌 창 / D-day ──────────────────────────────────────────────────────────
@@ -385,6 +398,125 @@ def judge_row(sets_left: float, daily: float, days_left: int,
     if over and (not behind):
         return V_HOLD
     return V_UP
+
+
+def prescribe(r, cfg: dict) -> tuple[str, str]:
+    """판정에 **얼마나 · 왜**를 붙인다. 전부 산술이며 가정은 문구에 드러낸다.
+
+    기호: S=세트재고(0 클램프) · v=일평균세트7 · R=잔여시즌일 · D=S/v(소진예측일)
+    ─ 🔴 인하 = 잔여일 내 소진에 필요한 속도가 현재의 k배(k>1).
+      인하폭 = min(마진여력, 이월비용률) × min(k−1, 1).
+      **상한이 이월비용률인 근거 = §7** — 그보다 크게 깎아 지금 터는 건 이월보다 손해다.
+      마진여력 = 현재마진 − 절대하한(3%).
+    ─ 🔵 인상 = 잔여일보다 여유(slack)만큼 일찍 소진된다. 어차피 팔릴 물건.
+      인상폭 = (계획마진 − 현재마진) × 0.5 × slack. **절반스텝 = 두뇌④(ADR 0026) 관례.**
+      계획마진 이상이면 인상 근거를 만들지 않는다(0으로 둔다).
+    ─ 🟡 추가매입 = 잔여일 예상 판매(v×R) − 재고. 박스 환산 + 매입액.
+    가격 변화율은 원가 고정 가정에서 `p=C/(1−m)` → `Δp/p=(1−m)/(1−m′)−1`.
+    """
+    floor = float(cfg.get("절대하한", 0.03))
+    plan = float(cfg.get("계획마진", 0.088))
+    carry = float(cfg.get("이월비용률", 0.033))
+    S = max(_num(r.get("세트재고")), 0.0)
+    v = _num(r.get("일평균세트7"))
+    R = int(_num(r.get("잔여시즌일")))
+    inner = _num(r.get("박스내품"), 1) or 1
+    cost = _num(r.get("세트원가"))
+    status = str(r.get("상태") or "")
+    verdict = str(r.get("판정") or "")
+    mv = r.get("마진율")
+    m = None if mv is None or pd.isna(mv) else float(mv)
+    D = (S / v) if v > 0 else (float("inf") if S > 0 else 0.0)
+
+    def _p(x):
+        return f"{x * 100:.1f}%"
+
+    def _pp(x):
+        return f"{x * 100:.1f}%p"
+
+    if verdict == V_NOSALE:
+        return "—", "시즌 매출 0 — 가격이 아니라 등재·노출 점검 대상"
+    if status == "판매중지":
+        return "—", "상태 `판매중지` — 가격 조정 대상 아님"
+    if m is None:
+        return "—", "매출 0이라 마진율 산출 불가"
+
+    def _cut(k):
+        """잔여일 내 소진에 현재의 k배 속도가 필요할 때의 권장 인하폭(%p)."""
+        room_ = max(m - floor, 0.0)
+        return room_, round(min(room_, carry) * min(max(k - 1.0, 0.0), 1.0), 4)
+
+    if verdict == V_CUT:
+        if R <= 0 or v <= 0:
+            return "—", f"잔여 {R}일 · 일평균 {v:,.1f}세트 — 산출 불가"
+        need = S / R
+        k = need / v
+        room, d = _cut(k)
+        base = (f"재고 {S:,.0f}세트 ÷ 일 {v:,.1f}세트 = 소진 {D:,.1f}일 > 잔여 {R}일 · "
+                f"잔여일 내 소진에 일 {need:,.1f}세트 필요(현재의 {k:,.2f}배)")
+        if d < 0.001:
+            why = (f"마진 {_p(m)} 이 하한 {_p(floor)} 에 붙어 여력 없음"
+                   if room < 0.001 else "과잉폭이 작아 인하폭 0.1%p 미만")
+            return "인하 불가", f"{base} · {why}"
+        return (f"마진 −{_pp(d)} (가격 {((1 - m) / (1 - (m - d)) - 1) * 100:+.1f}%)",
+                f"{base} · 마진여력 {_pp(room)}(하한 {_p(floor)}) · "
+                f"이월비용 상한 {_pp(carry)} → min × {min(k - 1.0, 1.0):,.2f}")
+
+    if verdict == V_BUY:
+        exp = v * R
+        short = exp - S
+        base = (f"일 {v:,.1f}세트 × 잔여 {R}일 = 예상 판매 {exp:,.0f}세트 · "
+                f"현재고 {S:,.0f}세트")
+        if status in ("추가입고없음", "판매중지"):
+            return "추가매입 불가", (f"{base} → 부족 {max(short, 0):,.0f}세트이나 "
+                                f"상태 `{status}` = 재입고 경로 없음 → 잔여 소진으로 종료")
+        if short <= 0:
+            return "—", f"{base} → 부족분 없음"
+        boxes = int(-(-short // inner))
+        return (f"+{short:,.0f}세트 ({boxes:,.0f}박스)",
+                f"{base} → 부족 {short:,.0f}세트 = {boxes:,.0f}박스 "
+                f"(매입액 약 {short * cost:,.0f}원) · ※ 시즌 생산 마감 여부 확인 필요")
+
+    if verdict == V_UP:
+        if S <= 0:
+            return "—", (f"세트재고 {_num(r.get('세트재고')):,.0f} — 팔 물건이 없어 "
+                         "가격 조정은 의미 없음(재입고 여부가 먼저)")
+        slack = max(1.0 - (D / R if R > 0 else 0.0), 0.0)
+        gap = plan - m
+        base = (f"재고 {S:,.0f}세트 ÷ 일 {v:,.1f}세트 = 소진 {D:,.1f}일 ≤ 잔여 {R}일 "
+                f"(여유 {slack * 100:,.0f}%)")
+        if gap <= 0:
+            return "—", (f"{base} · 마진 {_p(m)} 이 계획마진 {_p(plan)} 이상 — "
+                         "수치상 인상 근거 없음")
+        d = round(gap * 0.5 * slack, 4)
+        if d < 0.001:
+            return "—", f"{base} · 계획마진까지 {_pp(gap)} 이나 인상폭 0.1%p 미만"
+        return (f"마진 +{_pp(d)} (가격 {((1 - m) / (1 - (m + d)) - 1) * 100:+.1f}%)",
+                f"{base} · 계획마진 {_p(plan)} − 현재 {_p(m)} = {_pp(gap)} · "
+                f"절반스텝 × 여유율 {slack:,.2f} → +{_pp(d)}")
+
+    # 🟢 유지 — 진도는 괜찮지만 재고가 남을 수 있다. 촉진 대상이면 인하 여지를 계산해 준다.
+    yv = r.get("YoY")
+    ys = "-" if yv is None or pd.isna(yv) else f"{float(yv) * 100:,.0f}%"
+    base = f"소진 {D:,.1f}일 vs 잔여 {R}일 · 작년 이맘때 대비 {ys}"
+    rest = _num(r.get("마감후잔여세트"))
+    if rest <= 0:
+        return "—", f"{base} — 마감까지 소진 예상, 조치 없음"
+    base += (f" · 이 속도면 **마감 후 {rest:,.0f}세트({rest * cost:,.0f}원) 남음**")
+    if not bool(r.get("촉진")):
+        return "이월 예상", (f"{base} — 진도는 밴드 안이라 자동 인하 대상은 아님. "
+                          "밀어낼 거면 촉진으로 지정하면 인하폭을 산출합니다")
+    if R <= 0 or v <= 0:
+        return "이월 예상", f"{base} — 잔여일/판매속도 0이라 인하폭 산출 불가"
+    need = S / R
+    room, d = _cut(need / v)
+    if d < 0.001:
+        why = (f"마진 {_p(m)} 이 하한 {_p(floor)} 에 붙어 여력 없음"
+               if room < 0.001 else "인하폭 0.1%p 미만")
+        return "인하 불가", f"{base} · 촉진 대상이나 {why}"
+    return (f"촉진 인하 −{_pp(d)} (가격 {((1 - m) / (1 - (m - d)) - 1) * 100:+.1f}%)",
+            f"{base} · 촉진 대상 → 잔여일 내 소진에 일 {need:,.1f}세트 필요"
+            f"(현재의 {need / v:,.2f}배) · 마진여력 {_pp(room)} · 이월비용 상한 {_pp(carry)}")
 
 
 def build_board(pm, attrs, lineup, sales, prev_sales, cfg, now=None,
