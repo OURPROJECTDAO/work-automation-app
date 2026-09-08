@@ -183,8 +183,33 @@ def _won(v, unit="원"):
     return f"{v:,.0f}{unit}"
 
 
+# 사용자 정제본(2026-09-08) 기준 서식. 회계 서식 = 쉼표·음수 −·0은 "-".
+_XLSX_MONEY = '_-* #,##0_-;\\-* #,##0_-;_-* "-"_-;_-@_-'
+_XLSX_QTY = "#,##0"
+_XLSX_FMT = {
+    "관리코드": "@",
+    "마진율": "0.0%", "작년 이맘때 대비": "0%", "작년 전체 대비": "0%",
+    "소진예측일": "0.0", "일평균세트7": "0.0", "일평균세트30": "0.0",
+    "마감후잔여세트(예상)": "0", "잔여시즌일": "0", "박스내품": "0",
+    "박스재고": _XLSX_QTY, "세트재고": _XLSX_QTY, "판매세트": _XLSX_QTY,
+}
+_XLSX_WIDTH = {
+    "관리코드": 12, "상품명": 40.4, "상태": 20.6, "촉진": 6.5, "판정": 17.4,
+    "권장 조정": 24, "산출 근거": 110, "마감후잔여세트(예상)": 19,
+    "작년 이맘때까지": 15, "작년 시즌 전체": 15, "작년 이맘때 대비": 14, "작년 전체 대비": 13,
+}
+
+
 def _to_xlsx(df: pd.DataFrame, title: str) -> bytes:
+    """가독성 서식을 입혀 내보낸다(사용자 정제본 2026-09-08 반영).
+
+    금액=회계 서식(쉼표·음수 −·0은 `-`) · 비율=0.0%/0% · 수량=#,##0 ·
+    코드류=텍스트(`45-12-05` 날짜 변환 방지) · 헤더 볼드+음영 · 틀고정 A2 · 자동필터.
+    컬럼명은 `gsn.DISPLAY_NAMES` 로 치환해 내보낸다.
+    """
     from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
     def _cell(v):
         if isinstance(v, float) and pd.isna(v):
@@ -195,17 +220,34 @@ def _to_xlsx(df: pd.DataFrame, title: str) -> bytes:
             return v.item()
         return v
 
+    df = df.rename(columns=gsn.DISPLAY_NAMES)
     wb = Workbook()
     ws = wb.active
     ws.title = title[:31]
     ws.append(list(df.columns))
     for _, r in df.iterrows():
         ws.append([_cell(v) for v in r])
-    if "관리코드" in df.columns:
-        col = df.columns.get_loc("관리코드") + 1
-        for row in ws.iter_rows(min_row=2, min_col=col, max_col=col):
-            for c in row:
-                c.number_format = "@"
+
+    hdr_fill = PatternFill("solid", fgColor="EEF1F6")
+    for c, name in enumerate(df.columns, start=1):
+        h = ws.cell(1, c)
+        h.font = Font(bold=True)
+        h.fill = hdr_fill
+        h.alignment = Alignment(vertical="center")
+        # 숫자 열만 서식을 준다. 문자열 열에 회계 서식을 씌우면 표시가 깨진다.
+        numeric = pd.api.types.is_numeric_dtype(df[name]) and not pd.api.types.is_bool_dtype(df[name])
+        fmt = _XLSX_FMT.get(name) or (_XLSX_MONEY if numeric else None)
+        if fmt:
+            for row in ws.iter_rows(min_row=2, min_col=c, max_col=c):
+                row[0].number_format = fmt
+        w = _XLSX_WIDTH.get(name)
+        if w is None:
+            w = min(max(len(str(name)) * 1.9 + 3, 10), 18)
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+    ws.freeze_panes = "A2"
+    if ws.max_row > 1:
+        ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -526,6 +568,10 @@ _smap = _status_current()
 b["상태"] = [(_smap.get(c) or {}).get("상태") or _STATUS_UNSET for c in b["관리코드"]]
 b["촉진"] = [bool((_smap.get(c) or {}).get("촉진")) for c in b["관리코드"]]
 b["상태비고"] = [(_smap.get(c) or {}).get("비고", "") for c in b["관리코드"]]
+# 판정에 '얼마나·왜'를 붙인다 — 전부 산술(core.prescribe)
+_pres = [gsn.prescribe(r, cfg) for _, r in b.iterrows()]
+b["권장 조정"] = [x[0] for x in _pres]
+b["산출 근거"] = [x[1] for x in _pres]
 
 # ── 상단 KPI ────────────────────────────────────────────────────────────────
 band = k["밴드"]
@@ -670,27 +716,36 @@ with tabs[1]:
                 v[cc] = v["관리코드"].map(pv[cc] if cc in pv.columns else pd.Series(dtype=float)).fillna(0.0)
 
     cols = (["관리코드", "상품명", "상태", "촉진", "박스재고", "세트재고", "재고금액",
-             "시즌매출", "시즌이익", "마진율", "판매세트",
-             "주요채널계", "온라인B2B계", "사업부계", "일평균세트7", "소진예측일", "잔여시즌일", "마감후잔여세트",
-             "작년동기_달력", "YoY", "작년시즌", "작년진도", "판정", "결손"]
+             "시즌매출", "시즌이익", "마진율", "판매세트", "주요채널계",
+             "일평균세트7", "소진예측일", "잔여시즌일", "마감후잔여세트",
+             "작년동기_달력", "YoY", "작년시즌", "작년진도",
+             "판정", "권장 조정", "산출 근거"]
             + gsn.channel_columns())
-    view = v[cols].sort_values("시즌매출", ascending=False)
+    view = (v[cols].sort_values("시즌매출", ascending=False)
+            .rename(columns=gsn.DISPLAY_NAMES))
     st.dataframe(
         view.style.format({
             "박스재고": "{:,.0f}", "세트재고": "{:,.0f}", "재고금액": "{:,.0f}",
-            "시즌매출": "{:,.0f}", "시즌이익": "{:,.0f}", "마진율": "{:.2%}",
+            "시즌매출": "{:,.0f}", "시즌이익": "{:,.0f}", "마진율": "{:.1%}",
             "판매세트": "{:,.0f}", "주요채널계": "{:,.0f}",
-            "온라인B2B계": "{:,.0f}", "사업부계": "{:,.0f}",
             "일평균세트7": "{:,.1f}", "소진예측일": "{:,.1f}",
-            "마감후잔여세트": "{:,.0f}", "작년동기_달력": "{:,.0f}", "YoY": "{:.1%}",
-            "작년시즌": "{:,.0f}", "작년진도": "{:.1%}",
+            "마감후잔여세트(예상)": "{:,.0f}", "작년 이맘때까지": "{:,.0f}",
+            "작년 이맘때 대비": "{:.0%}", "작년 시즌 전체": "{:,.0f}",
+            "작년 전체 대비": "{:.0%}",
             **{c: "{:,.0f}" for c in gsn.channel_columns()},
         }),
         hide_index=True, width="stretch", height=560,
     )
-    st.caption(f"{len(view)}행 · 채널 컬럼 = **{vmode}**. "
-               "`소진예측일` = 세트재고 ÷ 최근 7일 일평균 판매세트. "
-               "`마감후잔여세트` = 이 속도로 D-5까지 팔고 남는 세트(이월 물량).")
+    st.caption(
+        f"{len(view)}행 · 채널 컬럼 = **{vmode}**. "
+        "`소진예측일` = 세트재고 ÷ 최근 7일 일평균 판매세트 · "
+        "`마감후잔여세트(예상)` = 이 속도로 D-5까지 팔고 남는 세트(이월 물량) · "
+        "**`권장 조정`·`산출 근거`는 전부 산술**입니다(AI 판단 아님) — 계산식은 "
+        "`core/intelligence/giftset_season.py:prescribe`. "
+        "`작년 이맘때까지`=작년 같은 시점 누적 · `작년 이맘때 대비`=시즌매출÷그 값 · "
+        "`작년 시즌 전체`=작년 시즌 합계 · `작년 전체 대비`=시즌매출÷작년 합계. "
+        "★`미분류` 열 = 화이트리스트 미등재 상호명(오프라인일 가능성) — "
+        "**채널 열 합계가 `시즌매출`과 맞아떨어지도록** 노출합니다.")
     st.download_button("⬇️ 관제판 XLSX", _to_xlsx(view, "선물세트시즌"),
                        f"선물세트_관제판_{pd.Timestamp(base_day):%Y%m%d}.xlsx")
 
@@ -743,12 +798,13 @@ with tabs[2]:
         st.dataframe(
             promo[["관리코드", "상품명", "상태", "세트재고", "일평균세트7", "소진예측일",
                    "잔여시즌일", "마감후잔여세트", "이월재고금액", "마진율",
-                   "주요채널계", "사업부계", "작년시즌", "YoY", "판정"]].style.format({
-                       "세트재고": "{:,.0f}", "일평균세트7": "{:,.1f}",
-                       "소진예측일": "{:,.1f}", "마감후잔여세트": "{:,.0f}",
-                       "이월재고금액": "{:,.0f}", "마진율": "{:.2%}",
-                       "주요채널계": "{:,.0f}", "사업부계": "{:,.0f}",
-                       "작년시즌": "{:,.0f}", "YoY": "{:.1%}"}),
+                   "주요채널계", "작년시즌", "YoY", "판정", "권장 조정", "산출 근거"]]
+            .rename(columns=gsn.DISPLAY_NAMES).style.format({
+                "세트재고": "{:,.0f}", "일평균세트7": "{:,.1f}",
+                "소진예측일": "{:,.1f}", "마감후잔여세트(예상)": "{:,.0f}",
+                "이월재고금액": "{:,.0f}", "마진율": "{:.1%}",
+                "주요채널계": "{:,.0f}",
+                "작년 시즌 전체": "{:,.0f}", "작년 이맘때 대비": "{:.0%}"}),
             hide_index=True, width="stretch")
         _blind = promo[(promo["주요채널계"] <= 0)
                        | (promo["주요채널계"] < promo["사업부계"] * 0.2)]
@@ -775,10 +831,11 @@ with tabs[2]:
         st.dataframe(
             left[["관리코드", "상품명", "상태", "세트재고", "일평균세트7", "소진예측일",
                   "잔여시즌일", "마감후잔여세트", "이월재고금액", "이월비용",
-                  "마진율", "판정"]].style.format({
-                      "세트재고": "{:,.0f}", "일평균세트7": "{:,.1f}", "소진예측일": "{:,.1f}",
-                      "마감후잔여세트": "{:,.0f}", "이월재고금액": "{:,.0f}",
-                      "이월비용": "{:,.0f}", "마진율": "{:.2%}"}),
+                  "마진율", "판정", "권장 조정"]]
+            .rename(columns=gsn.DISPLAY_NAMES).style.format({
+                "세트재고": "{:,.0f}", "일평균세트7": "{:,.1f}", "소진예측일": "{:,.1f}",
+                "마감후잔여세트(예상)": "{:,.0f}", "이월재고금액": "{:,.0f}",
+                "이월비용": "{:,.0f}", "마진율": "{:.1%}"}),
             hide_index=True, width="stretch")
 
     short = bb[(bb["세트재고"] > 0) & (bb["시즌매출"] > 0)
@@ -788,9 +845,9 @@ with tabs[2]:
     if len(short):
         st.dataframe(
             short[["관리코드", "상품명", "상태", "세트재고", "일평균세트7", "소진예측일",
-                   "잔여시즌일", "시즌매출", "마진율", "판정"]].style.format({
+                   "잔여시즌일", "시즌매출", "마진율", "판정", "권장 조정"]].style.format({
                        "세트재고": "{:,.0f}", "일평균세트7": "{:,.1f}",
-                       "소진예측일": "{:,.1f}", "시즌매출": "{:,.0f}", "마진율": "{:.2%}"}),
+                       "소진예측일": "{:,.1f}", "시즌매출": "{:,.0f}", "마진율": "{:.1%}"}),
             hide_index=True, width="stretch")
         _live = short[~short["상태"].isin(_STATUS_DEAD)]
         st.caption("잔여 시즌일 안에 재고가 바닥납니다. 추가 매입 가능 여부(CJ·동원 시즌 생산 마감) "
@@ -815,13 +872,14 @@ with tabs[2]:
                                        & (bb["마진율"] < float(cfg["절대하한"])))]
     if len(watch):
         st.dataframe(
-            watch[["관리코드", "상품명", "상태", "박스재고", "재고금액", "주요채널계", "온라인B2B계", "시즌매출",
-                   "마진율", "작년시즌", "판정"]].sort_values(
-                       "재고금액", ascending=False).style.format({
-                           "박스재고": "{:,.0f}", "재고금액": "{:,.0f}",
-                           "주요채널계": "{:,.0f}", "온라인B2B계": "{:,.0f}",
-                           "시즌매출": "{:,.0f}",
-                           "마진율": "{:.2%}", "작년시즌": "{:,.0f}"}),
+            watch[["관리코드", "상품명", "상태", "박스재고", "재고금액", "주요채널계",
+                   "온라인B2B계", "시즌매출", "마진율", "작년시즌", "판정", "권장 조정"]]
+            .sort_values("재고금액", ascending=False)
+            .rename(columns=gsn.DISPLAY_NAMES).style.format({
+                "박스재고": "{:,.0f}", "재고금액": "{:,.0f}",
+                "주요채널계": "{:,.0f}", "온라인B2B계": "{:,.0f}",
+                "시즌매출": "{:,.0f}",
+                "마진율": "{:.1%}", "작년 시즌 전체": "{:,.0f}"}),
             hide_index=True, width="stretch")
         st.caption("`주요채널계 = 0` 은 오픈마켓·자사몰엔 안 나가고 나들·온라인B2B로만 "
                    "빠지고 있다는 뜻입니다(등재·노출 점검 대상). "
