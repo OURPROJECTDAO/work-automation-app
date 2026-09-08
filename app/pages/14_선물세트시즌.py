@@ -11,6 +11,7 @@
 """
 import csv
 import io
+import math
 import sys
 import time
 import urllib.error
@@ -248,6 +249,139 @@ def _to_xlsx(df: pd.DataFrame, title: str) -> bytes:
     ws.freeze_panes = "A2"
     if ws.max_row > 1:
         ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _recent_qty(sales_raw: pd.DataFrame, codes: set, end, days: int, division: dict):
+    """최근 N일 판매세트를 (인터넷사업부, 전사) 로 갈라 집계.
+
+    ★`res["scoped"]` 을 쓰면 안 된다 — 거기엔 `사업부밖`(오프라인)이 이미 빠져 있어
+      '전사 기준'이 안 나온다. 원본 매출 프레임에서 다시 분류한다.
+      상호명 단위로 한 번만 분류해 행마다 호출하지 않는다.
+    """
+    empty = pd.Series(dtype=float)
+    if sales_raw is None or sales_raw.empty:
+        return empty, empty, None
+    d = sales_raw.copy()
+    d["거래일자"] = pd.to_datetime(d["거래일자"], errors="coerce")
+    lo = pd.Timestamp(end).normalize() - pd.Timedelta(days=int(days) - 1)
+    d = d[d["거래일자"].between(lo, pd.Timestamp(end).normalize() + pd.Timedelta(days=1))]
+    d = d[d["관리코드"].map(gsn._nfc).isin(codes)]
+    if d.empty:
+        return empty, empty, lo
+    grp = {n: gsn.classify_store(n, division)[0] for n in d["상호명"].dropna().unique()}
+    d["채널군"] = d["상호명"].map(grp)
+    d = d[d["채널군"] != gsn.GRP_SKIP]          # 로켓창고 등 매출처 아닌 계정
+    d["수량"] = pd.to_numeric(d["수량"], errors="coerce").fillna(0.0)
+    return (d[d["채널군"].isin(gsn.DIVISION_GROUPS)].groupby("관리코드")["수량"].sum(),
+            d.groupby("관리코드")["수량"].sum(), lo)
+
+
+def _order_xlsx(rows: pd.DataFrame, short_days: int, rest_days: int, avg_days: int,
+                win_txt: str, dropped: str) -> bytes:
+    """발주량 표 — A4 가로 1장. 2단 그룹 헤더 + 수식(가정 셀만 고치면 재계산)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.properties import PageSetupProperties
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "발주량"
+    R0, n = 3, len(rows)
+    TOT = R0 + n
+    AH = TOT + 2
+    A1, A2, A3 = AH + 1, AH + 2, AH + 3
+    NOTE = A3 + 2
+
+    for col, lab in ((1, "코드"), (2, "품목"), (3, "내품"), (4, "재고"),
+                     (11, "사업부%"), (12, "상태")):
+        ws.merge_cells(start_row=1, start_column=col, end_row=2, end_column=col)
+        ws.cell(1, col, lab)
+    ws.merge_cells("E1:G1")
+    ws.cell(1, 5, "인터넷사업부 기준 (박스)")
+    ws.merge_cells("H1:J1")
+    ws.cell(1, 8, "전사 기준 (박스)")
+    for col, lab in ((5, "일평균"), (6, f"{short_days}일안"), (7, "전체필요"),
+                     (8, "일평균"), (9, f"{short_days}일안"), (10, "전체필요")):
+        ws.cell(2, col, lab)
+
+    for i, (_, r) in enumerate(rows.iterrows(), start=R0):
+        ws.cell(i, 1, r["코드"]).number_format = "@"
+        ws.cell(i, 2, r["품목"])
+        ws.cell(i, 3, r["내품"])
+        ws.cell(i, 4, r["재고"])
+        ws.cell(i, 5, f"=$M{i}/$C${A3}/C{i}")
+        ws.cell(i, 6, f"=MAX(CEILING(E{i}*$C${A1}-D{i},1),0)")
+        ws.cell(i, 7, f"=MAX(CEILING(E{i}*$C${A2}-D{i},1),0)")
+        ws.cell(i, 8, f"=$N{i}/$C${A3}/C{i}")
+        ws.cell(i, 9, f"=MAX(CEILING(H{i}*$C${A1}-D{i},1),0)")
+        ws.cell(i, 10, f"=MAX(CEILING(H{i}*$C${A2}-D{i},1),0)")
+        ws.cell(i, 11, f'=IF($N{i}=0,"",$M{i}/$N{i})')
+        ws.cell(i, 12, r["상태"])
+        ws.cell(i, 13, r["세트_사업부"])
+        ws.cell(i, 14, r["세트_전사"])
+    ws.cell(TOT, 2, "합계")
+    for c in (6, 7, 9, 10):
+        L = get_column_letter(c)
+        ws.cell(TOT, c, f"=SUM({L}{R0}:{L}{TOT - 1})")
+
+    ws.cell(AH, 1, "가정 — 노란 셀만 고치면 표 전체가 다시 계산됩니다").font = Font(
+        name="맑은 고딕", bold=True, size=9)
+    for r, (lab, val, memo) in zip((A1, A2, A3), [
+        ("단기 발주 일수", short_days, f"‘{short_days}일안’ = 이 일수만큼 팔 물량 − 재고"),
+        ("잔여 시즌일", rest_days, "배송 마감(D-5)까지 남은 일수. ‘전체필요’에 사용"),
+        ("평균 산출 일수", avg_days, f"집계 창 {win_txt} · 주말·휴일이 끼면 평균이 낮게 잡힌다")]):
+        ws.cell(r, 1, lab).font = Font(name="맑은 고딕", size=9)
+        c = ws.cell(r, 3, val)
+        c.font = Font(name="맑은 고딕", color="0000FF", bold=True, size=9)
+        c.fill = PatternFill("solid", fgColor="FFF9C4")
+        c.number_format = "0"
+        ws.cell(r, 4, memo).font = Font(name="맑은 고딕", size=8, color="666666")
+    notes = [
+        "· 단위 = 박스(세트 ÷ 내품). 인터넷사업부 = 오픈마켓·자사몰·나들·온라인B2B, 오프라인 영업부 제외.",
+        "· ⚠️ 재고는 채널 공용이라 오프라인 수요도 같은 재고에서 빠진다. ‘사업부%’가 낮으면 전사 기준으로 발주할 것.",
+        "· ⚠️ 명절 판매는 D-15~D-10에 몰린다. 이 표는 현재 속도를 평탄하게 가정하므로 하한에 가깝다.",
+        "· 시즌 생산 마감·입고 리드타임은 이 표에 없다. 발주 전 CJ·동원 확인 필요.",
+    ]
+    if dropped:
+        notes.insert(3, f"· 제외: {dropped}")
+    for i, txt in enumerate(notes):
+        ws.cell(NOTE + i, 1, txt).font = Font(name="맑은 고딕", size=8, color="444444")
+
+    thin = Side(style="thin", color="9AA5B1")
+    for row in (1, 2):
+        for c in range(1, 13):
+            h = ws.cell(row, c)
+            h.font = Font(name="맑은 고딕", bold=True, size=9)
+            h.fill = PatternFill("solid", fgColor="E3E8F0" if row == 1 else "EEF1F6")
+            h.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+            h.border = Border(bottom=thin, left=thin, right=thin)
+    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[2].height = 18
+    fmt = {3: "0", 4: "#,##0", 5: "0.0", 6: "#,##0", 7: "#,##0",
+           8: "0.0", 9: "#,##0", 10: "#,##0", 11: "0%"}
+    for r in range(R0, TOT + 1):
+        for c in range(1, 13):
+            cell = ws.cell(r, c)
+            cell.font = Font(name="맑은 고딕", size=9, bold=(r == TOT))
+            cell.alignment = Alignment(horizontal="left" if c in (1, 2, 12) else "right")
+            if c in fmt:
+                cell.number_format = fmt[c]
+    for c, w in zip(range(1, 13), [9, 19, 4.5, 6, 7.5, 7.5, 8.5, 7.5, 7.5, 8.5, 7.5, 11]):
+        ws.column_dimensions[get_column_letter(c)].width = w
+    ws.column_dimensions["M"].hidden = True
+    ws.column_dimensions["N"].hidden = True
+    ws.freeze_panes = "C3"
+    ps = ws.page_setup
+    ps.orientation, ps.paperSize, ps.fitToWidth, ps.fitToHeight = "landscape", 9, 1, 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.page_margins.left = ws.page_margins.right = 0.3
+    ws.page_margins.top = ws.page_margins.bottom = 0.4
+    ws.print_title_rows = "1:2"
+    ws.print_area = f"A1:L{NOTE + len(notes)}"
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -858,6 +992,72 @@ with tabs[2]:
         st.download_button("⬇️ 소진 임박 XLSX", _to_xlsx(_urg, "소진임박"),
                            f"선물세트_소진임박_{pd.Timestamp(base_day):%Y%m%d}.xlsx",
                            key="gs_urg_dl")
+
+    # ── 발주량 산출 ─────────────────────────────────────────────────────────
+    ui.section_head("발주량 산출 (박스)", icon="🧾")
+    oc = st.columns([2, 2, 2, 3])
+    _tgt = oc[0].radio("대상", ["소진 임박", "촉진 대상", "전체"], horizontal=False,
+                       key="gs_ord_tgt")
+    _avg = int(oc[1].number_input("평균 산출 일수", 1, 30, 3, key="gs_ord_avg",
+                                  help="최근 N일 판매로 일평균을 낸다. 주말이 끼면 낮게 잡힌다."))
+    _short = int(oc[2].number_input("단기 발주 일수", 1, 30, 5, key="gs_ord_short"))
+    _pool = {"소진 임박": _urg, "촉진 대상": b[b["촉진"]]}.get(_tgt, b)
+    _pool = _pool[_pool["상태"] != "판매중지"]
+    _drop = oc[3].multiselect("제외할 코드", sorted(_pool["관리코드"]), key="gs_ord_drop",
+                              help="판매량이 적어 재발주가 불필요한 코드를 뺍니다.")
+    _src = _pool[~_pool["관리코드"].isin(_drop)]   # 라벨은 _pool 에서 찾는다(제외분은 _src 에 없음)
+
+    if _src.empty:
+        st.info("대상 품목이 없습니다.")
+    else:
+        _dq, _aq, _lo = _recent_qty(cur, set(_src["관리코드"]), win["end"], _avg, division)
+        _rest = int(k["잔여일"])
+        _rows = []
+        for _, rr in _src.iterrows():
+            _in = float(rr["박스내품"]) or 1.0
+            _bs = float(rr["박스재고"])
+            _ds, _as = float(_dq.get(rr["관리코드"], 0.0)), float(_aq.get(rr["관리코드"], 0.0))
+            _dr, _ar = _ds / _avg / _in, _as / _avg / _in
+            _rows.append({
+                "코드": rr["관리코드"], "품목": str(rr["상품명"]).split("/")[0].strip(),
+                "내품": _in, "재고": _bs,
+                "일평균": _dr, f"{_short}일안": max(math.ceil(_dr * _short - _bs), 0),
+                "전체필요": max(math.ceil(_dr * _rest - _bs), 0),
+                "전사 일평균": _ar, f"전사 {_short}일안": max(math.ceil(_ar * _short - _bs), 0),
+                "전사 전체필요": max(math.ceil(_ar * _rest - _bs), 0),
+                "사업부%": (_ds / _as) if _as else None,
+                "상태": rr["상태"], "세트_사업부": _ds, "세트_전사": _as})
+        _od = pd.DataFrame(_rows).sort_values(f"{_short}일안", ascending=False)
+        _wtxt = (f"{_lo:%Y-%m-%d}~{pd.Timestamp(win['end']):%Y-%m-%d}"
+                 if _lo is not None else "-")
+        st.caption(
+            f"최근 **{_avg}일**({_wtxt}) 판매 ÷ {_avg} ÷ 내품 = 일평균 박스. "
+            f"`{_short}일안` = 일평균 × {_short}일 − 재고 · `전체필요` = 일평균 × "
+            f"**잔여 {_rest}일** − 재고 (올림, 음수는 0).  \n"
+            "⚠️ **재고는 채널 공용**이라 오프라인 수요도 같은 재고에서 빠집니다. "
+            "`사업부%`가 낮은 품목을 사업부 기준으로만 발주하면 **과소 발주**가 되니 "
+            "`전사 기준` 열을 같이 보세요."
+        )
+        _show = [c for c in _od.columns if c not in ("세트_사업부", "세트_전사")]
+        st.dataframe(
+            _od[_show].style.format({
+                "내품": "{:,.0f}", "재고": "{:,.0f}", "일평균": "{:,.1f}",
+                f"{_short}일안": "{:,.0f}", "전체필요": "{:,.0f}",
+                "전사 일평균": "{:,.1f}", f"전사 {_short}일안": "{:,.0f}",
+                "전사 전체필요": "{:,.0f}", "사업부%": "{:.0%}"}),
+            hide_index=True, width="stretch")
+        _t1, _t2 = _od[f"{_short}일안"].sum(), _od["전체필요"].sum()
+        _t3, _t4 = _od[f"전사 {_short}일안"].sum(), _od["전사 전체필요"].sum()
+        st.markdown(
+            f"**합계 — 사업부 기준 {_short}일 `{_t1:,.0f}박스` / 전체 `{_t2:,.0f}박스`** · "
+            f"전사 기준 {_short}일 {_t3:,.0f}박스 / 전체 {_t4:,.0f}박스")
+        _lab = {c: f"{c}({str(_pool.loc[_pool['관리코드'] == c, '상품명'].iloc[0]).split('/')[0].strip()})"
+                for c in _drop}
+        st.download_button(
+            "⬇️ 발주량 XLSX (A4 가로 1장)",
+            _order_xlsx(_od, _short, _rest, _avg, _wtxt,
+                        " · ".join(_lab.get(c, c) for c in _drop)),
+            f"선물세트_발주량_{pd.Timestamp(base_day):%Y%m%d}.xlsx", key="gs_ord_dl")
 
     # ── 판매 촉진 대상 ──────────────────────────────────────────────────────
     promo = b[b["촉진"]].copy()
