@@ -1317,6 +1317,13 @@ with tabs[4]:
         "온라인 B2B는 1회성이라 매 시즌 새 상호명이 생깁니다. 이걸 손으로 찾을 필요 없이 "
         "**사업부 export 한 장이면 그 기간 분류가 전부 채워집니다.**"
     )
+    _prev_msg = st.session_state.pop("_gs_div_msg", None)
+    if _prev_msg:
+        (st.success if _prev_msg[0] == "ok" else st.error)(_prev_msg[1])
+    st.caption(f"현재 화이트리스트 **{len(division)}곳** 등록됨 — "
+               + " · ".join(f"{g} {n}" for g, n in
+                            sorted(pd.Series(list(division.values())).value_counts().items(),
+                                   key=lambda x: -x[1])))
     up2 = st.file_uploader("인터넷사업부 영업이익현황 (.xlsx) — 분류 전용", type=["xlsx"],
                            key="gs_div_up")
     if up2 is not None:
@@ -1354,14 +1361,21 @@ with tabs[4]:
             if (_pb or _po) and st.button(
                     f"📝 온라인B2B {len(_pb)}곳 · 사업부밖 {len(_po)}곳 등록",
                     type="primary", key="gs_div_go"):
-                _msgs = []
-                _src = f"사업부 export {_lo:%Y%m%d}-{_hi:%Y%m%d}"
+                _msgs, _all_ok = [], True
+                _srcname = f"사업부 export {_lo:%Y%m%d}-{_hi:%Y%m%d}"
                 for _names, _g in ((_pb, "온라인B2B"), (_po, "사업부밖")):
                     if _names:
-                        _ok2, _m2 = _append_division(_names, _g, source=_src)
+                        _ok2, _m2 = _append_division(_names, _g, source=_srcname)
+                        _all_ok = _all_ok and _ok2
                         _msgs.append(f"{_g}: {_m2}")
-                st.success(" · ".join(_msgs) or "등록할 항목이 없습니다.")
-                st.cache_data.clear()
-                st.rerun()
+                _txt = " · ".join(_msgs) or "등록할 항목이 없습니다."
+                # ★ st.rerun() 은 방금 띄운 메시지를 즉시 지운다 → 결과를 세션에 넣고
+                #   리런 후에 표시한다. 실패면 리런하지 않아 원인이 화면에 남는다.
+                if _all_ok and _msgs:
+                    st.session_state["_gs_div_msg"] = ("ok", f"✅ {_txt}")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error(f"❌ 등록 실패 — {_txt}. 화이트리스트는 변경되지 않았습니다.")
             if not _r["b2b"] and not _r["out"]:
                 st.success("이 기간 상호명은 전부 이미 분류돼 있습니다.")
