@@ -437,7 +437,12 @@ def prescribe(r, cfg: dict) -> tuple[str, str]:
     if verdict == V_NOSALE:
         return "—", "시즌 매출 0 — 가격이 아니라 등재·노출 점검 대상"
     if status == "판매중지":
-        return "—", "상태 `판매중지` — 가격 조정 대상 아님"
+        rest = max(_num(r.get("세트재고")), 0.0)
+        tail = (f" 잔여 {rest:,.0f}세트({rest * cost:,.0f}원)는 이월 또는 타 채널 소진 대상."
+                if rest > 0 else " 잔여 재고 없음.")
+        # ★판정(🟡 추가매입 등)과 무관하게 조치 대상이 아니다. 가격만 언급하면
+        #   '추가매입 얼마?'라는 질문에 엉뚱한 답이 된다(2026-09-08 G호 사례).
+        return "—", f"상태 `판매중지` — 가격·추가매입 모두 대상 아님.{tail}"
     if m is None:
         return "—", "매출 0이라 마진율 산출 불가"
 
