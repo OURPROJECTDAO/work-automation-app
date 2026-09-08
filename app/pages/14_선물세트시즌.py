@@ -380,7 +380,48 @@ def _upload_scope(raw_bytes: bytes, pat: str, repo: str):
         return None, f"파일을 읽지 못했습니다: {e}"
 
 
-def _append_division(names: list, grp: str):
+def _division_from_export(raw_bytes: bytes, pat: str, repo: str, div: dict) -> dict:
+    """인터넷사업부 export를 **매출이 아니라 분류 사전**으로 읽는다.
+
+    파케이는 전사로 유지해야 하므로(대시보드·재고지능 공용) 이 파일은 **적재하지 않는다**.
+    대신 소속 판정의 근거로만 쓴다:
+      · export 에 있는데 표기 규칙으로 안 잡히는 상호명 → **온라인B2B**
+        (사용자 정의: 자주 나오는 온라인 채널 + 나들 외에 사업부에 있으면 전부 온라인 B2B)
+      · **같은 기간** 전사 파케이엔 있는데 export 엔 없는 상호명 → **사업부밖**(오프라인 확정)
+    ★ 기간이 겹쳐야 성립한다. export 가 못 덮는 구간은 판정 근거가 없으므로 제외한다.
+    """
+    df = pd.read_excel(io.BytesIO(raw_bytes))
+    df = df[df["거래일자"].notna()].copy()
+    df["거래일자"] = pd.to_datetime(df["거래일자"], errors="coerce")
+    df = df[df["거래일자"].notna()]
+    lo, hi = df["거래일자"].min(), df["거래일자"].max()
+    in_export = {gsn._nfc(v) for v in df["상호명"].dropna()}
+
+    in_parquet, amt = set(), {}
+    for ym in _months_between(lo, hi):
+        part = store.read_partition(pat, repo, ym)
+        if part is None or not len(part):
+            continue
+        part = part.copy()
+        part["거래일자"] = pd.to_datetime(part["거래일자"], errors="coerce")
+        part = part[part["거래일자"].between(lo, hi)]
+        for nm, v in part.groupby("상호명")["판매금액"].sum().items():
+            nm = gsn._nfc(nm)
+            in_parquet.add(nm)
+            amt[nm] = amt.get(nm, 0.0) + float(v)
+
+    def _unclassified(names):
+        return sorted([n for n in names if gsn.classify_store(n, div)[0] == gsn.GRP_UNK],
+                      key=lambda n: -amt.get(n, 0.0))
+
+    return {"기간": (lo, hi), "행": len(df), "export거래처": len(in_export),
+            "파케이거래처": len(in_parquet),
+            "b2b": _unclassified(in_export),
+            "out": _unclassified(in_parquet - in_export),
+            "금액": amt}
+
+
+def _append_division(names: list, grp: str, source: str = "앱 등록(미분류 편입)"):
     """화이트리스트 CSV에 상호명을 추가하고 커밋. 기존 행은 건드리지 않는다."""
     import base64
     import csv
@@ -404,7 +445,7 @@ def _append_division(names: list, grp: str):
             if gsn._nfc(n) in have:
                 continue
             rows.append({**{c: "" for c in cols}, "상호명": n, "구분": grp,
-                         "첫확인": today, "출처": "앱 등록(미분류 편입)"})
+                         "첫확인": today, "출처": source})
             added += 1
         if not added:
             return False, "이미 전부 등록되어 있습니다."
@@ -997,11 +1038,12 @@ with tabs[4]:
     except Exception as e:  # noqa: BLE001
         st.info(f"적재 현황을 읽지 못했습니다: {e}")
 
+    ui.section_head("① 전사 영업이익현황 적재 (파케이)", icon="📥")
     st.error(
         "🚫 **인터넷사업부 필터 export를 여기 올리지 마세요.** 적재는 올린 파일의 날짜 구간을 "
         "통째로 교체하므로(`date_range_replace`), 사업부 export를 올리면 그 기간의 **전사 파케이가 "
         "사업부 거래처만으로 덮여 오프라인 매출이 사라집니다**. 대시보드·재고지능 등 다른 페이지가 "
-        "전부 이 전사 파케이를 씁니다. 사업부 export는 위 **미분류 편입**에만 쓰세요."
+        "전부 이 전사 파케이를 씁니다. 사업부 export는 아래 **②번**에 올리세요 — 적재하지 않고 분류에만 씁니다."
     )
     up = st.file_uploader("영업이익현황 (.xlsx) — **전사 export만**", type=["xlsx"], key="gs_up")
     if up is not None:
@@ -1026,3 +1068,63 @@ with tabs[4]:
     st.caption("적재는 **올린 파일의 날짜 구간만 교체**합니다(`date_range_replace`) — "
                "부분 기간 업로드도 기존 데이터를 지우지 않습니다. 다만 아직 파티션이 "
                "없는 달은 올린 구간만 생기므로, 새 달 첫 적재는 그 달 전체를 뽑으세요.")
+
+    st.divider()
+    ui.section_head("② 인터넷사업부 export로 채널 분류 채우기", icon="🧭")
+    st.caption(
+        "이 파일은 **적재하지 않습니다.** 파케이는 전사로 유지해야 하고(대시보드·재고지능이 "
+        "같은 파일을 씁니다), 여기서는 **소속을 판정하는 사전**으로만 씁니다.  \n"
+        "· export 에 있는데 표기 규칙으로 안 잡히는 상호명 → **온라인B2B** "
+        "(자주 나오는 온라인 채널·나들 외에 사업부에 있으면 전부 온라인 B2B)  \n"
+        "· **같은 기간** 전사 파케이엔 있는데 export 엔 없는 상호명 → **사업부밖**(오프라인 확정)  \n"
+        "온라인 B2B는 1회성이라 매 시즌 새 상호명이 생깁니다. 이걸 손으로 찾을 필요 없이 "
+        "**사업부 export 한 장이면 그 기간 분류가 전부 채워집니다.**"
+    )
+    up2 = st.file_uploader("인터넷사업부 영업이익현황 (.xlsx) — 분류 전용", type=["xlsx"],
+                           key="gs_div_up")
+    if up2 is not None:
+        try:
+            _r = _division_from_export(up2.getvalue(), pat, repo, division)
+        except Exception as e:  # noqa: BLE001
+            _r = None
+            st.error(f"파일을 읽지 못했습니다: {e}")
+        if _r:
+            _lo, _hi = _r["기간"]
+            st.info(f"{_r['행']:,}행 · {_lo:%Y-%m-%d}~{_hi:%Y-%m-%d} · "
+                    f"export 거래처 **{_r['export거래처']}곳** vs 같은 기간 전사 파케이 "
+                    f"**{_r['파케이거래처']}곳**")
+            if _r["파케이거래처"] and _r["export거래처"] >= _r["파케이거래처"] * 0.95:
+                st.warning("거래처 수가 전사 파케이와 거의 같습니다 — **전사 export일 수 있습니다.** "
+                           "그대로 등록하면 오프라인 거래처가 온라인B2B로 잘못 편입됩니다. "
+                           "사업부 필터가 걸린 파일인지 확인하세요.")
+            _cols = st.columns(2)
+            with _cols[0]:
+                st.markdown(f"**온라인B2B 후보 {len(_r['b2b'])}곳**")
+                if _r["b2b"]:
+                    st.dataframe(pd.DataFrame({"상호명": _r["b2b"],
+                                               "기간 매출": [_r["금액"].get(n, 0) for n in _r["b2b"]]}),
+                                 hide_index=True, width="stretch", height=240)
+                _pb = st.multiselect("등록할 온라인B2B", _r["b2b"], default=_r["b2b"],
+                                     key="gs_div_b2b")
+            with _cols[1]:
+                st.markdown(f"**사업부밖(오프라인) 후보 {len(_r['out'])}곳**")
+                if _r["out"]:
+                    st.dataframe(pd.DataFrame({"상호명": _r["out"],
+                                               "기간 매출": [_r["금액"].get(n, 0) for n in _r["out"]]}),
+                                 hide_index=True, width="stretch", height=240)
+                _po = st.multiselect("등록할 사업부밖", _r["out"], default=_r["out"],
+                                     key="gs_div_out")
+            if (_pb or _po) and st.button(
+                    f"📝 온라인B2B {len(_pb)}곳 · 사업부밖 {len(_po)}곳 등록",
+                    type="primary", key="gs_div_go"):
+                _msgs = []
+                _src = f"사업부 export {_lo:%Y%m%d}-{_hi:%Y%m%d}"
+                for _names, _g in ((_pb, "온라인B2B"), (_po, "사업부밖")):
+                    if _names:
+                        _ok2, _m2 = _append_division(_names, _g, source=_src)
+                        _msgs.append(f"{_g}: {_m2}")
+                st.success(" · ".join(_msgs) or "등록할 항목이 없습니다.")
+                st.cache_data.clear()
+                st.rerun()
+            if not _r["b2b"] and not _r["out"]:
+                st.success("이 기간 상호명은 전부 이미 분류돼 있습니다.")
