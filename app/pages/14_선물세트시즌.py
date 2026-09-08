@@ -9,8 +9,10 @@
 - W~Z 금액/수량 단위 혼용 → 세트 단위 재구축(소진예측일·이월 잔여세트).
 - 이익·마진·YoY·D-day 진도 밴드 신설.
 """
+import csv
 import io
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -30,6 +32,14 @@ _APP_API = "https://api.github.com/repos/OURPROJECTDAO/work-automation-app/conte
 _REF = Path(__file__).parent.parent.parent / "reference"
 _KST = None
 _CFG_PATH = "reference/giftset_season.json"
+
+# 상품 상태 — 재고 경보 판단축. 데이터로 유도 불가한 영업 판단이라 참조 CSV에 영속한다.
+_STATUS_PATH = "reference/giftset_status.csv"
+_STATUS_COLS = ["관리코드", "상태", "비고", "갱신일"]
+_STATUS_UNSET = "미지정"
+_STATUS_OPTS = ["판매중", "일시품절(재입고예정)", "추가입고없음", "판매중지"]
+# 추가 매입·재입고 여지가 없는 상태 = 품절 임박 판단에서 걸러낼 대상
+_STATUS_DEAD = ("추가입고없음", "판매중지")
 
 
 def _pat() -> str:
@@ -75,6 +85,31 @@ def _division() -> dict:
 def _config() -> dict:
     code, text = _gh_raw(_CFG_PATH)
     return gsn.load_config(text if code == 200 else None)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _status_map() -> dict:
+    """{관리코드: {상태·비고·갱신일}}. 파일이 없으면 빈 dict(전건 미지정)."""
+    code, text = _gh_raw(_STATUS_PATH)
+    if code != 200 or not text:
+        return {}
+    try:
+        rows = list(csv.DictReader(io.StringIO(text.decode("utf-8-sig"))))
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for r in rows:
+        c, v = gsn._nfc(r.get("관리코드")), gsn._nfc(r.get("상태"))
+        if c and v:
+            out[c] = {"상태": v, "비고": gsn._nfc(r.get("비고")),
+                      "갱신일": gsn._nfc(r.get("갱신일"))}
+    return out
+
+
+def _status_current() -> dict:
+    """방금 저장한 스냅샷 우선 — GitHub raw read-after-write 지연 방어(pitfalls 2026-07-20)."""
+    snap = st.session_state.get("_gs_status_snapshot")
+    return dict(snap) if snap is not None else _status_map()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -344,6 +379,80 @@ def _append_division(names: list, grp: str):
         return False, f"등록 실패: {e}"
 
 
+def _save_status(edits: list):
+    """상품 상태 업서트 후 커밋. 상태='미지정'이면 행 삭제(원격 최신본에 병합)."""
+    import base64
+    import json as _json
+    api = f"{_APP_API}/{_STATUS_PATH}"
+    hdr = {"Authorization": f"Bearer {_pat()}", "Accept": "application/vnd.github+json",
+           "Content-Type": "application/json"}
+    today = datetime.now().strftime("%Y-%m-%d")
+    snap = st.session_state.get("_gs_status_snapshot") or {}
+    dead = set(st.session_state.get("_gs_status_deleted") or ())
+    for attempt in range(3):
+        try:
+            code, body = _gh_raw(_STATUS_PATH)
+            sha, remote = None, {}
+            if code == 200 and body:
+                meta = _json.load(urllib.request.urlopen(
+                    urllib.request.Request(api, headers=hdr)))
+                sha = meta.get("sha")
+                for r in csv.DictReader(io.StringIO(body.decode("utf-8-sig"))):
+                    c, v = gsn._nfc(r.get("관리코드")), gsn._nfc(r.get("상태"))
+                    if c and v:
+                        remote[c] = {"관리코드": c, "상태": v,
+                                     "비고": gsn._nfc(r.get("비고")),
+                                     "갱신일": gsn._nfc(r.get("갱신일"))}
+            # 원격이 CDN stale 이어도 이번 세션 저장분이 뒤집히지 않게 스냅샷이 우선.
+            # 원격에만 있는 코드는 살리되, 이번 세션에서 해제한 코드는 되살아나지 않게 뺀다.
+            cur = {**remote, **snap}
+            for c in dead:
+                cur.pop(c, None)
+            n_set = n_del = 0
+            for e in edits:
+                c = gsn._nfc(e.get("관리코드"))
+                v = gsn._nfc(e.get("상태"))
+                memo = gsn._nfc(e.get("비고"))
+                if not c:
+                    continue
+                if v in ("", _STATUS_UNSET):
+                    if cur.pop(c, None) is not None:
+                        n_del += 1
+                    dead.add(c)
+                    continue
+                dead.discard(c)
+                prev = cur.get(c) or {}
+                if prev.get("상태") == v and gsn._nfc(prev.get("비고")) == memo:
+                    continue
+                cur[c] = {"관리코드": c, "상태": v, "비고": memo, "갱신일": today}
+                n_set += 1
+            if not n_set and not n_del:
+                return False, "변경된 항목이 없습니다."
+            buf = io.StringIO()
+            w = csv.DictWriter(buf, fieldnames=_STATUS_COLS, extrasaction="ignore")
+            w.writeheader()
+            for c in sorted(cur):
+                w.writerow({k: cur[c].get(k, "") for k in _STATUS_COLS})
+            payload = {"message": f"ref(giftset): 상품 상태 {n_set}건 갱신 · {n_del}건 해제",
+                       "content": base64.b64encode(
+                           buf.getvalue().encode("utf-8-sig")).decode()}
+            if sha:
+                payload["sha"] = sha
+            urllib.request.urlopen(urllib.request.Request(
+                api, data=_json.dumps(payload).encode(), method="PUT", headers=hdr))
+            st.session_state["_gs_status_snapshot"] = cur
+            st.session_state["_gs_status_deleted"] = dead
+            return True, f"상태 {n_set}건 저장 · {n_del}건 해제했습니다."
+        except urllib.error.HTTPError as e:
+            if e.code in (409, 422, 403) and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return False, f"저장 실패: HTTP {e.code}"
+        except Exception as e:  # noqa: BLE001
+            return False, f"저장 실패: {e}"
+    return False, "저장 실패(충돌 재시도 초과)"
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 ui.page_header("선물세트 시즌", icon="🎁")
 cfg = _config()
@@ -402,6 +511,10 @@ b, k = res["board"], res["kpi"]
 if b.empty:
     st.info("표시할 선물세트가 없습니다(재고 0 · 시즌매출 0).")
     st.stop()
+
+_smap = _status_current()
+b["상태"] = [(_smap.get(c) or {}).get("상태") or _STATUS_UNSET for c in b["관리코드"]]
+b["상태비고"] = [(_smap.get(c) or {}).get("비고", "") for c in b["관리코드"]]
 
 # ── 상단 KPI ────────────────────────────────────────────────────────────────
 band = k["밴드"]
@@ -542,7 +655,7 @@ with tabs[1]:
             for cc in gsn.channel_columns():
                 v[cc] = v["관리코드"].map(pv[cc] if cc in pv.columns else pd.Series(dtype=float)).fillna(0.0)
 
-    cols = (["관리코드", "상품명", "박스재고", "세트재고", "재고금액",
+    cols = (["관리코드", "상품명", "상태", "박스재고", "세트재고", "재고금액",
              "시즌매출", "시즌이익", "마진율", "판매세트",
              "주요채널계", "온라인B2B계", "사업부계", "일평균세트7", "소진예측일", "잔여시즌일", "마감후잔여세트",
              "작년동기_달력", "YoY", "작년시즌", "작년진도", "판정", "결손"]
@@ -581,19 +694,32 @@ with tabs[1]:
 # ── 재고 경보 ───────────────────────────────────────────────────────────────
 with tabs[2]:
     carry = float(cfg.get("이월비용률", 0.033))
+    sf = st.columns([3, 2, 3])
+    st_pick = sf[0].multiselect("상태 필터", [_STATUS_UNSET] + _STATUS_OPTS,
+                                default=[], key="gs_st_filter",
+                                help="비우면 전체. 상태는 아래 [상품 상태 설정]에서 지정합니다.")
+    hide_dead = sf[1].checkbox("추가입고없음·판매중지 숨기기", value=False,
+                               key="gs_st_hide")
+    bb = b
+    if st_pick:
+        bb = bb[bb["상태"].isin(st_pick)]
+    if hide_dead:
+        bb = bb[~bb["상태"].isin(_STATUS_DEAD)]
+    sf[2].caption(f"경보 대상 **{len(bb)}종** / 전체 {len(b)}종 · "
+                  f"미지정 {int((b['상태'] == _STATUS_UNSET).sum())}종")
     st.caption(
         f"**인하 vs 이월 손익분기** — 이월 비용률 {carry*100:.1f}%. "
         f"D-{cfg.get('마감_D',5)}까지 못 빼는 물량은 이월 비용이 붙으므로, "
         "인하폭이 손익분기(약 3%p) 안이면 **지금 인하해서 파는 쪽**이 낫습니다."
     )
-    left = b[(b["마감후잔여세트"] > 0) & (b["세트재고"] > 0)].copy()
+    left = bb[(bb["마감후잔여세트"] > 0) & (bb["세트재고"] > 0)].copy()
     left["이월비용"] = left["이월재고금액"] * carry
     left = left.sort_values("이월재고금액", ascending=False)
     ui.section_head(f"이월 위험 — {len(left)}종 / 이월 예상 {_won(left['이월재고금액'].sum())}",
                     icon="⚪")
     if len(left):
         st.dataframe(
-            left[["관리코드", "상품명", "세트재고", "일평균세트7", "소진예측일",
+            left[["관리코드", "상품명", "상태", "세트재고", "일평균세트7", "소진예측일",
                   "잔여시즌일", "마감후잔여세트", "이월재고금액", "이월비용",
                   "마진율", "판정"]].style.format({
                       "세트재고": "{:,.0f}", "일평균세트7": "{:,.1f}", "소진예측일": "{:,.1f}",
@@ -601,37 +727,41 @@ with tabs[2]:
                       "이월비용": "{:,.0f}", "마진율": "{:.2%}"}),
             hide_index=True, width="stretch")
 
-    short = b[(b["세트재고"] > 0) & (b["시즌매출"] > 0)
-              & (b["소진예측일"] < b["잔여시즌일"])].copy()
+    short = bb[(bb["세트재고"] > 0) & (bb["시즌매출"] > 0)
+               & (bb["소진예측일"] < bb["잔여시즌일"])].copy()
     short = short.sort_values("소진예측일")
     ui.section_head(f"품절 임박 — {len(short)}종 (잔여 시즌일 내 소진)", icon="🔴")
     if len(short):
         st.dataframe(
-            short[["관리코드", "상품명", "세트재고", "일평균세트7", "소진예측일",
+            short[["관리코드", "상품명", "상태", "세트재고", "일평균세트7", "소진예측일",
                    "잔여시즌일", "시즌매출", "마진율", "판정"]].style.format({
                        "세트재고": "{:,.0f}", "일평균세트7": "{:,.1f}",
                        "소진예측일": "{:,.1f}", "시즌매출": "{:,.0f}", "마진율": "{:.2%}"}),
             hide_index=True, width="stretch")
+        _live = short[~short["상태"].isin(_STATUS_DEAD)]
         st.caption("잔여 시즌일 안에 재고가 바닥납니다. 추가 매입 가능 여부(CJ·동원 시즌 생산 마감) "
-                   "확인 대상입니다.")
+                   f"확인 대상은 **{len(_live)}종** — `추가입고없음`·`판매중지`는 재입고 여지가 "
+                   "없으므로 잔여 소진으로 종료하고, 잔량 대비 채널 노출이 과한지만 봅니다.")
 
-    gone = b[(b["세트재고"] <= 0) & (b["시즌매출"] > 0)]
+    gone = bb[(bb["세트재고"] <= 0) & (bb["시즌매출"] > 0)]
     if len(gone):
         ui.section_head(f"재고 소진 — {len(gone)}종 (팔리는데 재고 0 이하)", icon="⛔")
-        st.dataframe(gone[["관리코드", "상품명", "박스재고", "세트재고", "시즌매출",
+        st.dataframe(gone[["관리코드", "상품명", "상태", "박스재고", "세트재고", "시즌매출",
                            "일평균세트7", "재고음수"]].style.format({
                                "박스재고": "{:,.0f}", "세트재고": "{:,.0f}",
                                "시즌매출": "{:,.0f}", "일평균세트7": "{:,.1f}"}),
                      hide_index=True, width="stretch")
         st.caption("`재고음수 = True` 는 매입 전표 지연일 가능성이 높습니다(시즌 중 흔함). "
-                   "전표가 아니라 실물이 없는 것이면 즉시 판매중지 대상입니다.")
+                   "전표가 아니라 실물이 없는 것이면 **바로 품절 처리할 수 있는 후보**입니다 — "
+                   "재입고가 있으면 `일시품절(재입고예정)`, 없으면 `추가입고없음`으로 두고 "
+                   "채널에서 내리세요.")
 
     ui.section_head("주요채널 무매출 · 저마진", icon="⚠️")
-    watch = b[(b["주요채널계"] <= 0) | ((b["시즌매출"] > 0)
-                                    & (b["마진율"] < float(cfg["절대하한"])))]
+    watch = bb[(bb["주요채널계"] <= 0) | ((bb["시즌매출"] > 0)
+                                       & (bb["마진율"] < float(cfg["절대하한"])))]
     if len(watch):
         st.dataframe(
-            watch[["관리코드", "상품명", "박스재고", "재고금액", "주요채널계", "온라인B2B계", "시즌매출",
+            watch[["관리코드", "상품명", "상태", "박스재고", "재고금액", "주요채널계", "온라인B2B계", "시즌매출",
                    "마진율", "작년시즌", "판정"]].sort_values(
                        "재고금액", ascending=False).style.format({
                            "박스재고": "{:,.0f}", "재고금액": "{:,.0f}",
@@ -645,6 +775,50 @@ with tabs[2]:
                    "나들은 floor anchor라 낮은 게 정상이지만 **0%·역마진은 정상이 아닙니다**.")
     else:
         st.success("무매출·절대하한 미달 없음.")
+
+    # ── 상품 상태 설정 ──────────────────────────────────────────────────────
+    ui.section_head("상품 상태 설정", icon="🏷️")
+    st.caption(
+        "재고 숫자만으로는 **재입고가 오는 품절**과 **그냥 끝난 품절**이 구분되지 않습니다. "
+        "데이터로 유도할 수 없는 영업 판단이라 여기서 직접 지정하고 "
+        "`reference/giftset_status.csv` 에 남깁니다.  \n"
+        "**판매중** 정상 판매 · **일시품절(재입고예정)** 지금 없지만 들어옴 → 채널 유지 · "
+        "**추가입고없음** 이번 시즌 재입고 불가, 잔여 소진으로 종료 → 저마진 채널부터 정리 · "
+        "**판매중지** 채널에서 내림. `미지정`으로 되돌리면 행이 삭제됩니다."
+    )
+    eq = st.text_input("편집 대상 검색", placeholder="코드·상품명 (비우면 전체)",
+                       key="gs_st_q")
+    src = b
+    if eq.strip():
+        _s = eq.strip()
+        src = b[b["관리코드"].str.contains(_s, case=False, na=False)
+                | b["상품명"].str.contains(_s, case=False, na=False)]
+    ed = (src[["관리코드", "상품명", "박스재고", "세트재고", "시즌매출", "상태", "상태비고"]]
+          .rename(columns={"상태비고": "비고"})
+          .sort_values(["상태", "시즌매출"], ascending=[True, False])
+          .reset_index(drop=True))
+    with st.form("gs_status_form"):
+        out = st.data_editor(
+            ed, hide_index=True, width="stretch", height=420, key="gs_status_ed",
+            disabled=["관리코드", "상품명", "박스재고", "세트재고", "시즌매출"],
+            column_config={
+                "상태": st.column_config.SelectboxColumn(
+                    "상태", options=[_STATUS_UNSET] + _STATUS_OPTS, required=True,
+                    width="medium"),
+                "비고": st.column_config.TextColumn("비고", max_chars=60,
+                                                   help="재입고 예정일·중단 사유 등"),
+                "박스재고": st.column_config.NumberColumn(format="%d"),
+                "세트재고": st.column_config.NumberColumn(format="%d"),
+                "시즌매출": st.column_config.NumberColumn(format="%d"),
+            })
+        if st.form_submit_button("💾 상태 저장", type="primary"):
+            ok, msg = _save_status(out.to_dict("records"))
+            (st.success if ok else st.warning)(msg)
+            if ok:
+                st.cache_data.clear()
+                st.rerun()
+    st.caption("검색어를 바꾸면 표가 다시 그려지므로 **저장 전에 검색어를 바꾸면 편집분이 사라집니다.** "
+               "저장은 화면에 보이는 행만 반영하며, 나머지 행은 그대로 보존됩니다.")
 
 # ── 가격변경 ────────────────────────────────────────────────────────────────
 with tabs[3]:
