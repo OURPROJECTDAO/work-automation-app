@@ -999,9 +999,12 @@ def compute(recs: list[dict], refs: dict, cfg: dict) -> list[dict]:
             if base_margin is not None:
                 row["탐지"] = round(마진율 - base_margin, 4)
         # 권장가 (기준마진 달성 판매가, 100원 올림 → 기준마진 이상 보장)
+        # ★역산이 내놓는 값은 `판매가net`(즉시할인·포인트 차감 후)이다. 판매가 필드에 넣을
+        #   값이므로 차감했던 즉시할인·포인트를 **되더해야** 한다. 되더하지 않으면 그만큼
+        #   싸게 팔린다(2026-09-09 발견: 스마트스토어 331건이 평균 2,850원 과소).
         if base_margin is not None and base_margin < 1:
-            권장 = ((매입가 + ship) / (1 - base_margin) - rec["배송비"] * settle) / rate
-            row["권장가"] = _ceil100(권장)
+            권장net = ((매입가 + ship) / (1 - base_margin) - rec["배송비"] * settle) / rate
+            row["권장가"] = _ceil100(권장net + rec["즉시할인"] + rec["포인트"])
         out.append(row)
     return out
 
