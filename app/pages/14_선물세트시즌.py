@@ -45,6 +45,12 @@ _STATUS_DEAD = ("추가입고없음", "판매중지")
 _PROMO_ON = ("Y", "y", "1", "TRUE", "True", "true", "O", "o")
 
 
+def _today_kst():
+    """오늘(KST). ★Streamlit Cloud 서버는 UTC라 `pd.Timestamp.now()`는 KST 09시 전까지 **어제**다
+    → 기준일이 어제로 잡혀 오늘 적재분이 시즌창(end=기준일)에서 잘린다(2026-09-16)."""
+    return pd.Timestamp.now(tz="Asia/Seoul").tz_localize(None).normalize()
+
+
 def _pat() -> str:
     return st.secrets.get("GITHUB_PAT", "")
 
@@ -143,21 +149,43 @@ def _part_index() -> dict:
 
 
 @st.cache_data(ttl=600, show_spinner="매출자료 불러오는 중...")
-def _sales(months: tuple, _index: tuple) -> pd.DataFrame:
+def _sales(months: tuple, part_index: tuple) -> pd.DataFrame:
     """data repo master/sales_YYYY-MM.parquet 지정 월 로드.
-    `_index` = (월, sha) 튜플 — 캐시 무효화 전용 키(값 자체는 안 씀)."""
+    `part_index` = (월, sha) 튜플 — 캐시 무효화 키 + blob 조회 키.
+    ★인자명을 `_` 로 시작하면 st.cache_data 가 **해시에서 제외**한다. 2026-09-07 픽스는
+      `_index` 로 선언해 sha 키가 통째로 무시됐고, 재적재해도 월 목록만으로 600초 캐시가
+      히트했다(2026-09-16 발견)."""
     pat, repo = _data_secret()
     if not pat:
         return pd.DataFrame()
-    avail = {m for m, _ in _index}
+    shas = dict(part_index)
     parts = []
     for ym in months:
-        if ym not in avail:
-            continue
-        p = store.read_partition(pat, repo, ym)
+        p = _read_blob(pat, repo, shas.get(ym, ""))
+        if p is None:       # sha 조회 실패 시에만 경로 읽기 폴백(CDN stale 가능)
+            p = store.read_partition(pat, repo, ym)
         if p is not None and len(p):
             parts.append(p)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+def _read_blob(pat: str, repo: str, sha: str):
+    """파티션을 **blob sha로** 읽는다(내용 주소 → 항상 그 sha의 바이트).
+    ★경로 기반 contents raw 는 방금 PUT 한 파일을 몇 분간 옛 바이트로 줄 수 있고
+      (pitfalls 2026-07-20 read-after-write), 그 옛 내용이 **새 sha 키로 600초 캐시**되면
+      적재했는데 화면은 어제 숫자인 상태가 된다(2026-09-16 실사고)."""
+    if not sha:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/git/blobs/{sha}",
+            headers={"Authorization": f"Bearer {pat}",
+                     "Accept": "application/vnd.github.raw"},
+        )
+        with urllib.request.urlopen(req) as r:
+            return pd.read_parquet(io.BytesIO(r.read()))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _load_sales(a, b) -> pd.DataFrame:
@@ -475,7 +503,7 @@ def _gen_price_form(channel, cfg, pf, recs, rows, pids):
             prev = [{"상품명": ro[p]["상품명"], "현재판매가": int(rb[p]["판매가"]),
                      "새판매가": v[0], "권장가": ro[p]["권장가"]} for p, v in new_prices.items()]
         return {"channel": channel, "bytes": out, "preview": prev,
-                "name": f"선물세트_{channel}_가격변경_{datetime.now():%Y%m%d}.xlsx"}
+                "name": f"선물세트_{channel}_가격변경_{_today_kst():%Y%m%d}.xlsx"}
     except Exception as e:  # noqa: BLE001
         return {"channel": channel, "error": f"생성 오류: {e}"}
 
@@ -574,7 +602,7 @@ def _append_division(names: list, grp: str, source: str = "앱 등록(미분류 
         have = {gsn._nfc(r.get("상호명")) for r in rows}
         cols = list(rows[0].keys()) if rows else ["상호명", "구분", "첫확인", "출처", "비고"]
         added = 0
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = _today_kst().strftime("%Y-%m-%d")
         for n in names:
             if gsn._nfc(n) in have:
                 continue
@@ -606,7 +634,7 @@ def _save_status(edits: list):
     api = f"{_APP_API}/{_STATUS_PATH}"
     hdr = {"Authorization": f"Bearer {_pat()}", "Accept": "application/vnd.github+json",
            "Content-Type": "application/json"}
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = _today_kst().strftime("%Y-%m-%d")
     snap = st.session_state.get("_gs_status_snapshot") or {}
     dead = set(st.session_state.get("_gs_status_deleted") or ())
     for attempt in range(3):
@@ -687,7 +715,7 @@ cfg = _config()
 with st.sidebar:
     st.subheader("⚙️ 시즌 설정")
     st.caption(f"**{cfg['시즌명']}** · D-day {cfg['dday']}")
-    base_day = st.date_input("기준일", value=pd.Timestamp.now().date())
+    base_day = st.date_input("기준일", value=_today_kst().date())
     st.caption("다른 페이지(데이터현황)에서 적재했는데 반영이 안 되면 아래를 누르세요.")
     if st.button("🔄 데이터 새로고침"):
         st.cache_data.clear()
@@ -783,11 +811,18 @@ st.caption(
 _last = pd.to_datetime(cur["거래일자"], errors="coerce").max() if len(cur) else None
 if _last is not None and pd.notna(_last):
     _gap = (pd.Timestamp(base_day) - _last.normalize()).days
-    _txt = f"📥 적재된 매출 최신 거래일 **{_last:%Y-%m-%d}** (기준일 대비 {_gap}일 전)"
-    (st.caption if _gap <= 1 else st.warning)(
-        _txt if _gap <= 1 else _txt + " — 최근 매출이 빠져 있습니다. "
-        "**[데이터 적재]** 탭에서 올리거나, 다른 페이지에서 적재했다면 사이드바 "
-        "**🔄 데이터 새로고침**을 누르세요.")
+    _idx = _part_index()
+    _ym = pd.Timestamp(base_day).strftime("%Y-%m")
+    _txt = (f"📥 적재된 매출 최신 거래일 **{_last:%Y-%m-%d}** (기준일 대비 {_gap}일 전) · "
+            f"`sales_{_ym}` sha `{(_idx.get(_ym) or '-')[:8]}`")
+    _hint = (" — 데이터현황에서 방금 적재했다면 사이드바 **🔄 데이터 새로고침**을 누르세요"
+             "(파티션 목록은 최대 1분 뒤 갱신).")
+    if _gap <= 0:
+        st.caption(_txt)
+    elif _gap == 1:
+        st.info(_txt + " — 오늘 매출은 아직 없습니다(적재 전이면 정상)." + _hint)
+    else:
+        st.warning(_txt + " — 최근 매출이 빠져 있습니다. **[데이터 적재]** 탭에서 올리거나" + _hint)
 
 dc = st.columns(4)
 dc[0].metric("인터넷사업부 계", _won(k["사업부매출"]),
